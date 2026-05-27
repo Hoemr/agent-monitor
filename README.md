@@ -25,28 +25,19 @@ Agent Monitor is a **pixel-mechanical styled always-on-top widget** that gives y
 
 ---
 
-## Screenshot
+## Screenshots
 
-```
-+----------------------------------+
-| A  AGENT MONITOR         02 [R]  |
-+----------------------------------+
-|> research-paper            2 LIVE|
-|  [-] papers/arxiv         DONE 2F|
-|  | [>] Refine methodology.. MIMO |
-|  | Running Bash // python ...    |
-|  | TKN 1.2K/0.5K T+5m MSG 183   |
-|  | [v] Draft intro section MIMO  |
-|  | Waiting for you               |
-|                                  |
-|> my-web-app                1 LIVE|
-|  [+] projects/web         ACTIVE |
-|  | [v] Setup CI pipeline.. MIMO  |
-|  | Finished                      |
-+----------------------------------+
-| 2P | 3F | 2 LIVE        14:32:07 |
-+----------------------------------+
-```
+### Collapsed view — all projects folded
+
+![Agent Monitor collapsed](screenshots/collapsed.png)
+
+### Expanded view — sessions visible with tool details
+
+![Agent Monitor expanded](screenshots/expanded.png)
+
+### Active sessions — real-time status with live indicators
+
+![Agent Monitor active](screenshots/active.png)
 
 ---
 
