@@ -31,20 +31,20 @@ Agent Monitor is a **pixel-mechanical styled always-on-top widget** that gives y
 +----------------------------------+
 | A  AGENT MONITOR         02 [R]  |
 +----------------------------------+
-|> OPSD-paper               4 LIVE |
-|  [-] paper/OPSD          DONE  2F|
-|  | [>] Implement paper...  MIMO  |
-|  | Running Bash // python...     |
+|> research-paper            2 LIVE|
+|  [-] papers/arxiv         DONE 2F|
+|  | [>] Refine methodology.. MIMO |
+|  | Running Bash // python ...    |
 |  | TKN 1.2K/0.5K T+5m MSG 183   |
-|  | [v] Restructure Relat.. MIMO  |
+|  | [v] Draft intro section MIMO  |
 |  | Waiting for you               |
 |                                  |
-|> ClaudeCode-Monitor       1 LIVE |
-|  [+] codepath/ClaudeCo..  ACTIVE |
-|  | [v] Agent Monitor pr..  MIMO  |
+|> my-web-app                1 LIVE|
+|  [+] projects/web         ACTIVE |
+|  | [v] Setup CI pipeline.. MIMO  |
 |  | Finished                      |
 +----------------------------------+
-| SYS OK                  14:32:07 |
+| 2P | 3F | 2 LIVE        14:32:07 |
 +----------------------------------+
 ```
 
@@ -93,7 +93,7 @@ Agent Monitor uses a terminal-inspired visual language optimized for quick scann
 ```
 ~/.claude/
 ├── projects/                    # All Claude Code sessions live here
-│   ├── d--codepath-MyProject/   # Encoded project path (workspaceToProjectName)
+│   ├── d--dev-MyProject/        # Encoded project path (workspaceToProjectName)
 │   │   ├── <uuid>.jsonl        # Session transcript files
 │   │   └── ...
 │   └── ...

@@ -68,7 +68,7 @@ Agent Monitor 使用一套类似终端的视觉语言，便于快速扫视：
 ```
 ~/.claude/
 ├── projects/                    # 所有 Claude Code 会话存放处
-│   ├── d--codepath-MyProject/   # 编码后的项目路径 (workspaceToProjectName)
+│   ├── d--dev-MyProject/        # 编码后的项目路径 (workspaceToProjectName)
 │   │   ├── <uuid>.jsonl        # 会话记录文件
 │   │   └── ...
 │   └── ...
