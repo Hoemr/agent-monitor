@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="style.css">
+  <title>Agent Monitor</title>
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="header-left">
+        <span class="logo">A</span>
+        <span class="title">AGENT MONITOR</span>
+      </div>
+      <div class="header-right">
+        <button id="refresh-btn" title="Refresh">[R]</button>
+        <button id="settings-btn" title="Settings">[*]</button>
+      </div>
+    </header>
+    <main id="content">
+      <div id="empty-state">
+        <div class="boot-text">
+          <span class="blink">_</span> INITIALIZING...<br>
+          SCANNING ACTIVE SESSIONS...
+        </div>
+      </div>
+    </main>
+    <footer id="footer">
+      <span id="footer-status" class="footer-text">0P | 0F | 0 LIVE</span>
+      <span id="clock" class="footer-text">00:00:00</span>
+    </footer>
+  </div>
+  <div id="ctx-menu" style="display:none">
+    <div class="ctx-item" data-action="refresh">[R] REFRESH</div>
+    <div class="ctx-item" data-action="prefs">[*] SETTINGS</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" data-action="hide">[_] HIDE</div>
+    <div class="ctx-item ctx-quit" data-action="quit">[X] QUIT</div>
+  </div>
+
+  <div id="prefs-overlay" style="display:none"></div>
+  <div id="prefs-panel" style="display:none">
+    <div class="prefs-title" id="prefs-title">[*] SETTINGS</div>
+    <div class="prefs-row">
+      <span class="prefs-label" id="prefs-label-height">HEIGHT</span>
+      <select id="pref-size" class="prefs-select"></select>
+    </div>
+    <div class="prefs-row">
+      <span class="prefs-label" id="prefs-label-poll">POLL INT</span>
+      <select id="pref-poll" class="prefs-select"></select>
+    </div>
+    <div class="prefs-row">
+      <span class="prefs-label" id="prefs-label-lang">LANGUAGE</span>
+      <select id="pref-lang" class="prefs-select"></select>
+    </div>
+    <div class="prefs-row">
+      <span class="prefs-label" id="prefs-label-ct">CLICK THRU</span>
+      <label class="prefs-toggle"><input type="checkbox" id="pref-clickthrough"><span class="toggle-track"></span></label>
+    </div>
+    <div class="prefs-row">
+      <span class="prefs-label" id="prefs-label-op">OPACITY</span>
+      <input type="range" id="pref-opacity" min="30" max="100" class="prefs-range">
+      <span id="pref-opacity-val" class="prefs-label">100%</span>
+    </div>
+    <div class="prefs-buttons">
+      <button id="pref-ok" class="pref-btn">[ OK ]</button>
+      <button id="pref-cancel" class="pref-btn">[ CANCEL ]</button>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

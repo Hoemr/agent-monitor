@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegui/tauri-schema/refs/heads/main/capabilities/v2/default.json",
+  "identifier": "default",
+  "description": "Default capability for Claude Float",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default"
+  ]
+}

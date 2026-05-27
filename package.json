@@ -1,0 +1,12 @@
+{
+  "name": "agent-monitor",
+  "version": "0.3.0",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "serve": "npx -y serve src -l 1420 --no-clipboard"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
