@@ -1,0 +1,19 @@
+{
+  "name": "agent-monitor",
+  "version": "0.3.0",
+  "description": "A pixel-mechanical floating desktop widget for real-time AI coding agent session monitoring",
+  "repository": "github:Hoemr/agent-monitor",
+  "license": "MIT",
+  "bin": {
+    "agent-monitor": "bin/agent-monitor.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/install.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "keywords": ["claude-code", "codex", "monitor", "desktop", "tauri", "widget"],
+  "os": ["win32", "darwin", "linux"],
+  "cpu": ["x64", "arm64"]
+}

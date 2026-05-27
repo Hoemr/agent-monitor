@@ -27,17 +27,9 @@ Agent Monitor is a **pixel-mechanical styled always-on-top widget** that gives y
 
 ## Screenshots
 
-### Collapsed view — all projects folded
-
-![Agent Monitor collapsed](screenshots/collapsed.png)
-
-### Expanded view — sessions visible with tool details
-
-![Agent Monitor expanded](screenshots/expanded.png)
-
-### Active sessions — real-time status with live indicators
-
-![Agent Monitor active](screenshots/active.png)
+| Folded | Active sessions |
+|---|---|
+| ![collapsed](screenshots/collapsed.png) | ![active](screenshots/active.png) |
 
 ---
 
@@ -122,16 +114,32 @@ Each JSONL line is parsed to extract:
 
 ### Download (Recommended)
 
-Go to [GitHub Releases](https://github.com/Hoemr/agent-monitor/releases) and download the binary for your platform:
+Go to [GitHub Releases](https://github.com/Hoemr/agent-monitor/releases) and download the binary for your platform. No installer, no dependencies.
 
-| Platform | File | Size |
-|---|---|---|
-| **Windows** | `agent-monitor.exe` | ~4.5MB |
-| **macOS** (Intel) | `agent-monitor-x86_64-apple-darwin` | ~5MB |
-| **macOS** (Apple Silicon) | `agent-monitor-aarch64-apple-darwin` | ~5MB |
-| **Linux** | `agent-monitor-x86_64-unknown-linux-gnu` | ~6MB |
+### npm
 
-Releases are built automatically by GitHub Actions on every version tag (`v*`). No installer, no dependencies — just download and run.
+```bash
+npm install -g agent-monitor
+agent-monitor
+```
+
+### Homebrew (macOS)
+
+```bash
+brew tap Hoemr/agent-monitor
+brew install agent-monitor
+```
+
+### Platform Binaries
+
+| Platform | File |
+|---|---|
+| **Windows** | `agent-monitor.exe` |
+| **macOS** (Intel) | `agent-monitor-x86_64-apple-darwin` |
+| **macOS** (Apple Silicon) | `agent-monitor-aarch64-apple-darwin` |
+| **Linux** | `agent-monitor-x86_64-unknown-linux-gnu` |
+
+Releases are built automatically by GitHub Actions on every version tag (`v*`).
 
 ### Build from Source
 
