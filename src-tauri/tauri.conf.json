@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/tauri-schema/refs/heads/main/tauri.conf.v2.0.json",
   "productName": "Agent Monitor",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "identifier": "com.agent.monitor",
   "build": {
     "beforeDevCommand": "npx -y serve src -l 1420 --no-clipboard",

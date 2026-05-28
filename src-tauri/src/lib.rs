@@ -765,6 +765,7 @@ fn start_watcher(app: AppHandle) {
 fn show_window(win: &tauri::WebviewWindow) {
     let _ = win.unminimize();
     let _ = win.show();
+    let _ = win.set_skip_taskbar(true);
     let _ = win.set_focus();
 }
 
@@ -840,6 +841,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
+                let _ = win.set_skip_taskbar(true);
                 let _ = win.set_focus();
             }
         }))
