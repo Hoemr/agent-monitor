@@ -268,6 +268,12 @@ fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
     }
 
     remember_rect(app, target);
+    if std::env::var("AGENT_MONITOR_DEBUG_GEOMETRY").is_ok() {
+        eprintln!(
+            "geometry: mode={:?} current={:?} target={:?} scale={}",
+            mode, current, target, scale
+        );
+    }
     if animated {
         animate(&win, current, target);
     } else {

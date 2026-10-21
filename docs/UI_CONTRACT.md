@@ -90,17 +90,27 @@ loads the mock path.
 
 ## Presentation rules (current)
 
+* **macOS material**: the window uses Tauri `windowEffects: popover` (real
+  NSVisualEffectView vibrancy, radius 16). CSS only adds a translucent tint; it
+  must not add `backdrop-filter` (it samples black over a transparent window).
+* **Appearance**: `color-scheme: light dark` + `light-dark()` tokens; the popover
+  follows the system appearance. Light and dark are both first-class.
 * **Tray-only app**: accessory activation policy, no Dock icon, no app-switcher
   entry. The menu-bar item is the only entry point.
 * **System typography**: SF Pro / PingFang SC stack; no webfont is loaded.
+* **Row hierarchy**: title on the first line (13 px, primary); agent name
+  (secondary), one status dot + label, and an optional short summary on the second
+  line; time + jump level right-aligned. No uppercase labels and no `A · B · C`
+  middle-dot meta strings (summaries use commas).
 * **Ordering**: the snapshot is already sorted by `last_activity_secs` descending
   (newest conversation first). The UI must render in snapshot order and must not
-  re-group by status; attention is surfaced by the badge, the row accent and the
-  glyph.
+  re-group by status; attention is surfaced by the header count and the coloured
+  state dot/Label.
 
 ## Interaction rules implemented by the frontend
 
-* Collapsed: small round indicator (72×72) with attention badge; click expands.
+* Collapsed: 72×72 translucent squircle with a three-bar glyph and a blue count
+  badge; click expands. The 72 px shape matches the native effect's 16 px radius.
 * Expanded: fixed max height (5 rows visible, scroll for more) with one row per
   task showing agent name, title (ellipsis + `title` tooltip), status text **and**
   icon (not colour alone), relative last-activity time, and jump-level hint.

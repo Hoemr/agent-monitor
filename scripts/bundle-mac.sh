@@ -5,6 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+MINOS=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['bundle']['macOS']['minimumSystemVersion'])")
 BIN=src-tauri/target/release/agent-monitor
 APP="dist/Agent Monitor.app"
 [ -x "$BIN" ] || { echo "build first: (cd src-tauri && cargo build --release)"; exit 1; }
@@ -36,7 +37,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleIconFile</key><string>icon.icns</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSMinimumSystemVersion</key><string>${MINOS}</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppleEventsUsageDescription</key>

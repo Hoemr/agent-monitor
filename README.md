@@ -2,17 +2,24 @@
 
 A small, quiet **menu-bar/tray-only** desktop pet (no Dock icon) that shows every
 parallel coding-agent session in one place — newest activity first — and jumps to
-the right window/session when you click a task. Normal system typography, no
-webfonts.
+the right window/session when you click a task.
+
+It is built to look like a native macOS popover: real **vibrancy material**
+(NSVisualEffectView `popover`), SF system typography, semantic system colours,
+hairline separators, and an interface that follows the system light/dark
+appearance. No webfonts, no dashboard chrome.
 
 Built on the existing Agent Monitor project (Tauri 2 + Rust + vanilla JS) — the
 monitoring core was refactored rather than replaced, the old Claude-Code-only
 scanner was ported into a proper adapter, and the always-on widget became a
 dockable, edge-snapping pet.
 
-| Collapsed pet | Expanded task list |
+| Dark appearance | Light appearance |
 |---|---|
-| ![collapsed](screenshots/pet-collapsed.png) | ![expanded](screenshots/pet-expanded.png) |
+| ![expanded dark](screenshots/pet-expanded-dark.png) | ![expanded light](screenshots/pet-expanded-light.png) |
+
+*(Previews rendered from the shipped HTML/CSS with the labelled `SIM` fixture, over a desktop backdrop to show the translucent material.)*
+| ![collapsed dark](screenshots/pet-collapsed-dark.png) | ![collapsed light](screenshots/pet-collapsed-light.png) |
 
 ## Supported agents (real local data, no APIs assumed)
 
@@ -46,8 +53,10 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
   entry; everything lives in the menu-bar item. Reliable recall: tray → Show Pet /
   Reset Position; a second launch also restores the pet. It never steals keyboard
   focus on launch, updates, or hover.
-* **System typography**: SF Pro / PingFang SC system stack, no pixel webfont, no
-  external font downloads; status is text + glyph, not colour alone.
+* **Native macOS look**: translucent popover material that follows system
+  light/dark appearance; SF Pro / PingFang SC typography; one state dot per row
+  plus a text label (never colour alone); title-first hierarchy; no uppercase
+  labels, no card grids, no decorative gradients.
 * **Low resource use**: event-driven file watching with a slow fallback tick; no
   per-task timers; no faster-than-30 s UI timer; identical snapshots are not
   re-rendered.
@@ -56,7 +65,7 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
 
 ## Build and run
 
-Requirements: macOS 11+, Rust (stable), Command Line Tools. No Xcode project and
+Requirements: macOS 14.5+ (for `light-dark()` appearance support), Rust (stable), Command Line Tools. No Xcode project and
 no Node build step are required.
 
 ```bash

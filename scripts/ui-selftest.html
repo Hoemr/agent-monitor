@@ -52,7 +52,7 @@ frame.addEventListener('load', async function () {
     //    (same macrotask as mouseup, exactly like a real click event)
     T.applyPetState({ mode: 'expanded' });
     await sleep(30);
-    var handle = doc.getElementById('drag-handle');
+    var handle = doc.getElementById('dragbar');
     var beforeDrag = T.jumpCalls.length;
     fire(win, handle, 'mousedown', { clientX: 10, clientY: 10, button: 0 });
     fire(win, doc, 'mousemove', { clientX: 46, clientY: 28 });

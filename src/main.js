@@ -39,7 +39,7 @@ function startWindowDrag() {
 
 var I18N = {
   en: {
-    title: 'AGENT MONITOR',
+    sessionsTitle: 'Sessions',
     empty: 'No active sessions',
     emptyHint: 'Start a Codex, DSH, ZCode or Claude Code session',
     sessions: 'sessions',
@@ -79,7 +79,7 @@ var I18N = {
     }
   },
   zh: {
-    title: 'AGENT MONITOR',
+    sessionsTitle: '会话',
     empty: '暂无活跃会话',
     emptyHint: '启动 Codex、DSH、ZCode 或 Claude Code 会话',
     sessions: '个会话',
@@ -145,9 +145,10 @@ var petEl = document.getElementById('pet');
 var badgeEl = document.getElementById('badge');
 var panelEl = document.getElementById('panel');
 var listEl = document.getElementById('list');
-var dragHandleEl = document.getElementById('drag-handle');
+var dragbarEl = document.getElementById('dragbar');
 var collapseBtn = document.getElementById('collapse-btn');
-var attentionEl = document.getElementById('attention');
+var headerMetaEl = document.getElementById('header-meta');
+var panelTitleEl = document.getElementById('panel-title');
 var footerCountEl = document.getElementById('footer-count');
 var footerHintEl = document.getElementById('footer-hint');
 var langBtn = document.getElementById('lang-btn');
@@ -173,16 +174,10 @@ var pointerDown = null;
 var dragged = false;
 
 var STATUS_GLYPH = {
-  running: '▶', waiting_input: '?', waiting_approval: '!',
-  completed: '✓', failed: '✕', idle: '○', unknown: '·'
+  running: '●', waiting_input: '!', waiting_approval: '!',
+  completed: '✓', failed: '✕', idle: '○', unknown: '?'
 };
 
-var AGENT_COLORS = ['#7aa2f7', '#4ade80', '#c084fc', '#fbbf24', '#f472b6', '#38bdf8'];
-function agentColor(key) {
-  var h = 0;
-  for (var i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
-  return AGENT_COLORS[h % AGENT_COLORS.length];
-}
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -229,11 +224,14 @@ function render(snapshotData) {
     ? t('collapsedAria').replace('{n}', tasks.length).replace('{a}', attention)
     : t('emptyAria'));
 
-  attentionEl.hidden = attention === 0;
-  attentionEl.textContent = '⚠ ' + attention;
+  panelTitleEl.textContent = t('sessionsTitle');
+  headerMetaEl.hidden = attention === 0;
+  headerMetaEl.textContent = attention > 0
+    ? attention + ' ' + t('needAttention')
+    : '';
 
   footerCountEl.textContent = tasks.length + ' ' + t('sessions');
-  footerHintEl.textContent = attention > 0 ? attention + ' ' + t('needAttention') : '';
+  footerHintEl.textContent = '';
   langBtn.textContent = lang === 'en' ? '中' : 'EN';
 
   if (petState.mode === 'expanded' || petState.mode === 'dragging') renderList(tasks);
@@ -246,8 +244,8 @@ function renderList(tasks) {
 
   if (!tasks.length) {
     var empty = el('div', 'empty');
-    empty.appendChild(el('div', '', t('empty')));
-    empty.appendChild(el('div', 'dim', t('emptyHint')));
+    empty.appendChild(el('div', 'empty-title', t('empty')));
+    empty.appendChild(el('div', 'empty-hint', t('emptyHint')));
     listEl.appendChild(empty);
     return;
   }
@@ -264,7 +262,6 @@ function renderTask(task) {
     task.status === 'waiting_approval' || task.status === 'failed' ? ' attention' : '');
   row.setAttribute('role', 'listitem');
   row.dataset.taskId = task.id;
-  row.style.setProperty('--agent-color', agentColor(task.agent_key || ''));
 
   var statusLabel = t('status.' + task.status) || task.status;
   row.setAttribute('aria-label',
@@ -274,17 +271,16 @@ function renderTask(task) {
     (task.status_reason || '') + '\n' + t('jumpHint') + ' (' + (task.level || 'L0') + ')';
 
   var top = el('div', 'task-top');
-  top.appendChild(el('span', 'agent', task.agent_name));
-  if (task.origin === 'synthetic') top.appendChild(el('span', 'sim', 'SIM'));
   var title = el('span', 'title', task.title);
   title.title = task.title;
   top.appendChild(title);
 
   var status = el('div', 'status');
-  status.appendChild(el('span', 'status-glyph', STATUS_GLYPH[task.status] || '·'));
-  var statusText = statusLabel;
-  if (task.summary) statusText += ' · ' + task.summary;
-  status.appendChild(el('span', 'status-text', statusText));
+  status.appendChild(el('span', 'agent', task.agent_name));
+  if (task.origin === 'synthetic') status.appendChild(el('span', 'sim', 'SIM'));
+  status.appendChild(el('span', 'status-glyph', STATUS_GLYPH[task.status] || '?'));
+  status.appendChild(el('span', 'status-text', statusLabel));
+  if (task.summary) status.appendChild(el('span', 'status-summary', task.summary));
 
   var meta = el('div', 'meta');
   var timeEl = el('span', 'time', relativeTime(task.last_activity_secs));
@@ -479,7 +475,8 @@ petEl.addEventListener('keydown', function (event) {
   }
 });
 
-dragHandleEl.addEventListener('mousedown', function (event) {
+dragbarEl.addEventListener('mousedown', function (event) {
+  if (event.button !== 0 || event.target.closest('button')) return;
   onPointerDown(event, 'handle');
   startWindowDrag();
 });
@@ -528,7 +525,7 @@ function mockSnapshot() {
       { id: 'codex:1', agent_key: 'codex', agent_name: 'Codex', host: 'desktop', title: 'Refactor the pet geometry and snap rules', status: 'running', status_reason: 'task_started', last_activity_secs: now - 20, collected_at_secs: now, summary: 'Editing pet.rs', origin: 'index', target: {}, target_validity: 'valid', invalid_reason: null, capability: { max_level: 'L3', notes: '', requires: [] }, level: 'L3', pinned: false },
       { id: 'dsh:2', agent_key: 'dsh', agent_name: 'DSH', host: 'desktop', title: 'Prove the finite-sample bridge conjecture', status: 'waiting_approval', status_reason: 'approval/policy', last_activity_secs: now - 90, collected_at_secs: now, summary: null, origin: 'cache', target: {}, target_validity: 'valid', invalid_reason: null, capability: { max_level: 'L3', notes: '', requires: [] }, level: 'L3', pinned: false },
       { id: 'zcode:3', agent_key: 'zcode', agent_name: 'ZCode', host: 'desktop', title: '美化论文 Figure 1 与 ML 写作规范', status: 'completed', status_reason: 'task_status = completed', last_activity_secs: now - 3600, collected_at_secs: now, summary: 'GLM-5.3-Flash', origin: 'index', target: {}, target_validity: 'valid', invalid_reason: null, capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false },
-      { id: 'claude-code:4', agent_key: 'claude-code', agent_name: 'Claude Code', host: 'vscode', title: 'Fix the failing LaTeX build in the appendix', status: 'waiting_input', status_reason: 'ask user question', last_activity_secs: now - 240, collected_at_secs: now, summary: 'OPUS · 12 msg', origin: 'event', target: {}, target_validity: 'valid', invalid_reason: null, capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false },
+      { id: 'claude-code:4', agent_key: 'claude-code', agent_name: 'Claude Code', host: 'vscode', title: 'Fix the failing LaTeX build in the appendix', status: 'waiting_input', status_reason: 'ask user question', last_activity_secs: now - 240, collected_at_secs: now, summary: 'OPUS, 12 messages', origin: 'event', target: {}, target_validity: 'valid', invalid_reason: null, capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false },
       { id: 'dsh:5', agent_key: 'dsh', agent_name: 'DSH', host: 'desktop', title: 'Training-free DRE literature positioning audit with a very long title that must be ellipsized', status: 'failed', status_reason: 'turn aborted', last_activity_secs: now - 7200, collected_at_secs: now, summary: 'turn 3', origin: 'cache', target: {}, target_validity: 'invalid', invalid_reason: 'workspace_missing', capability: { max_level: 'L3', notes: '', requires: [] }, level: 'L0', pinned: false },
       { id: 'sim:6', agent_key: 'simulated', agent_name: 'Simulated Agent', host: 'fixture', title: 'Extension acceptance fixture', status: 'running', status_reason: 'fixture', last_activity_secs: now - 5, collected_at_secs: now, summary: 'fixture', origin: 'synthetic', target: {}, target_validity: 'unconfirmed', invalid_reason: null, capability: { max_level: 'L1', notes: '', requires: [] }, level: 'L1', pinned: false }
     ]
@@ -583,6 +580,16 @@ if (MOCK) {
 
 function boot() {
   appEl.setAttribute('data-lang', lang);
+
+  if (MOCK) {
+    var appearance = (location.search.match(/appearance=(light|dark)/) || [])[1];
+    if (appearance) document.documentElement.style.colorScheme = appearance;
+    // Design preview only: paint a desktop-like backdrop behind the translucent
+    // material so screenshots show the real vibrancy composition.
+    if (location.search.indexOf('desktop=1') !== -1) {
+      document.documentElement.classList.add('mock-desktop');
+    }
+  }
   document.addEventListener('contextmenu', function (event) { event.preventDefault(); });
 
   if (MOCK) {
@@ -599,8 +606,8 @@ function boot() {
   invoke('get_snapshot').then(render).catch(function (err) {
     listEl.textContent = '';
     var empty = el('div', 'empty');
-    empty.appendChild(el('div', '', 'ERR'));
-    empty.appendChild(el('div', 'dim', String(err)));
+    empty.appendChild(el('div', 'empty-title', 'Unable to read sessions'));
+    empty.appendChild(el('div', 'empty-hint', String(err)));
     listEl.appendChild(empty);
   });
 

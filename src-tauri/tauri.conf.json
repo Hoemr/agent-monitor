@@ -27,7 +27,14 @@
         "acceptFirstMouse": true,
         "visible": false,
         "visibleOnAllWorkspaces": true,
-        "center": false
+        "center": false,
+        "windowEffects": {
+          "effects": [
+            "popover"
+          ],
+          "state": "active",
+          "radius": 16
+        }
       }
     ],
     "trayIcon": {
@@ -50,7 +57,7 @@
       "app"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "14.5"
     }
   }
 }

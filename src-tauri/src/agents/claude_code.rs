@@ -594,7 +594,7 @@ fn to_record(session: &Session, file_mtime: u64, ctx: &ScanCtx) -> TaskRecord {
     let summary = if summary_parts.is_empty() {
         None
     } else {
-        Some(truncate_chars(&summary_parts.join(" · "), 60))
+        Some(truncate_chars(&summary_parts.join(", "), 60))
     };
     let workspace_exists = Path::new(&session.project_path).is_dir();
     let title = if session.name.trim().is_empty() {

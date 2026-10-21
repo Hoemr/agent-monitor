@@ -102,9 +102,12 @@ permission needed) on the release app:
 | expanded (40 tasks, 5 visible rows) | 360×390, right-anchored inward | `X=1560 Y=435 W=360 H=390` |
 | edge-hidden | 14 px sliver visible at right | `X=1906 Y=435 W=72 H=72` → visible 14 px |
 | recall via second launch (single-instance) | visible collapsed pet | `X=1848 Y=435 W=72 H=72` |
+| geometry after vibrancy change (screen was locked, `CGWindowList` unreliable) | internal window targets | `AGENT_MONITOR_DEBUG_GEOMETRY=1`: expanded target `Rect { x: 1560, y: 453.6, w: 360, h: 390 }`; edge-hidden target `x: 1906, w: 72` (14 px visible); collapsed start `72×72`; work-area picked up the lock-screen frame change automatically |
 | focus at launch | current app keeps focus | frontmost stayed `访达` → `访达` |
 | tray-only (no Dock icon) | accessory activation policy | `NSRunningApplication.activationPolicy = accessory`; System Events `background only = true` (bundled `.app` **and** bare binary) |
 | typography | normal system fonts | pixel webfont removed; UI uses SF Pro / PingFang SC stack (see screenshots) |
+| macOS material / appearance | native vibrancy + light/dark | `windowEffects: popover` (radius 16) applied; CSS uses `light-dark()` tokens; no runtime errors; dark/light previews rendered from the shipped HTML/CSS (native window screenshots are unavailable without Screen Recording permission) |
+| row hierarchy | title-first, one state dot | title on line 1; agent/state/summary on line 2; no uppercase labels or middle-dot meta strings |
 
 UI acceptance is automated headlessly (`npm run ui-test`, Chrome drives real DOM
 events in the shipped page): **ALL PASS, 24 checks**, including:
@@ -128,6 +131,22 @@ Reliable recall: tray menu `Show Pet`, `Hide to Edge`, `Reset Position`, plus a
 second launch (single-instance handler) restores a visible pet — verified.
 
 ---
+
+## Phase 3b — visual redesign (macOS popover)
+
+Native window appearance cannot be captured on this host (Screen Recording
+permission is not granted to the probe shell), so the material is verified in two
+ways (the final geometry check was also done through the app's own
+`AGENT_MONITOR_DEBUG_GEOMETRY` log because the display was locked): (a) the release app launches with `windowEffects` applied and no WebKit/
+winit errors; (b) the shipped HTML/CSS is rendered in a single document over a
+desktop-like backdrop (`?mock=1&desktop=1&appearance=dark|light`, design preview
+only), which is exactly how the translucent CSS composes over the native material
+view. Screenshots: `screenshots/pet-expanded-{dark,light}.png` and
+`pet-collapsed-{dark,light}.png`.
+
+Design changes: system font stack, native popover material, semantic macOS
+colours, title-first rows, one coloured state dot + text label, hairline
+separators, no uppercase labels, no middle-dot meta strings, light/dark support.
 
 ## Phase 4 — displays, performance, extension, docs
 

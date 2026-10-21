@@ -207,3 +207,14 @@ Assumptions / pending verification:
     activation; a delayed re-assert (~250 ms and ~1.2 s) makes
     `NSRunningApplication.activationPolicy == .accessory` stable and removes the
     Dock icon in both the `.app` and the bare binary.
+
+12. **Visual direction (final pass).** The interface now uses the Anthropic
+    `frontend-design` guidance reviewed against the brief: avoid the generic
+    "dark dashboard + acid accent + all-caps labels + middle-dot meta + card
+    grid" kit. Direction chosen instead: a native macOS popover — NSVisualEffectView
+    `popover` material (Tauri `windowEffects`, radius 16), SF system typography,
+    semantic system colours, hairline separators, title-first rows, one state dot
+    plus a text label, and full light/dark appearance support via
+    `color-scheme`/`light-dark()`. `backdrop-filter` was removed: over a
+    transparent window it samples black instead of the desktop and would hide the
+    native material. The collapsed 72 px squircle radius matches the effect radius.

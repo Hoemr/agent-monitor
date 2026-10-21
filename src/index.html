@@ -7,28 +7,27 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div id="app" class="mode-collapsed no-tasks" data-lang="en">
-    <!-- Collapsed pet indicator -->
+  <div id="app" class="mode-collapsed no-tasks">
+    <!-- Collapsed pet -->
     <div id="pet" role="button" tabindex="0"
          aria-label="Agent Monitor, no active sessions, click to expand">
-      <div class="pet-core" aria-hidden="true">
-        <span class="pet-glyph" aria-hidden="true"><i></i><i></i><i></i></span>
-      </div>
+      <span class="pet-glyph" aria-hidden="true"><i></i><i></i><i></i></span>
       <span id="badge" class="badge" hidden aria-hidden="true">0</span>
       <span class="pet-grip" aria-hidden="true"></span>
     </div>
 
-    <!-- Expanded panel -->
-    <section id="panel" hidden aria-label="Task list">
+    <!-- Expanded popover -->
+    <section id="panel" hidden aria-label="Sessions">
       <header id="dragbar">
-        <span id="drag-handle" class="drag-handle" title="Drag to move" aria-label="Drag to move">⠿</span>
-        <span class="panel-title" id="panel-title">Agent Monitor</span>
-        <span id="attention" class="attention-pill" hidden></span>
-        <button id="collapse-btn" class="icon-btn" aria-label="Collapse">−</button>
+        <h1 class="panel-title" id="panel-title">Sessions</h1>
+        <span id="header-meta" class="header-meta" hidden></span>
+        <button id="collapse-btn" class="icon-btn" aria-label="Collapse" title="Collapse">
+          <span class="chevron" aria-hidden="true"></span>
+        </button>
       </header>
       <main id="list" role="list" tabindex="-1"></main>
       <footer id="footer">
-        <span id="footer-count">0</span>
+        <span id="footer-count"></span>
         <span id="footer-hint" class="dim"></span>
         <button id="lang-btn" class="link-btn" aria-label="Switch language">中</button>
       </footer>

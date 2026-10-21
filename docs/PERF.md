@@ -18,27 +18,25 @@ the only build of Agent Monitor running.
   (each summary now carries `valid: true`; dead/replaced processes invalidate a run);
 * process killed afterwards; no mock data is used except the empty-snapshot mode.
 
-## Results — final build 0.4.1 (300 s per state, 60 samples each)
+## Results — final build 0.4.1 (macOS popover/vibrancy UI)
 
-Measured after the visual refactor (system fonts), tray-only policy and
-newest-first ordering. Each run is validated: the sampler aborts and marks the
-run invalid if the process dies or its CPU counter goes backwards.
+Measured after the macOS-native redesign (NSVisualEffectView `popover` material,
+SF system typography, light/dark supporting CSS). Each run is validated: the
+sampler aborts and marks the run invalid if the process dies or its CPU counter
+goes backwards.
 
 | State | Tasks in snapshot | CPU mean | CPU p95 | CPU max | RSS start → end | RSS growth |
 |---|---|---|---|---|---|---|
-| Edge-hidden (14 px sliver) | 40 real | **0.05 %** | 0.20 % | 0.20 % | 98.2 → 84.5 MB | **−13.7 MB** |
-| Idle, no tasks (collapsed) | 0 (empty mode) | **0.03 %** | 0.20 % | 0.20 % | 92.3 → 92.2 MB | **−0.14 MB** |
-| Expanded, 40 tasks (5 visible, scrollable) | 40 real | **0.21 %** | 1.00 % | 1.40 % | 97.8 → 90.0 MB | **−7.8 MB** |
+| Edge-hidden (14 px sliver) | 40 real | **0.083 %** | 0.20 % | 0.20 % | 95.4 → 91.3 MB | **−4.2 MB** |
+| Expanded, 40 tasks (5 visible, scrollable) | 40 real | **0.086 %** | 0.20 % | 0.20 % | 95.6 → 95.8 MB | **+0.2 MB** |
+| Idle, no tasks (collapsed) | 0 (empty mode) | **0.033 %** | 0.20 % | 0.20 % | 91.7 → 91.8 MB | **+0.1 MB** |
 
 Interpretation:
 
-* Every state is comfortably below the suggested **< 1 % of one core** budget on
-  average. The expanded state's p95 touches 1.0 % because the live DSH sessions
-  produce snapshot updates and row re-renders; this is the intended active state,
-  not idle overhead.
-* RSS decreases in all three runs (allocator returning pages) — no continuous
-  memory growth. The earlier 0.4.0 short idle run that showed +9.9 MB was
-  WebKit warm-up; the 600 s run below confirms the trend reverses.
+* All three states are far below the suggested **< 1 % of one core** budget;
+  the native material does not add measurable CPU in the hidden, idle or expanded
+  steady state.
+* RSS is flat or decreasing; no continuous memory growth was observed.
 * Hidden state performs no UI updates and no animation; its fallback tick is 30 s
   and adapter scans are mtime-gated.
 
