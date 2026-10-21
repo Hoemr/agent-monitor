@@ -218,3 +218,10 @@ Assumptions / pending verification:
     `color-scheme`/`light-dark()`. `backdrop-filter` was removed: over a
     transparent window it samples black instead of the desktop and would hide the
     native material. The collapsed 72 px squircle radius matches the effect radius.
+
+13. **Menu-bar icon polish.** The tray previously reused the 32×32 app icon with
+    `iconAsTemplate: true`, so macOS rendered a coloured blob silhouette. It now
+    has dedicated 72 px template PNGs (tray library scales to an 18 pt status
+    item): three-session mark plus an attention-dot variant, switched at runtime
+    with `set_icon_with_as_template`. Left click is reserved for show/collapse
+    (menu on right click), and the tray menu/tooltip follow `AppleLocale`.

@@ -24,7 +24,7 @@ use pet::{
     ScreenRect, COLLAPSED_SIZE, EXPANDED_WIDTH, HIDDEN_SLIVER, SNAP_DISTANCE,
 };
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -32,6 +32,13 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, 
 
 static ANIMATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static DRAG_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// macOS menu-bar template icons: a three-bar "sessions" mark, plus a variant
+/// with a notification dot when a task needs the user. 72 px sources are scaled
+/// by the tray library to an 18 pt status item, which keeps them crisp @2x.
+static TRAY_ICON: &[u8] = include_bytes!("../icons/tray.png");
+static TRAY_ICON_ALERT: &[u8] = include_bytes!("../icons/tray-alert.png");
+static TRAY_ICON_SHOWS_ALERT: AtomicBool = AtomicBool::new(false);
 
 // ── Runtime state ───────────────────────────────────────────────
 
@@ -578,21 +585,57 @@ fn start_worker(app: AppHandle) {
     });
 }
 
+fn system_is_chinese() -> bool {
+    // Cached: this is consulted on every snapshot change by the tray updater.
+    static ZH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ZH.get_or_init(|| {
+        std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleLocale"])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .to_ascii_lowercase()
+                    .starts_with("zh")
+            })
+            .unwrap_or(false)
+    })
+}
+
 fn update_tray_tooltip(app: &AppHandle, snapshot: &Snapshot) {
     let waiting = snapshot.tasks.iter().filter(|t| t.needs_attention()).count();
     let total = snapshot.tasks.len();
+    let zh = system_is_chinese();
     let label = if total == 0 {
-        "Agent Monitor — no sessions".to_string()
+        if zh {
+            "Agent Monitor — 暂无会话".to_string()
+        } else {
+            "Agent Monitor — no sessions".to_string()
+        }
     } else if waiting > 0 {
-        format!(
-            "Agent Monitor — {} session(s), {} need attention",
-            total, waiting
-        )
+        if zh {
+            format!("Agent Monitor — {total} 个会话，{waiting} 个待处理")
+        } else {
+            format!("Agent Monitor — {total} session(s), {waiting} need attention")
+        }
+    } else if zh {
+        format!("Agent Monitor — {total} 个会话")
     } else {
-        format!("Agent Monitor — {} session(s)", total)
+        format!("Agent Monitor — {total} session(s)")
     };
     if let Some(tray) = app.tray_by_id("main-tray") {
         let _ = tray.set_tooltip(Some(&label));
+        let alert = waiting > 0;
+        if TRAY_ICON_SHOWS_ALERT.swap(alert, Ordering::SeqCst) != alert {
+            if std::env::var("AGENT_MONITOR_DEBUG_TRAY").is_ok() {
+                eprintln!("tray: switched to {} icon", if alert { "alert" } else { "normal" });
+            }
+            let bytes = if alert { TRAY_ICON_ALERT } else { TRAY_ICON };
+            if let Ok(icon) = tauri::image::Image::from_bytes(bytes) {
+                // Atomic icon + template update avoids a visible flicker on macOS.
+                let _ = tray.set_icon_with_as_template(Some(icon), true);
+            }
+        }
     }
 }
 
@@ -602,11 +645,17 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     use tauri::tray::TrayIconEvent;
 
-    let show_item = MenuItemBuilder::with_id("show", "Show Pet").build(app)?;
-    let hide_item = MenuItemBuilder::with_id("hide", "Hide to Edge").build(app)?;
-    let reset_item = MenuItemBuilder::with_id("reset", "Reset Position").build(app)?;
-    let refresh_item = MenuItemBuilder::with_id("refresh", "Refresh").build(app)?;
-    let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    let zh = system_is_chinese();
+    let show_item = MenuItemBuilder::with_id("show", if zh { "显示桌宠" } else { "Show Pet" })
+        .build(app)?;
+    let hide_item = MenuItemBuilder::with_id("hide", if zh { "隐藏到边缘" } else { "Hide to Edge" })
+        .build(app)?;
+    let reset_item =
+        MenuItemBuilder::with_id("reset", if zh { "重置位置" } else { "Reset Position" })
+            .build(app)?;
+    let refresh_item =
+        MenuItemBuilder::with_id("refresh", if zh { "刷新" } else { "Refresh" }).build(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", if zh { "退出" } else { "Quit" }).build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&show_item)
         .item(&hide_item)
@@ -622,6 +671,8 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("tray icon missing; check tauri.conf.json")?;
     tray.set_menu(Some(menu))?;
     tray.set_tooltip(Some("Agent Monitor"))?;
+    // Left click belongs to the pet (show/collapse); the menu opens on right click.
+    let _ = tray.set_show_menu_on_left_click(false);
 
     tray.on_tray_icon_event(|tray, event| {
         if let TrayIconEvent::Click { button, .. } = event {

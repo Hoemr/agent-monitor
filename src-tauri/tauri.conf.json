@@ -39,7 +39,7 @@
     ],
     "trayIcon": {
       "id": "main-tray",
-      "iconPath": "icons/icon.png",
+      "iconPath": "icons/tray.png",
       "iconAsTemplate": true
     },
     "withGlobalTauri": true,

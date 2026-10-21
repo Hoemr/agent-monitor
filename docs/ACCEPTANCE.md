@@ -105,6 +105,7 @@ permission needed) on the release app:
 | geometry after vibrancy change (screen was locked, `CGWindowList` unreliable) | internal window targets | `AGENT_MONITOR_DEBUG_GEOMETRY=1`: expanded target `Rect { x: 1560, y: 453.6, w: 360, h: 390 }`; edge-hidden target `x: 1906, w: 72` (14 px visible); collapsed start `72×72`; work-area picked up the lock-screen frame change automatically |
 | focus at launch | current app keeps focus | frontmost stayed `访达` → `访达` |
 | tray-only (no Dock icon) | accessory activation policy | `NSRunningApplication.activationPolicy = accessory`; System Events `background only = true` (bundled `.app` **and** bare binary) |
+| menu-bar icon | dedicated template icon + attention variant | 72 px template PNGs shipped (`icons/tray.png`, `icons/tray-alert.png`); attention switch verified by `AGENT_MONITOR_DEBUG_TRAY=1` log `tray: switched to alert icon`; menu labels localized from `AppleLocale=zh_CN`; left-click menu disabled so left click belongs to the pet |
 | typography | normal system fonts | pixel webfont removed; UI uses SF Pro / PingFang SC stack (see screenshots) |
 | macOS material / appearance | native vibrancy + light/dark | `windowEffects: popover` (radius 16) applied; CSS uses `light-dark()` tokens; no runtime errors; dark/light previews rendered from the shipped HTML/CSS (native window screenshots are unavailable without Screen Recording permission) |
 | row hierarchy | title-first, one state dot | title on line 1; agent/state/summary on line 2; no uppercase labels or middle-dot meta strings |

@@ -19,6 +19,15 @@ dockable, edge-snapping pet.
 | ![expanded dark](screenshots/pet-expanded-dark.png) | ![expanded light](screenshots/pet-expanded-light.png) |
 
 *(Previews rendered from the shipped HTML/CSS with the labelled `SIM` fixture, over a desktop backdrop to show the translucent material.)*
+
+### Menu-bar icon
+
+![tray icons](screenshots/tray-icons.png)
+
+A proper macOS **template image** (72 px source, rendered as an 18 pt status item, tinted
+automatically for light/dark menu bars): a three-session mark that matches the pet, and a
+variant with a notification dot when a task needs you. Left click shows/collapses the pet;
+right click opens the menu (localized to the macOS system language).
 | ![collapsed dark](screenshots/pet-collapsed-dark.png) | ![collapsed light](screenshots/pet-collapsed-light.png) |
 
 ## Supported agents (real local data, no APIs assumed)
