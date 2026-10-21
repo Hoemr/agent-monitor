@@ -14,8 +14,7 @@ never higher than the verified level.
 | **Codex** (ChatGPT app + VSCode extension `openai.chatgpt`) | `~/.codex/state_5.sqlite` `threads` (192 rows) + rollout JSONL tail + `thread_history_1.sqlite` `thread_turns` | `threads.id` (UUID); 61 threads were created in the VSCode extension, rest in the app | **L3 — verified**: `codex://threads/<id>` changes the visible thread (window title changed from `编写 Agent 桌宠实现 Prompt` → `调研密度比估计与扩散生成`, outcome `success/L3`) | Automation (used only to read back the window title); Accessibility for AXRaise fallback | Deep link unverified or app not running → L2 window match → L1 `open -b com.openai.codex` → toast; only the app is activated when the session cannot be proven | **Pass** (real record + real L3) |
 | **DSH** (DeepSeek Harness desktop) | `~/.dsh/storages/session_projcache/sessions/*.json` (67 sessions: title, cwd, `turnBoundary`, `userQuestions`, stats) | Session directory name (`session-<uuid>`); 3 parallel sessions were visible at the same time in the live run | **L1 — verified**: `open -b com.deepseek.dsh` activates the app; its `open-url` handler only implements `dsh://open` (focus window) — **no session route exists**, so L3 is *not* claimed | Automation (frontmost verification) | Always app-level; toast “已激活应用，无法定位具体会话” / reason `activated_app_only` | **Pass** (real record + real L1; L3 unavailable by design of the host) |
 | **ZCode** (ZCode desktop) | `~/.zcode/v2/tasks-index.sqlite` `tasks` (22 tasks, status/model/workspace) | `tasks.task_id` (`sess_<uuid>`) | **L1 declared, blocked in verification**: `open -b dev.zcode.app` returns 0 but `ZCode.app` exits immediately (Electron 41; exit code 0, no window, no crash report) → activation cannot be confirmed. `zcode://workspace/open?path=` exists in the bundle but is unverified | Automation | Attempts workspace deep link/window (declared L1 so it stops at L1) → reports `focus_unconfirmed`/`activated_app_only`; never pretends to reach a task | **Partial** (real record; jump blocked — documented) |
-| **VSCode agent plugin** — Claude Code `anthropic.claude-code` 2.1.304 | `~/.claude/projects/**/*.jsonl` + `file-history/` + `ide/*.lock` (ported legacy scanner) | Claude transcript UUID; multiple parallel sessions per project stay separate | **L2 — verified**: raised the exact VSCode window (`arr_submission.tex — DropDPO-Confidence` → `results.md — DropDPO-Confidence`, outcome `success/L2`) | Automation + Accessibility (AXRaise/read-back) | No verified extension URI → window by workspace; window not found → L1 activate VSCode → toast that the session is not selectable | **Pass** (real record + real L2) |
-| **Terminal-hosted CLI** (Claude Code CLI / other CLI agents) | Same Claude transcripts with `host = cli` | Session UUID; terminal tab identity resolved at click time via `ps`/`lsof` | **L1 verified** (activated Terminal, outcome `degraded/L1`, reason `no_window_hint`); **L3 tab selection implemented but 未验证** — no `claude` CLI is installed on this host | Automation (terminal control) | Tab not resolvable / no live process → Terminal window/app (L1) with explicit reason; never claims tab selection | **Partial** (L1 pass; L3 未执行) |
+| **VSCode agent plugin** — Claude Code `anthropic.claude-code` 2.1.304 | `~/.claude/projects/**/*.jsonl` + `file-history/` + `ide/*.lock` (ported legacy scanner) | Claude transcript UUID; multiple parallel sessions per project stay separate | **L2 — verified**: raised the exact VSCode window (`arr_submission.tex — DropDPO-Confidence` → `results.md — DropDPO-Confidence`, outcome `success/L2`) | Automation + Accessibility (AXRaise/read-back) | Claude Code is modelled as a **VSCode-hosted** agent: no verified extension URI → window by workspace → L1 activate VSCode → toast that the session is not selectable. It is never routed to Terminal | **Pass** (real record + real L2) |
 | **Simulated Agent** (extension acceptance only, `AGENT_MONITOR_SIMULATED=1`) | In-process fixture, `origin = synthetic`, UI shows `SIM` | 3 fixture sessions | L1 fixture | none | Clearly labelled, never mixed with real adapters | **Pass** (see ACCEPTANCE §Phase 4) |
 
 ## Status mapping and evidence
@@ -34,6 +33,18 @@ Rules enforced by tests: waiting states are only produced from explicit
 signals; “no output” never becomes waiting; completed + closed window is shown as
 completed **plus** an invalid target, not as failed; a reused session can return
 to running.
+
+## Ordering and presentation
+
+The task list is sorted by **`last_activity_secs` descending** (newest first);
+status only breaks ties. This was changed after user feedback: the live/most
+recent conversation must be the first row. Waiting/approval/failure are surfaced
+by the count badge, the row accent bar and the status glyph — the list is **not**
+grouped or re-ordered by state.
+
+The UI uses the macOS system font stack (SF Pro / PingFang SC) — the pixel webfont
+was removed. The app runs with an **accessory activation policy**: menu-bar/tray
+only, no Dock icon.
 
 ## Known limitations / 未执行
 

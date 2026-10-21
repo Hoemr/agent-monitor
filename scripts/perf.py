@@ -78,6 +78,7 @@ def main():
         sys.exit(f"app exited during warmup, see {log}")
 
     samples = []
+    invalid = False
     start_cpu = cputime_seconds(proc.pid)
     start_rss = rss_kb(proc.pid)
     t0 = time.time()
@@ -88,9 +89,19 @@ def main():
         rss = rss_kb(proc.pid)
         now = time.time()
         if cpu is None or rss is None:
+            print("warning: process disappeared during sampling; invalidating run", file=sys.stderr)
+            invalid = True
             break
         wall_delta = now - last_wall
-        cpu_pct = 100.0 * (cpu - last_cpu) / wall_delta if wall_delta > 0 else 0.0
+        cpu_delta = cpu - last_cpu
+        if cpu_delta < 0:
+            # Counter went backwards: the sampled pid was replaced or the app
+            # restarted mid-run. Mark the run invalid instead of reporting a
+            # negative percentage.
+            print("warning: cpu time went backwards; invalidating run", file=sys.stderr)
+            invalid = True
+            break
+        cpu_pct = 100.0 * cpu_delta / wall_delta if wall_delta > 0 else 0.0
         samples.append({
             "t_s": round(now - t0, 1),
             "cpu_pct": round(cpu_pct, 3),
@@ -128,6 +139,7 @@ def main():
             "profile": "release" if "/release/" in BIN else "debug",
         },
         "samples_detail": samples,
+        "valid": not invalid and len(samples) > 5,
         "log": log,
     }
     os.makedirs(os.path.join(ROOT, "docs", "perf"), exist_ok=True)
@@ -140,6 +152,8 @@ def main():
     with open(out_json, "w") as fh:
         json.dump(summary, fh, indent=2)
     print(json.dumps({k: v for k, v in summary.items() if k != "samples_detail"}, indent=2))
+    if not summary["valid"]:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

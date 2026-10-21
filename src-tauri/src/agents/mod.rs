@@ -133,14 +133,15 @@ pub fn truncate_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// Sort keys are stable ids so the UI order does not jitter between scans.
+/// Newest activity first — the live conversation the user most recently touched
+/// is always at the top. Status only breaks ties, so the list never "groups" by
+/// state; waiting/failed tasks are still surfaced by the badge + attention bar.
 pub fn sort_tasks(tasks: &mut [TaskRecord]) {
     tasks.sort_by(|a, b| {
-        a.status
-            .priority()
-            .cmp(&b.status.priority())
+        b.last_activity_secs
+            .cmp(&a.last_activity_secs)
+            .then_with(|| a.status.priority().cmp(&b.status.priority()))
             .then_with(|| a.agent_key.cmp(&b.agent_key))
-            .then_with(|| b.last_activity_secs.cmp(&a.last_activity_secs))
             .then_with(|| a.id.cmp(&b.id))
     });
 }
@@ -175,16 +176,28 @@ mod tests {
     }
 
     #[test]
-    fn attention_first_then_recent_activity() {
+    fn newest_activity_comes_first_regardless_of_status() {
         let mut tasks = vec![
-            rec("completed", TaskStatus::Completed, 900),
-            rec("running", TaskStatus::Running, 100),
-            rec("waiting", TaskStatus::WaitingApproval, 50),
-            rec("failed", TaskStatus::Failed, 10),
+            rec("old-running", TaskStatus::Running, 10),
+            rec("new-completed", TaskStatus::Completed, 900),
+            rec("mid-waiting", TaskStatus::WaitingApproval, 500),
+            rec("oldest-failed", TaskStatus::Failed, 5),
         ];
         sort_tasks(&mut tasks);
         let order: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(order, vec!["waiting", "failed", "running", "completed"]);
+        assert_eq!(order, vec!["new-completed", "mid-waiting", "old-running", "oldest-failed"]);
+    }
+
+    #[test]
+    fn equal_activity_prefers_attention_status() {
+        let mut tasks = vec![
+            rec("completed", TaskStatus::Completed, 100),
+            rec("waiting", TaskStatus::WaitingApproval, 100),
+            rec("running", TaskStatus::Running, 100),
+        ];
+        sort_tasks(&mut tasks);
+        let order: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(order, vec!["waiting", "running", "completed"]);
     }
 
     #[test]

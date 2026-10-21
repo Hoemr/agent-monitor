@@ -88,6 +88,16 @@ Dev-only: with `?mock=1` (or `?mock=collapsed`) the page renders a fixture and
 exposes `window.__AM_TEST__` for `scripts/ui-selftest.html`. The packaged app never
 loads the mock path.
 
+## Presentation rules (current)
+
+* **Tray-only app**: accessory activation policy, no Dock icon, no app-switcher
+  entry. The menu-bar item is the only entry point.
+* **System typography**: SF Pro / PingFang SC stack; no webfont is loaded.
+* **Ordering**: the snapshot is already sorted by `last_activity_secs` descending
+  (newest conversation first). The UI must render in snapshot order and must not
+  re-group by status; attention is surfaced by the badge, the row accent and the
+  glyph.
+
 ## Interaction rules implemented by the frontend
 
 * Collapsed: small round indicator (72×72) with attention badge; click expands.

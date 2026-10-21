@@ -177,11 +177,11 @@ var STATUS_GLYPH = {
   completed: '✓', failed: '✕', idle: '○', unknown: '·'
 };
 
-var AGENT_COLORS = ['--cyan', '--green', '--purple', '--blue', '--amber', '--pink'];
+var AGENT_COLORS = ['#7aa2f7', '#4ade80', '#c084fc', '#fbbf24', '#f472b6', '#38bdf8'];
 function agentColor(key) {
   var h = 0;
   for (var i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
-  return 'var(' + AGENT_COLORS[h % AGENT_COLORS.length] + ')';
+  return AGENT_COLORS[h % AGENT_COLORS.length];
 }
 
 // ── Helpers ─────────────────────────────────────────────────────

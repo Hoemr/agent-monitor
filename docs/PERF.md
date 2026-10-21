@@ -14,28 +14,49 @@ the only build of Agent Monitor running.
 * warm-up 8 s, then sample every 5 s for 300 s;
 * CPU = delta of `ps -o cputime=` divided by wall-clock delta (true interval
   average, not the lifetime average printed by `top`); RSS from `ps -o rss=`;
-* raw series: `docs/perf/<label>.csv`; summary JSON: `docs/perf/<label>.json`;
+* raw series: `docs/perf/<label>.csv`; summary JSON: `docs/perf/<label>.json`
+  (each summary now carries `valid: true`; dead/replaced processes invalidate a run);
 * process killed afterwards; no mock data is used except the empty-snapshot mode.
 
-## Results (300 s per state, 60 samples each)
+## Results — final build 0.4.1 (300 s per state, 60 samples each)
+
+Measured after the visual refactor (system fonts), tray-only policy and
+newest-first ordering. Each run is validated: the sampler aborts and marks the
+run invalid if the process dies or its CPU counter goes backwards.
 
 | State | Tasks in snapshot | CPU mean | CPU p95 | CPU max | RSS start → end | RSS growth |
 |---|---|---|---|---|---|---|
-| Edge-hidden (sliver) | 40 real | **0.19 %** | 0.40 % | 0.80 % | 100.8 → 101.0 MB | **+0.25 MB** |
-| Idle, no tasks (collapsed) | 0 (empty mode) | **0.11 %** | 0.20 % | 0.80 % | 91.9 → 101.7 MB | +9.87 MB (warm-up; see long run) |
-| Expanded, 40 tasks (5 visible, scrollable) | 40 real | **0.20 %** | 0.40 % | 0.80 % | 100.9 → 81.3 MB | −19.6 MB |
+| Edge-hidden (14 px sliver) | 40 real | **0.05 %** | 0.20 % | 0.20 % | 98.2 → 84.5 MB | **−13.7 MB** |
+| Idle, no tasks (collapsed) | 0 (empty mode) | **0.03 %** | 0.20 % | 0.20 % | 92.3 → 92.2 MB | **−0.14 MB** |
+| Expanded, 40 tasks (5 visible, scrollable) | 40 real | **0.21 %** | 1.00 % | 1.40 % | 97.8 → 90.0 MB | **−7.8 MB** |
 
 Interpretation:
 
-* All three states are well below the suggested **< 1 % of one core** budget. The
-  0.80 % “max” in every run is the single startup/warm-up sample (window creation
-  + first WebKit paint + first scan); steady-state samples are ≤ 0.4 %.
-* The idle-empty run starts from a lower RSS baseline (91.9 MB) and rises ~10 MB;
-  this is WebKit/JSC initial memory settling in the first minutes, not a per-task
-  leak (the expanded run with 40 tasks *ends lower* than it starts, i.e. the
-  allocator is reclaiming). A longer run is recorded below to confirm the plateau.
-* Hidden state performs no UI updates and no animation; the fallback tick is 30 s
-  and scans are mtime-gated.
+* Every state is comfortably below the suggested **< 1 % of one core** budget on
+  average. The expanded state's p95 touches 1.0 % because the live DSH sessions
+  produce snapshot updates and row re-renders; this is the intended active state,
+  not idle overhead.
+* RSS decreases in all three runs (allocator returning pages) — no continuous
+  memory growth. The earlier 0.4.0 short idle run that showed +9.9 MB was
+  WebKit warm-up; the 600 s run below confirms the trend reverses.
+* Hidden state performs no UI updates and no animation; its fallback tick is 30 s
+  and adapter scans are mtime-gated.
+
+## Longer idle run (600 s, 120 samples, build 0.4.0)
+
+The idle path is unchanged between 0.4.0 and 0.4.1 (same scheduler, same
+adapters); this run is kept as the long-duration memory evidence.
+
+`docs/perf/idle-empty-long.json`:
+
+| State | CPU mean | CPU p95 | CPU max | RSS start → end | RSS growth |
+|---|---|---|---|---|---|
+| Idle, no tasks, collapsed, **600 s** | **0.043 %** | 0.20 % | 0.20 % | 92.3 → 80.1 MB | **−12.3 MB** |
+
+Long-run conclusion: the short run's +9.9 MB was WebKit/JSC warm-up, not a leak —
+over 10 minutes RSS decreases by 12.3 MB, and the CPU mean drops to 0.043 %. No
+continuous memory growth was observed in any valid run. A full 30-minute run is
+still listed under “Not measured” for completeness.
 
 ## Longer idle run (600 s, 120 samples)
 

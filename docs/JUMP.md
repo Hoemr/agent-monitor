@@ -36,9 +36,8 @@ never opens System Settings by itself and never resets TCC.
 | 3 | DSH / DeepSeek Harness | `dsh://open/<session-id>` attempt | Window title unchanged (`Training-free DRE literature positioning audit`); main-process source shows only `dsh://open` / `dsh://open/` → `focusPrimaryWindow()` | **degraded / L1** (`activated_app_only`) — no session route exists |
 | 4 | DSH / DeepSeek Harness | `open -b com.deepseek.dsh` | Frontmost = DeepSeek Harness | **L1 works**, declared max = L1 |
 | 5 | Claude Code / VSCode | L2 raise window for `/Users/wei/Paper/DropDPO-Confidence` | Window 1 `arr_submission.tex — DropDPO-Confidence` → `results.md — DropDPO-Confidence`; frontmost = Code | **success / L2** (`opened_window`) |
-| 6 | Claude Code CLI / Terminal | L2/L1 | No window hint + no live claude process → `open -b com.apple.Terminal`; frontmost `-zsh` Terminal window appeared | **degraded / L1** (`no_window_hint`) |
-| 7 | ZCode | `open -b dev.zcode.app`, `open -a ZCode`, direct binary | `open` exits 0, no process, no window, no crash report; Electron 41 | **blocked** — cannot verify any level on this host |
-| 8 | Claude Code CLI / Terminal | L3 tab selection by tty | No `claude` CLI installed on this host | **未执行** (code path implemented; see repro) |
+| 6 | ZCode | `open -b dev.zcode.app`, `open -a ZCode`, direct binary | `open` exits 0, no process, no window, no crash report; Electron 41 | **blocked** — cannot verify any level on this host |
+| 7 | Claude Code CLI / Terminal | L3 tab selection by tty | No `claude` CLI installed; project scope now treats Claude Code as VSCode-hosted, so this path is retained but unused | **未执行 / not routed** |
 
 ## Notes that changed the design
 
@@ -50,6 +49,10 @@ never opens System Settings by itself and never resets TCC.
 * **DSH has one window for all sessions.** Its Electron `open-url` handler only
   recognises `dsh://open`; there is no per-session URL. Declaring L3 would be a
   false promise, so DSH is capped at L1 and the UI explains the limitation.
+* **Claude Code = VSCode extension.** Per project clarification, Claude Code
+  records are modelled as VSCode-hosted sessions (`host = "vscode"`, target =
+  VSCode window by workspace). The terminal tab resolver remains in `jump.rs` but
+  no Claude task is routed to Terminal.
 * **ZCode cannot be verified on this host** because the app exits immediately.
   Its index data is still displayed with real statuses; jump degrades/reports
   unconfirmed instead of pretending.

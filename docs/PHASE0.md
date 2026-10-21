@@ -194,3 +194,16 @@ Assumptions / pending verification:
    `Result<JumpOutcome, String>` (Tauri async-command requirement), and a
    mock-only `__AM_TEST__` hook exists strictly under `?mock=…` for the headless UI
    acceptance; the packaged app never exposes it.
+
+10. **Follow-up product changes (after first delivery):** the app is now
+    **tray-only** (accessory activation policy; Dock icon hidden, also for
+    `cargo run`), the pixel webfont was replaced with the macOS system font stack,
+    Claude Code is modelled strictly as the **VSCode extension host** (no Terminal
+    routing), and the task list is sorted by **newest activity first** instead of
+    status priority. The status-priority ordering was removed from `sort_tasks`;
+    waiting/failed rows are still surfaced by the badge, row accent and glyph.
+11. **Accessory policy must be re-asserted after window mapping.** Setting it only
+    in `setup` was silently promoted back to `.regular` by AppKit during first
+    activation; a delayed re-assert (~250 ms and ~1.2 s) makes
+    `NSRunningApplication.activationPolicy == .accessory` stable and removes the
+    Dock icon in both the `.app` and the bare binary.

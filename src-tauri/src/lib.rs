@@ -800,6 +800,13 @@ pub fn run() {
             open_permission_settings,
         ])
         .setup(|app| {
+            // Menu-bar/tray-only app: no Dock icon, no app switcher entry.
+            // The bundled Info.plist also sets LSUIElement; this covers `cargo run`.
+            // Re-asserted after the window is mapped because AppKit otherwise
+            // promotes the process back to `.regular` during first activation.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let handle = app.handle().clone();
             let win = app.get_webview_window("main").ok_or("main window missing")?;
 
@@ -862,6 +869,16 @@ pub fn run() {
                 rt.monitor.snapshot().clone()
             };
             update_tray_tooltip(&handle, &initial);
+            #[cfg(target_os = "macos")]
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    for delay in [250u64, 1200] {
+                        std::thread::sleep(Duration::from_millis(delay));
+                        let _ = h.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    }
+                });
+            }
             // Debug/acceptance aid: force a start mode to verify window geometry
             // without synthetic clicks. Not used by normal launches.
             match std::env::var("AGENT_MONITOR_START_MODE").as_deref() {

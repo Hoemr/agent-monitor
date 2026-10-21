@@ -48,6 +48,7 @@ level spread: L1=23  L2=10  L3=7
 | Duplicate scans do not duplicate rows | **Pass** — `first=40 second=40 stable=true`; unit tests cover the render hash |
 | Status from real signals only | **Pass** — mapping table in `docs/CAPABILITIES.md`; 46 unit tests; waiting states only from explicit evidence |
 | Exit/crash does not stay “running” | **Pass (logic)** — Codex open turn + app gone → `Unknown`; turn history `failed/interrupted` → `Failed`; DSH open turn + app gone → `Unknown` |
+| Task ordering: newest activity first | **Pass** — `last_activity_secs` strictly descending (`sorted = True`); status only breaks ties. Top rows in the live snapshot were the 3 running DSH conversations |
 | Original monitoring regression checklist | **Pass** — see below |
 
 ### Legacy regression checklist
@@ -63,7 +64,7 @@ level spread: L1=23  L2=10  L3=7
 | Tokens/model/message metadata | Rendered as `summary` (e.g. `OPUS · 12 msg · 34 tok`) |
 | Subagent transcripts excluded | Ported (`fname.contains("subagent")`) |
 | Stale sessions hidden | 6 h retention (24 h for IDE-matched), documented |
-| Tray show/hide/refresh/quit | Rebuilt and exercised (show/hide/reset/refresh/quit menu items exist; show + reset verified) |
+| Tray show/hide/refresh/quit | Rebuilt and exercised (show/hide/reset/refresh/quit menu items exist; show + reset verified); tray is the **only** entry point (Dock icon hidden) |
 | Click-through | **Removed intentionally** (replaced by the pet interaction model) |
 | Language switch en/zh | Frontend dictionaries + footer toggle; UI selftest checks both dictionaries |
 | No prompt bodies persisted | Only titles/short summaries; no conversation text is stored by the app |
@@ -76,10 +77,10 @@ All jump evidence is in `docs/JUMP.md` (commands + before/after titles).
 
 | Requirement | Result |
 |---|---|
-| Session-level terminal combinations | **未执行** — no CLI agent installed in Terminal; code path implemented (`resolve_terminal_tty` + AppleScript by tty) |
+| VSCode agent plugin is VSCode-hosted | **Pass** — Claude Code records now always use `host="vscode"` and target `com.microsoft.VSCode`; verified in `--dump-tasks` (`claude hosts: [('vscode', 'com.microsoft.VSCode')]`). No Claude task is routed to Terminal |
 | Window-level combinations | **Pass** — VSCode: window raised and verified (`success/L2`) |
 | VSCode target focuses its window | **Pass** — evidence #5 in JUMP.md |
-| Independent apps use verified level | **Pass** — ChatGPT L3, DSH L1, Terminal L1, ZCode blocked (declared L1, reported unconfirmed/degraded) |
+| Independent apps use verified level | **Pass** — ChatGPT L3, DSH L1, ZCode blocked (declared L1, reported unconfirmed/degraded) |
 | Shared window is not mis-declared | **Pass** — DSH capped at L1; multiple window matches → `window_ambiguous` degraded outcome |
 | Closed target / permission / app missing feedback | **Pass (code + tests)** — `Invalid` target fails with `workspace_missing` etc. and a dismiss action; AppleScript permission errors map to `needs_accessibility`/`needs_automation` with a “Grant permission” toast (unit tested) |
 | No infinite retries / repeated permission dialogs | **Pass** — one attempt per click, no loops; settings only opened by the user's toast action |
@@ -102,11 +103,15 @@ permission needed) on the release app:
 | edge-hidden | 14 px sliver visible at right | `X=1906 Y=435 W=72 H=72` → visible 14 px |
 | recall via second launch (single-instance) | visible collapsed pet | `X=1848 Y=435 W=72 H=72` |
 | focus at launch | current app keeps focus | frontmost stayed `访达` → `访达` |
+| tray-only (no Dock icon) | accessory activation policy | `NSRunningApplication.activationPolicy = accessory`; System Events `background only = true` (bundled `.app` **and** bare binary) |
+| typography | normal system fonts | pixel webfont removed; UI uses SF Pro / PingFang SC stack (see screenshots) |
 
 UI acceptance is automated headlessly (`npm run ui-test`, Chrome drives real DOM
 events in the shipped page): **ALL PASS, 24 checks**, including:
 
 * rows = real task count, six fixture agents/statuses rendered with distinct glyphs;
+* list order follows the snapshot order (newest activity first);
+* agent colours are deterministic per `agent_key` (no hard-coded agent names);
 * `aria-label` contains agent, title, status, level and action;
 * two synchronous clicks → **one** jump;
 * click immediately after a drag release → **no** jump, next click works;
@@ -151,9 +156,10 @@ second launch (single-instance handler) restores a visible pet — verified.
    `open "dist/Agent Monitor.app"`, click a task, confirm the Automation prompt text
    matches `NSAppleEventsUsageDescription`, deny once → toast shows
    `needs_automation` with “Grant permission”, no repeated system dialog until clicked again.
-4. **Terminal tab L3**
-   Install `claude` (or any CLI agent), run it in Terminal, click its task:
-   expected AppleScript selects the tab by tty and reports `success/L3`.
+4. **Terminal tab L3 (future, not routed)**
+   Claude Code is modelled as VSCode-hosted, so no current task uses the Terminal
+   path. If a terminal-hosted agent is added later, run it in Terminal and click
+   its task: expected AppleScript selects the tab by tty and reports `success/L3`.
 5. **ZCode jump**
    Launch `ZCode.app` successfully (it currently exits immediately), then retest
    `zcode://workspace/open?path=`.

@@ -19,7 +19,6 @@ use std::io::{BufRead, BufReader, Seek};
 use std::path::{Path, PathBuf};
 
 const VSCODE_BUNDLE: &str = "com.microsoft.VSCode";
-const TERMINAL_BUNDLE: &str = "com.apple.Terminal";
 const MAX_FILES: usize = 200;
 
 #[derive(Clone, Default)]
@@ -248,7 +247,8 @@ impl ClaudeCodeSource {
                             pos: state.pos,
                         },
                     );
-                    out.push(to_record(&session, ide_host, file_mt, ctx));
+                    let _ = ide_host;
+                    out.push(to_record(&session, file_mt, ctx));
                 }
             }
         }
@@ -559,17 +559,10 @@ fn short_model(model: &str) -> String {
     }
 }
 
-fn to_record(
-    session: &Session,
-    ide_host: bool,
-    file_mtime: u64,
-    ctx: &ScanCtx,
-) -> TaskRecord {
-    let host = if session.source == "vscode" || ide_host {
-        "vscode"
-    } else {
-        "cli"
-    };
+fn to_record(session: &Session, file_mtime: u64, ctx: &ScanCtx) -> TaskRecord {
+    // The supported integration is the VSCode extension (anthropic.claude-code).
+    // Claude Code is a VSCode-hosted agent here; we never route it to Terminal.
+    let host = "vscode";
     let (status, reason) = match session.status.as_str() {
         "working" => (TaskStatus::Running, "tool_use in transcript".to_string()),
         "thinking" => (TaskStatus::Running, "thinking block".to_string()),
@@ -609,30 +602,18 @@ fn to_record(
     } else {
         truncate_chars(session.name.trim(), 120)
     };
-    let target = if host == "vscode" {
-        JumpTarget {
-            app_name: Some("Code".into()),
-            bundle_id: Some(VSCODE_BUNDLE.into()),
-            deep_link: None,
-            window_title: Some(
-                Path::new(&session.project_path)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-            ),
-            workspace_path: Some(session.project_path.clone()),
-            ..Default::default()
-        }
-    } else {
-        JumpTarget {
-            app_name: Some("Terminal".into()),
-            bundle_id: Some(TERMINAL_BUNDLE.into()),
-            deep_link: None,
-            window_title: None,
-            workspace_path: Some(session.project_path.clone()),
-            terminal_host: Some("Terminal".into()),
-            ..Default::default()
-        }
+    let target = JumpTarget {
+        app_name: Some("Code".into()),
+        bundle_id: Some(VSCODE_BUNDLE.into()),
+        deep_link: None,
+        window_title: Some(
+            Path::new(&session.project_path)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        ),
+        workspace_path: Some(session.project_path.clone()),
+        ..Default::default()
     };
     let mut record = TaskRecord {
         id: format!("claude-code:{}", session.id),
@@ -653,11 +634,8 @@ fn to_record(
         invalid_reason: None,
         capability: JumpCapability {
             max_level: JumpLevel::L2,
-            notes: if host == "vscode" {
-                "VSCode window by workspace; the extension exposes no verified session URI".into()
-            } else {
-                "Terminal window; tab selection needs a live tty match (not verified)".into()
-            },
+            notes: "VSCode window by workspace; the extension exposes no verified session URI"
+                .into(),
             requires: vec![PermissionKind::Automation],
         },
         level: JumpLevel::L2,
@@ -666,7 +644,7 @@ fn to_record(
     if !workspace_exists {
         record.target_validity = TargetValidity::Invalid;
         record.invalid_reason = Some("workspace_missing".into());
-    } else if host == "vscode" {
+    } else {
         record.target_validity = TargetValidity::Valid;
     }
     record.refresh_level();
@@ -681,7 +659,7 @@ impl Source for ClaudeCodeSource {
             source: "~/.claude/projects/**/*.jsonl + file-history + ide/*.lock".into(),
             origin: DataOrigin::Event,
             max_level: JumpLevel::L2,
-            notes: "VSCode extension host (anthropic.claude-code) or CLI; window-level jump by workspace."
+            notes: "VSCode extension host (anthropic.claude-code); window-level jump by workspace."
                 .into(),
         }
     }

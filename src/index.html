@@ -12,7 +12,7 @@
     <div id="pet" role="button" tabindex="0"
          aria-label="Agent Monitor, no active sessions, click to expand">
       <div class="pet-core" aria-hidden="true">
-        <span class="pet-glyph">▚</span>
+        <span class="pet-glyph" aria-hidden="true"><i></i><i></i><i></i></span>
       </div>
       <span id="badge" class="badge" hidden aria-hidden="true">0</span>
       <span class="pet-grip" aria-hidden="true"></span>
@@ -22,9 +22,9 @@
     <section id="panel" hidden aria-label="Task list">
       <header id="dragbar">
         <span id="drag-handle" class="drag-handle" title="Drag to move" aria-label="Drag to move">⠿</span>
-        <span class="panel-title" id="panel-title">AGENT MONITOR</span>
+        <span class="panel-title" id="panel-title">Agent Monitor</span>
         <span id="attention" class="attention-pill" hidden></span>
-        <button id="collapse-btn" class="icon-btn" aria-label="Collapse">▁</button>
+        <button id="collapse-btn" class="icon-btn" aria-label="Collapse">−</button>
       </header>
       <main id="list" role="list" tabindex="-1"></main>
       <footer id="footer">

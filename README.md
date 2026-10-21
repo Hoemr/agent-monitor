@@ -1,7 +1,9 @@
 # Agent Monitor — desktop pet for multi-agent coding sessions (macOS)
 
-A small, quiet desktop pet that shows every parallel coding-agent session in one
-place and jumps to the right app/window/session when you click a task.
+A small, quiet **menu-bar/tray-only** desktop pet (no Dock icon) that shows every
+parallel coding-agent session in one place — newest activity first — and jumps to
+the right window/session when you click a task. Normal system typography, no
+webfonts.
 
 Built on the existing Agent Monitor project (Tauri 2 + Rust + vanilla JS) — the
 monitoring core was refactored rather than replaced, the old Claude-Code-only
@@ -19,17 +21,19 @@ dockable, edge-snapping pet.
 | **Codex** (ChatGPT app + VSCode extension) | `~/.codex/state_5.sqlite` + rollout JSONL + `thread_history_1.sqlite` | thread id | **L3** `codex://threads/<id>` (verified) |
 | **DSH** (DeepSeek Harness) | `~/.dsh/storages/session_projcache/sessions/*.json` | session dir | **L1** (host has no session URL — documented) |
 | **ZCode** | `~/.zcode/v2/tasks-index.sqlite` | `task_id` | **blocked** on this host (`ZCode.app` exits immediately); data/mapping implemented |
-| **Claude Code** (VSCode plugin `anthropic.claude-code`, + CLI) | `~/.claude/projects/**/*.jsonl`, `file-history/`, `ide/*.lock` | transcript UUID | **L2** VSCode window (verified) |
-| Terminal-hosted CLI | same transcripts, `host=cli` | tty resolved at click time | **L1 verified**, L3 tab selection implemented/未验证 |
+| **Claude Code** (`anthropic.claude-code` **VSCode extension**) | `~/.claude/projects/**/*.jsonl`, `file-history/`, `ide/*.lock` | transcript UUID | **L2** VSCode window (verified) |
 
 Full matrix with evidence and limitations: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) ·
 jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md).
 
 ## Features
 
-* One unified task list: agent, title, unified status (running / waiting input /
-  waiting approval / completed / failed / idle / unknown), real last-activity time,
-  short summary, and the actual jump level (`L3`…`L0`).
+* One unified task list ordered by **most recent activity first** (running
+  conversations naturally rise to the top; waiting/failed tasks are highlighted
+  with a badge and accent, never by re-grouping the list): agent, title, unified
+  status (running / waiting input / waiting approval / completed / failed / idle /
+  unknown), real last-activity time, short summary, and the actual jump level
+  (`L3`…`L0`).
 * **Jump with honest degradation**: session → window → app → nothing. A level is
   reported only after a read-back check; failures/degradations show a short toast
   with a “Grant permission” action when needed.
@@ -38,8 +42,12 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
 * **Multi-display aware**: placement uses each screen's *visible frame* (menu bar +
   Dock excluded), restores by screen identity + relative position, and recovers
   when a screen disappears.
-* **Reliable recall**: tray → Show Pet / Reset Position; a second launch also
-  restores the pet. It never steals keyboard focus on launch, updates, or hover.
+* **Tray-only**: accessory activation policy — no Dock icon, no app-switcher
+  entry; everything lives in the menu-bar item. Reliable recall: tray → Show Pet /
+  Reset Position; a second launch also restores the pet. It never steals keyboard
+  focus on launch, updates, or hover.
+* **System typography**: SF Pro / PingFang SC system stack, no pixel webfont, no
+  external font downloads; status is text + glyph, not colour alone.
 * **Low resource use**: event-driven file watching with a slow fallback tick; no
   per-task timers; no faster-than-30 s UI timer; identical snapshots are not
   re-rendered.
@@ -103,6 +111,8 @@ AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
   so session-level jumping is impossible and is reported as L1.
 * `ZCode.app` (Electron 41) exits immediately on the test host (macOS 27 beta);
   its data is shown, its jump is reported as unconfirmed. Details in `docs/JUMP.md`.
+* Claude Code is treated as the **VSCode extension host** only (per project scope);
+  terminal-hosted Claude sessions are not routed to Terminal.
 * Physical multi-display, Space/full-screen, and first-run TCC prompts were **not
   executed** on this single-display host; see `docs/ACCEPTANCE.md` for repro steps.
 * Performance numbers are measured on the test Mac in `docs/PERF.md` — budget
