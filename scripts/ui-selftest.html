@@ -1,0 +1,159 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>UI selftest pending</title>
+<style>html,body{margin:0;background:#111;color:#ddd;font:12px monospace}iframe{width:360px;height:390px;border:0}pre{white-space:pre-wrap}</style>
+</head><body>
+<iframe id="frame" src="../src/index.html?mock=1"></iframe>
+<pre id="results">PENDING</pre>
+<script>
+var results = [];
+var failures = 0;
+function check(name, ok, detail) {
+  results.push((ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' :: ' + detail : ''));
+  if (!ok) failures++;
+}
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function fire(win, el, type, init) {
+  el.dispatchEvent(new win.MouseEvent(type, Object.assign({ bubbles: true, cancelable: true, view: win }, init || {})));
+}
+var frame = document.getElementById('frame');
+frame.addEventListener('load', async function () {
+  try {
+    var win = frame.contentWindow;
+    var doc = win.document;
+    await sleep(120);
+    var T = win.__AM_TEST__;
+    check('mock hooks present', !!T);
+    if (!T) { finish(); return; }
+    var app = doc.getElementById('app');
+
+    // 1. rows render
+    var rows = doc.querySelectorAll('.task');
+    check('renders one row per task', rows.length === 6, 'rows=' + rows.length);
+
+    // 2. status glyph is not colour-only and distinct
+    var glyphs = rows.length ? Array.from(rows).map(function (r) {
+      return r.querySelector('.status-glyph').textContent;
+    }) : [];
+    check('status glyphs present and distinct', new Set(glyphs).size >= 4, glyphs.join(''));
+
+    // 3. aria label mentions agent, level and action
+    var label = rows[0].getAttribute('aria-label') || '';
+    check('aria-label is actionable', /L[0-3]/.test(label) && label.length > 10, label);
+
+    // 4. exactly one jump for two synchronous clicks
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(30);
+    var before = T.jumpCalls.length;
+    fire(win, rows[0], 'click');
+    fire(win, rows[0], 'click');
+    check('one jump per click burst', T.jumpCalls.length - before === 1, 'calls=' + (T.jumpCalls.length - before));
+
+    // 5. a click immediately following a drag release must not jump
+    //    (same macrotask as mouseup, exactly like a real click event)
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(30);
+    var handle = doc.getElementById('drag-handle');
+    var beforeDrag = T.jumpCalls.length;
+    fire(win, handle, 'mousedown', { clientX: 10, clientY: 10, button: 0 });
+    fire(win, doc, 'mousemove', { clientX: 46, clientY: 28 });
+    fire(win, doc, 'mouseup', { clientX: 46, clientY: 28 });
+    var rows2 = doc.querySelectorAll('.task');
+    fire(win, rows2[1], 'click');
+    check('drag release does not jump', T.jumpCalls.length === beforeDrag, 'calls=' + T.jumpCalls.length);
+    // a later click still works
+    await sleep(10);
+    fire(win, rows2[1], 'click');
+    check('click after drag still jumps', T.jumpCalls.length === beforeDrag + 1, 'calls=' + T.jumpCalls.length);
+
+    // 6. hover expands after the configured delay, no focus call
+    T.applyPetState({ mode: 'collapsed' });
+    fire(win, app, 'mouseenter');
+    await sleep(80);
+    check('hover does not expand before delay', T.petState.mode === 'collapsed', T.petState.mode);
+    await sleep(160);
+    check('hover expands after delay', T.petState.mode === 'expanded', T.petState.mode);
+    check('expanded panel visible', doc.getElementById('panel').hidden === false);
+
+    // 7. escape collapses
+    doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await sleep(30);
+    check('escape collapses', T.petState.mode === 'collapsed', T.petState.mode);
+
+    // 8. dismiss does not trigger a jump
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(30);
+    var rows3 = doc.querySelectorAll('.task');
+    var countBefore = T.snapshot.tasks.length;
+    var jumpsBefore = T.jumpCalls.length;
+    fire(win, rows3[0].querySelector('.dismiss'), 'click');
+    await sleep(30);
+    check('dismiss does not jump', T.jumpCalls.length === jumpsBefore, 'jumps=' + T.jumpCalls.length);
+    check('dismiss removes the row', T.snapshot.tasks.length === countBefore - 1, 'n=' + T.snapshot.tasks.length);
+
+    // 9. empty state has no fabricated tasks
+    T.setMockSnapshot({ tasks: [], attention_count: 0, agents: [], collected_at_secs: 0 });
+    await sleep(30);
+    var text = doc.getElementById('list').textContent || '';
+    check('empty state is explicit', /No active sessions|暂无活跃会话/.test(text), text.slice(0, 40));
+    check('no task rows when empty', doc.querySelectorAll('.task').length === 0);
+
+    // 10. 20 sessions: bounded panel, scrollable list, no unbounded growth
+    var many = [];
+    var base = Date.now();
+    for (var i = 0; i < 20; i++) {
+      many.push({
+        id: 'bulk:' + i, agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+        title: 'Bulk session ' + i + ' with a fairly long title to force ellipsis',
+        status: i % 4 === 0 ? 'waiting_input' : 'running', status_reason: 'fixture',
+        last_activity_secs: Math.floor(base / 1000) - i * 60,
+        collected_at_secs: Math.floor(base / 1000), summary: 'summary ' + i,
+        origin: 'index', target: {}, target_validity: 'valid', invalid_reason: null,
+        capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false
+      });
+    }
+    T.setMockSnapshot({ tasks: many, attention_count: 5, agents: [], collected_at_secs: 0 });
+    var t0 = win.performance.now();
+    T.applyPetState({ mode: 'expanded' });
+    var renderMs = win.performance.now() - t0;
+    await sleep(40);
+    var list = doc.getElementById('list');
+    var panel = doc.getElementById('panel');
+    check('20 sessions render as rows', doc.querySelectorAll('.task').length === 20, 'rows=' + doc.querySelectorAll('.task').length);
+    check('20 sessions do not grow the panel', panel.getBoundingClientRect().height <= 390, 'h=' + panel.getBoundingClientRect().height);
+    check('list is scrollable, not clipped', list.scrollHeight > list.clientHeight, list.scrollHeight + '>' + list.clientHeight);
+    check('render under 50ms for 20 rows', renderMs < 50, renderMs.toFixed(1) + 'ms');
+
+    // 11. status updates never force the pet open
+    T.applyPetState({ mode: 'collapsed' });
+    await sleep(20);
+    var updated = T.snapshot.tasks.slice();
+    T.setMockSnapshot({ tasks: updated, attention_count: 3, agents: [], collected_at_secs: 0 });
+    await sleep(20);
+    check('status update keeps the pet collapsed', T.petState.mode === 'collapsed', T.petState.mode);
+    check('status update keeps the panel hidden', doc.getElementById('panel').hidden === true);
+
+    // 12. degraded jump shows a non-blocking toast (mock returns degraded)
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(30);
+    var beforeToast = T.jumpCalls.length;
+    fire(win, doc.querySelectorAll('.task')[0], 'click');
+    await sleep(30);
+    var toast = doc.getElementById('toast');
+    check('degraded jump shows feedback', toast.hidden === false, toast.textContent.trim().slice(0, 40));
+    check('degraded jump still counts one jump', T.jumpCalls.length === beforeToast + 1);
+
+    // 13. bilingual dictionary completeness for statuses
+    var zh = T.languages.indexOf('zh') !== -1;
+    check('bilingual dictionaries present', zh);
+  } catch (e) {
+    check('selftest crashed', false, String(e && e.stack ? e.stack : e));
+  }
+  finish();
+});
+function finish() {
+  var summary = (failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)') + '\n' + results.join('\n');
+  document.getElementById('results').textContent = summary;
+  document.title = 'SELFTEST ' + (failures === 0 ? 'PASS' : 'FAIL');
+}
+</script>
+</body></html>

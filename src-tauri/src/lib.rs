@@ -1,779 +1,592 @@
-use serde::Serialize;
-use std::collections::HashMap;
-use std::fs;
-use std::io::{BufRead, BufReader, Seek};
+//! Agent Monitor — desktop-pet task monitor for multiple coding agents.
+//!
+//! Responsibilities are split into modules:
+//!   * `agents/*`  — one adapter per real local data source
+//!   * `monitor`   — collects adapters into one deduplicated snapshot
+//!   * `jump`      — graded, verified jump execution (L3→L0)
+//!   * `pet`       — pure geometry + placement persistence
+//!   * this file   — Tauri window/tray/command plumbing only
+
+pub mod agents;
+pub mod jump;
+pub mod model;
+pub mod monitor;
+pub mod pet;
+
+use model::{
+    now_millis, AgentDescriptor, Edge, JumpLevel, JumpOutcome, PermissionKind, PetMode, PetPrefs,
+    PetState, Snapshot,
+};
+use monitor::Monitor;
+use pet::{
+    anchored_resize, constrain, expanded_height_logical, finish_drag_with, hide_rect, nearest_edge,
+    pick_screen, position_from_rect, restore_rect, state_view, unhide_rect, PetStore, Rect,
+    ScreenRect, COLLAPSED_SIZE, EXPANDED_WIDTH, HIDDEN_SLIVER, SNAP_DISTANCE,
+};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow};
 
-// ── Data types ──────────────────────────────────────────────────
+static ANIMATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+static DRAG_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Serialize, Debug, Default)]
-pub struct Session {
-    pub id: String,
-    pub name: String,
-    pub status: String,
-    pub status_text: String,
-    pub file_path: String,
-    pub project_path: String,
-    pub project_name: String,
-    pub model: String,
-    pub tokens_in: u64,
-    pub tokens_out: u64,
-    pub cost: f64,
-    pub active_tool: String,
-    pub tool_detail: String,
-    pub uptime_secs: u64,
-    pub message_count: u32,
-    pub cwd: String,
-    pub source: String,
-    pub last_user_msg: String,
-    pub is_active: bool,
-}
+// ── Runtime state ───────────────────────────────────────────────
 
-#[derive(Clone, Serialize, Debug)]
-pub struct Project {
-    pub sessions: Vec<Session>,
-}
-
-pub type SessionMap = HashMap<String, Project>;
-
-#[derive(Clone, Debug)]
-struct FileState {
-    session: Session,
-    mtime: u64,
-    pos: u64,
+struct Runtime {
+    monitor: Monitor,
+    prefs: PetPrefs,
+    store: PetStore,
+    state: PetState,
+    /// Window moves caused by us must not be mistaken for user drags.
+    suppress_until_ms: u64,
+    mode_before_drag: PetMode,
+    /// Authoritative window rectangle: macOS applies set_position
+    /// asynchronously, so reading it back immediately after a move is stale.
+    last_rect: Option<Rect>,
 }
 
 pub struct AppState {
-    pub sessions: Mutex<SessionMap>,
-    pub files: Mutex<HashMap<String, FileState>>,
+    inner: Mutex<Runtime>,
 }
 
-// ── Paths ───────────────────────────────────────────────────────
-
-fn claude_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude"))
-}
-
-fn projects_dir() -> Option<PathBuf> {
-    claude_dir().map(|c| c.join("projects"))
-}
-
-fn file_history_dir() -> Option<PathBuf> {
-    claude_dir().map(|c| c.join("file-history"))
-}
-
-fn ide_dir() -> Option<PathBuf> {
-    claude_dir().map(|c| c.join("ide"))
-}
-
-// ── Encoding ────────────────────────────────────────────────────
-
-fn encode_project_name(folder: &str) -> String {
-    folder.replace('\\', "-").replace('/', "-").replace(':', "-")
-}
-
-fn decode_project_name(encoded: &str) -> String {
-    if let Some(rest) = encoded.strip_prefix(|c: char| c.is_ascii_alphabetic()) {
-        if let Some(rest) = rest.strip_prefix("--") {
-            let drive = &encoded[..1];
-	    #[cfg(target_os = "windows")]
-	    { return format!("{}:\\{}", drive.to_uppercase(), rest.replace("--", "\\")); }
-	    #[cfg(not(target_os = "windows"))]
-	    { return format!("/{}", rest.replace("--", "/")); }
+impl AppState {
+    fn new() -> Self {
+        let store = PetStore::new(PetStore::default_path());
+        let prefs = store.load();
+        Self {
+            inner: Mutex::new(Runtime {
+                monitor: Monitor::new(),
+                state: PetState {
+                    hidden: prefs.hidden,
+                    ..Default::default()
+                },
+                prefs,
+                store,
+                suppress_until_ms: 0,
+                mode_before_drag: PetMode::Collapsed,
+                last_rect: None,
+            }),
         }
     }
-    encoded.to_string()
 }
 
-fn short_name(full_path: &str) -> String {
-    full_path
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or(full_path)
-        .to_string()
-}
+// ── Screen + window helpers ─────────────────────────────────────
 
-fn pretty_display_name(raw: &str) -> String {
-    // Strip drive prefix (e.g., "d--" → ""), keep dashes as separators
-    let path = if let Some(rest) = raw.strip_prefix(|c: char| c.is_ascii_alphabetic()) {
-        rest.strip_prefix("--").unwrap_or(rest)
-    } else {
-        raw
-    };
-    // Keep only last 2 dash-separated segments, joined with "-"
-    let parts: Vec<&str> = path.split('-').filter(|s| !s.is_empty()).collect();
-    if parts.len() > 2 {
-        parts[parts.len() - 2..].join("-")
-    } else {
-        path.to_string()
-    }
-}
-
-// ── Time helpers ────────────────────────────────────────────────
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn file_mtime(path: &std::path::Path) -> u64 {
-    path.metadata()
-        .and_then(|m| m.modified())
-        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
-        .unwrap_or(0)
-}
-
-fn today_cutoff() -> u64 {
-    // 30-min window for non-IDE sessions (matches claude-super-monitor)
-    now_secs().saturating_sub(1800)
-}
-
-// ── IDE & process detection ─────────────────────────────────────
-
-struct IdeInfo {
-    workspace_folders: Vec<String>,
-}
-
-fn detect_active_ide_windows(pid_cache: &mut HashMap<u32, bool>) -> HashMap<String, IdeInfo> {
-    let mut map = HashMap::new();
-    let ide_path = match ide_dir() {
-        Some(p) => p,
-        None => return map,
-    };
-
-    let entries = match fs::read_dir(&ide_path) {
-        Ok(e) => e,
-        Err(_) => return map,
-    };
-
-    for entry in entries.flatten() {
-        let fname = entry.file_name().to_string_lossy().to_string();
-        if !fname.ends_with(".lock") {
-            continue;
-        }
-
-        let content = match fs::read_to_string(entry.path()) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let data: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        if let Some(pid) = data.get("pid").and_then(|v| v.as_u64()) {
-            let pid32 = pid as u32;
-            let alive = *pid_cache.entry(pid32).or_insert_with(|| is_process_alive(pid32));
-            if !alive {
-                continue;
-            }
-        }
-
-        if let Some(folders) = data.get("workspaceFolders").and_then(|v| v.as_array()) {
-            let folders_str: Vec<String> = folders
-                .iter()
-                .filter_map(|f| f.as_str().map(|s| s.to_string()))
-                .collect();
-            if !folders_str.is_empty() {
-                map.insert(fname.clone(), IdeInfo {
-                    workspace_folders: folders_str,
-                });
-            }
-        }
-    }
-
-    map
-}
-
-fn is_process_alive(pid: u32) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map(|o| {
-                let out = String::from_utf8_lossy(&o.stdout);
-                out.contains(&pid.to_string())
-            })
-            .unwrap_or(false)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-}
-
-fn get_active_session_ids() -> HashMap<String, u64> {
-    let cutoff = today_cutoff();
-    let fh_dir = match file_history_dir() {
-        Some(p) => p,
-        None => return HashMap::new(),
-    };
-
-    let mut map = HashMap::new();
-    if let Ok(entries) = fs::read_dir(&fh_dir) {
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let session_id = entry.file_name().to_string_lossy().to_string();
-            let mt = file_mtime(&entry.path());
-            if mt >= cutoff {
-                map.insert(session_id, mt);
-            }
-        }
-    }
-    map
-}
-
-// ── Strip system injections ─────────────────────────────────────
-
-fn strip_injections(text: &str) -> String {
-    let lines: Vec<&str> = text
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.starts_with("<system-reminder>")
-                && !trimmed.starts_with("<ide_opened_file>")
-                && !trimmed.starts_with("<command-name>")
-        })
-        .collect();
-    lines.join("\n").trim().to_string()
-}
-
-// ── Tool name mapper ────────────────────────────────────────────
-
-fn tool_display_name(tool: &str) -> &str {
-    match tool {
-        "Bash" => "Running",
-        "Write" => "Writing",
-        "Edit" => "Editing",
-        "MultiEdit" => "Editing",
-        "Read" => "Reading",
-        "Glob" => "Searching",
-        "Grep" => "Searching",
-        "TodoWrite" => "Planning",
-        "Agent" => "Delegating",
-        "WebFetch" => "Fetching",
-        "WebSearch" => "Searching",
-        "NotebookEdit" => "Editing",
-        "AskUserQuestion" => "Asking",
-        "EnterPlanMode" => "Planning",
-        "ExitPlanMode" => "Planning",
-        _ => tool,
-    }
-}
-
-// ── JSONL parser ────────────────────────────────────────────────
-
-fn parse_jsonl(path: &std::path::Path, prev: Option<&FileState>) -> Option<FileState> {
-    let file = fs::File::open(path).ok()?;
-    let file_mt = file_mtime(path);
-
-    // If file hasn't changed, return cached state
-    if let Some(prev_state) = prev {
-        if file_mt <= prev_state.mtime {
-            // Update uptime only
-            let mut s = prev_state.session.clone();
-            if s.uptime_secs > 0 {
-                s.uptime_secs = s.uptime_secs.max(1);
-            }
-            return Some(FileState {
-                session: s,
-                mtime: prev_state.mtime,
-                pos: prev_state.pos,
+fn build_screens(win: &WebviewWindow) -> Vec<ScreenRect> {
+    let mut out = Vec::new();
+    if let Ok(monitors) = win.available_monitors() {
+        for m in monitors {
+            let p = m.position();
+            let s = m.size();
+            let wa = m.work_area();
+            out.push(ScreenRect {
+                key: m
+                    .name()
+                    .cloned()
+                    .unwrap_or_else(|| format!("{}x{}+{}+{}", s.width, s.height, p.x, p.y)),
+                frame: Rect::new(p.x as f64, p.y as f64, s.width as f64, s.height as f64),
+                visible: Rect::new(
+                    wa.position.x as f64,
+                    wa.position.y as f64,
+                    wa.size.width as f64,
+                    wa.size.height as f64,
+                ),
+                scale: m.scale_factor(),
             });
         }
     }
-
-    let mut reader = BufReader::new(file);
-    let start_pos = prev.map(|p| p.pos).unwrap_or(0);
-    let mut session = prev.map(|p| p.session.clone()).unwrap_or_default();
-
-    if start_pos > 0 {
-        let _ = reader.seek(std::io::SeekFrom::Start(start_pos));
-    }
-
-    let mut line = String::new();
-    let mut new_pos = start_pos;
-    let mut last_role: Option<String> = None;
-
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(n) => new_pos += n as u64,
-            Err(_) => break,
-        }
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let obj: serde_json::Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let typ = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-        // Timestamp
-        if session.uptime_secs == 0 {
-            if let Some(ts) = obj.get("timestamp").and_then(|v| v.as_str()) {
-                if let Ok(start) = parse_iso_timestamp(ts) {
-                    session.uptime_secs = now_secs().saturating_sub(start);
-                }
-            }
-        }
-
-        // Session name from aiTitle
-        if session.name.is_empty() {
-            if let Some(title) = obj.get("aiTitle").and_then(|v| v.as_str()) {
-                session.name = title.to_string();
-            }
-        }
-
-        // CWD
-        if session.cwd.is_empty() {
-            if let Some(cwd) = obj.get("cwd").and_then(|v| v.as_str()) {
-                session.cwd = cwd.to_string();
-            }
-        }
-
-        // Source
-        if session.source.is_empty() {
-            let entry = obj.get("entrypoint").and_then(|v| v.as_str()).unwrap_or("");
-            session.source = if entry.contains("vscode") { "vscode".into() } else { "cli".into() };
-        }
-
-        match typ {
-            "user" => {
-                last_role = Some("user".into());
-                session.message_count += 1;
-                if let Some(msg) = obj.get("message") {
-                    if let Some(content) = msg.get("content") {
-                        if let Some(text) = content.as_str() {
-                            let cleaned = strip_injections(text);
-                            let preview: String = cleaned.chars().take(80).collect();
-                            if !preview.is_empty() {
-                                session.last_user_msg = preview;
-                            }
-                        }
-                    }
-                }
-            }
-            "assistant" => {
-                last_role = Some("assistant".into());
-                session.message_count += 1;
-
-                if let Some(msg) = obj.get("message") {
-                    // Model
-                    if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
-                        session.model = model.to_string();
-                    }
-                    // Tokens
-                    if let Some(usage) = msg.get("usage") {
-                        session.tokens_in = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(session.tokens_in);
-                        session.tokens_out = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(session.tokens_out);
-                    }
-                    // Cost
-                    if let Some(cost) = obj.get("costUSD").and_then(|v| v.as_f64()) {
-                        session.cost = cost;
-                    }
-                    // Content analysis
-                    if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
-                        for item in content.iter().rev() {
-                            let ctype = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            match ctype {
-                                "tool_use" => {
-                                    if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                                        session.active_tool = name.to_string();
-                                        session.status_text = format!("{} {}", tool_display_name(name), name);
-                                        session.status = "working".into();
-                                        if let Some(input) = item.get("input") {
-                                            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-                                                session.tool_detail = cmd.chars().take(60).collect();
-                                            } else if let Some(fp) = input.get("file_path").and_then(|v| v.as_str()) {
-                                                session.tool_detail = short_name(fp);
-                                            } else if let Some(pattern) = input.get("pattern").and_then(|v| v.as_str()) {
-                                                session.tool_detail = pattern.chars().take(40).collect();
-                                            }
-                                        }
-                                        break;
-                                    }
-                                }
-                                "thinking" if session.status != "working" => {
-                                    session.status = "thinking".into();
-                                    session.status_text = "Thinking...".into();
-                                }
-                                "text" if session.status != "working" => {
-                                    session.status = "responding".into();
-                                    session.status_text = "Responding...".into();
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    // Stop reason
-                    if let Some(stop) = msg.get("stop_reason").and_then(|v| v.as_str()) {
-                        match stop {
-                            "tool_use" => session.status = "working".into(),
-                            "end_turn" => {
-                                session.status = "idle".into();
-                                session.status_text = "Waiting for you".into();
-                                session.active_tool.clear();
-                                session.tool_detail.clear();
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Final status
-    // Only mark as "done" if the file has been silent for 10+ seconds.
-    // This prevents agent sub-steps from flickering between done/working.
-    let silent_secs = now_secs().saturating_sub(file_mt);
-    let silent = silent_secs > 10;
-
-    if last_role.as_deref() == Some("user") && silent {
-        // User sent the last message and file hasn't changed → truly waiting
-        session.status = "done".into();
-        session.status_text = "Waiting for you".into();
-        session.active_tool.clear();
-        session.tool_detail.clear();
-    } else if last_role.as_deref() == Some("user") && !silent {
-        // User just sent input (or tool_result), assistant may still respond
-        // Keep the session as "working" to indicate activity
-        session.status = "working".into();
-        session.status_text = "Working...".into();
-    } else if session.status.is_empty() {
-        session.status = "working".into();
-        session.status_text = "Working...".into();
-    }
-
-    // Silence detection for stale responding/thinking sessions
-    if (session.status == "responding" || session.status == "thinking") && silent {
-        session.status = "done".into();
-        session.status_text = "Finished".into();
-        session.active_tool.clear();
-        session.tool_detail.clear();
-    }
-
-    Some(FileState {
-        session,
-        mtime: file_mt,
-        pos: new_pos,
-    })
-}
-
-fn parse_iso_timestamp(ts: &str) -> Result<u64, ()> {
-    let ts = ts.trim_end_matches('Z');
-    let parts: Vec<&str> = ts.split('T').collect();
-    if parts.len() != 2 { return Err(()); }
-    let date: Vec<&str> = parts[0].split('-').collect();
-    let time: Vec<&str> = parts[1].split(':').collect();
-    if date.len() != 3 || time.len() < 3 { return Err(()); }
-
-    let year: u64 = date[0].parse().map_err(|_| ())?;
-    let month: u64 = date[1].parse().map_err(|_| ())?;
-    let day: u64 = date[2].parse().map_err(|_| ())?;
-    let hour: u64 = time[0].parse().map_err(|_| ())?;
-    let min: u64 = time[1].parse().map_err(|_| ())?;
-    let sec: u64 = time[2].parse::<f64>().map_err(|_| ())? as u64;
-
-    let mut days = (year - 1970) * 365 + (year - 1968) / 4;
-    for m in 1..month {
-        days += match m {
-            1|3|5|7|8|10|12 => 31, 4|6|9|11 => 30, 2 => 29, _ => 0,
-        };
-    }
-    days += day - 1;
-    Ok(days * 86400 + hour * 3600 + min * 60 + sec)
-}
-
-// ── Scanner (mtime-aware incremental) ───────────────────────────
-
-fn scan_all_sessions(
-    files: &mut HashMap<String, FileState>,
-    pid_cache: &mut HashMap<u32, bool>,
-) -> SessionMap {
-    let mut map: SessionMap = HashMap::new();
-    let projects_path = match projects_dir() {
-        Some(p) => p,
-        None => return map,
-    };
-
-    let active_sessions = get_active_session_ids();
-    let ide_windows = detect_active_ide_windows(pid_cache);
-    let cutoff = today_cutoff();
-
-    let entries = match fs::read_dir(&projects_path) {
-        Ok(e) => e,
-        Err(_) => return map,
-    };
-
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-
-        let proj_path = entry.path();
-        let raw_name = entry.file_name().to_string_lossy().to_string();
-        let decoded = decode_project_name(&raw_name);
-        let display = if raw_name.is_empty() {
-            short_name(&decoded)
-        } else {
-            pretty_display_name(&raw_name)
-        };
-        let mut sessions = Vec::new();
-
-        // Check if project is in active IDE
-        let is_ide_project = ide_windows.values().any(|ide| {
-            ide.workspace_folders
-                .iter()
-                .any(|f| encode_project_name(f).eq_ignore_ascii_case(&raw_name))
+    if out.is_empty() {
+        out.push(ScreenRect {
+            key: "primary".into(),
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            visible: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            scale: 1.0,
         });
+    }
+    out
+}
 
-        if let Ok(dir_entries) = fs::read_dir(&proj_path) {
-            for file in dir_entries.flatten() {
-                let fpath = file.path();
-                let fname = file.file_name().to_string_lossy().to_string();
+fn window_rect(win: &WebviewWindow) -> Rect {
+    let pos = win.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
+    let size = win.outer_size().unwrap_or(PhysicalSize::new(72, 72));
+    Rect::new(
+        pos.x as f64,
+        pos.y as f64,
+        size.width as f64,
+        size.height as f64,
+    )
+}
 
-                if fname.contains("subagent") {
-                    continue;
-                }
-                if !fpath.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                    continue;
-                }
+fn set_rect(win: &WebviewWindow, r: Rect) {
+    let _ = win.set_size(PhysicalSize::new(
+        r.w.round().max(1.0) as u32,
+        r.h.round().max(1.0) as u32,
+    ));
+    let _ = win.set_position(PhysicalPosition::new(r.x.round() as i32, r.y.round() as i32));
+}
 
-                let file_key = fpath.to_string_lossy().to_string();
-                let session_id = fname.trim_end_matches(".jsonl").to_string();
-                let file_mt = file_mtime(&fpath);
+fn screen_for(win: &WebviewWindow, rect: &Rect) -> (Vec<ScreenRect>, usize) {
+    let screens = build_screens(win);
+    let (cx, cy) = rect.center();
+    let idx = pick_screen(&screens, cx, cy);
+    (screens, idx)
+}
 
-                // Skip stale files (not today and not in active IDE)
-                if file_mt < cutoff && !is_ide_project {
-                    continue;
-                }
+fn tracked_rect(app: &AppHandle, win: &WebviewWindow) -> Rect {
+    let state = app.state::<AppState>();
+    let rt = state.inner.lock().unwrap();
+    rt.last_rect.unwrap_or_else(|| window_rect(win))
+}
 
-                // Parse (uses mtime-aware cache)
-                let prev = files.get(&file_key);
-                let file_state = parse_jsonl(&fpath, prev);
+fn remember_rect(app: &AppHandle, rect: Rect) {
+    let state = app.state::<AppState>();
+    let mut rt = state.inner.lock().unwrap();
+    rt.last_rect = Some(rect);
+}
 
-                if let Some(mut state) = file_state {
-                    // Fill in metadata
-                    if state.session.id.is_empty() {
-                        state.session.id = session_id.clone();
-                    }
-                    if state.session.name.is_empty() {
-                        state.session.name = session_id[..8.min(session_id.len())].to_string();
-                    }
-                    state.session.file_path = file_key.clone();
-                    state.session.project_path = decoded.clone();
-                    state.session.project_name = display.clone();
-                    state.session.is_active = active_sessions.contains_key(&session_id) || is_ide_project;
-
-                    // For sessions that are active (file-history mtime is recent),
-                    // don't show as "done" even if file hasn't changed recently.
-                    // Long-thinking sessions have stale JSONL but active file-history.
-                    if state.session.is_active && state.session.status == "done" {
-                        let silent_secs = now_secs().saturating_sub(file_mt);
-                        if silent_secs < 120 {
-                            // Still active per file-history, and <2min since last write
-                            state.session.status = "thinking".into();
-                            state.session.status_text = "Thinking...".into();
-                        }
-                    }
-
-                    sessions.push(state.session.clone());
-                    files.insert(file_key, state);
-                }
-            }
+fn target_size(mode: PetMode, rows: usize, scale: f64, current: Rect) -> (f64, f64) {
+    match mode {
+        PetMode::Expanded => (
+            EXPANDED_WIDTH * scale,
+            expanded_height_logical(rows) * scale,
+        ),
+        PetMode::Collapsed | PetMode::EdgeHidden => {
+            (COLLAPSED_SIZE * scale, COLLAPSED_SIZE * scale)
         }
-
-        if !sessions.is_empty() {
-            map.insert(display, Project { sessions });
-        }
-    }
-
-    map
-}
-
-fn build_session_map(
-    files: &mut HashMap<String, FileState>,
-    pid_cache: &mut HashMap<u32, bool>,
-) -> SessionMap {
-    scan_all_sessions(files, pid_cache)
-}
-
-// ── Tauri commands ──────────────────────────────────────────────
-
-#[tauri::command]
-fn ping() -> String { "pong".into() }
-
-#[tauri::command]
-fn get_sessions_json(state: tauri::State<'_, AppState>) -> String {
-    let sessions = state.sessions.lock().unwrap();
-    serde_json::to_string(&*sessions).unwrap_or_else(|_| "{}".into())
-}
-
-#[tauri::command]
-fn refresh(state: tauri::State<'_, AppState>) -> String {
-    let mut files = state.files.lock().unwrap();
-    let data = {
-        let mut pid_cache = HashMap::new();
-        build_session_map(&mut files, &mut pid_cache)
-    };
-    let mut sessions = state.sessions.lock().unwrap();
-    *sessions = data.clone();
-    drop(sessions);
-    serde_json::to_string(&data).unwrap_or_else(|_| "{}".into())
-}
-
-#[tauri::command]
-fn set_clickthrough(enabled: bool, app: AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_ignore_cursor_events(enabled);
+        PetMode::Dragging => (current.w, current.h),
     }
 }
 
-#[tauri::command]
-fn set_size(scale: String, app: AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let h: f64 = match scale.as_str() {
-            "m" => 350.0,   // compact
-            "l" => 700.0,   // expanded
-            _ => 520.0,      // default
-        };
-        // Only change height, keep width at 360
-        let _ = win.set_size(tauri::PhysicalSize::new(360.0, h));
-    }
-}
-
-#[tauri::command]
-fn hide_window(app: AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-    }
-}
-
-#[tauri::command]
-fn quit_app() {
-    std::process::exit(0);
-}
-
-#[tauri::command]
-fn open_in_vscode(file_path: String, project_path: String) {
-    #[cfg(target_os = "windows")]
+fn animate(win: &WebviewWindow, from: Rect, to: Rect) {
+    let generation = ANIMATION_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    if (from.x - to.x).abs() < 1.0
+        && (from.y - to.y).abs() < 1.0
+        && (from.w - to.w).abs() < 1.0
+        && (from.h - to.h).abs() < 1.0
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let _ = std::process::Command::new("code")
-            .args(["--goto", &file_path, &project_path])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .or_else(|_| {
-                std::process::Command::new("code")
-                    .arg(&project_path)
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .spawn()
-            });
+        set_rect(win, to);
+        return;
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = std::process::Command::new("code")
-            .args(["--goto", &file_path, &project_path])
-            .spawn()
-            .or_else(|_| std::process::Command::new("code").arg(&project_path).spawn());
-    }
-}
-
-// ── Watcher ─────────────────────────────────────────────────────
-
-fn start_watcher(app: AppHandle) {
-    use notify::{EventKind, RecursiveMode, Watcher};
-    use std::sync::mpsc;
-
-    let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
-
-    // Use PollWatcher for reliable cross-platform detection
-    let config = notify::Config::default().with_poll_interval(std::time::Duration::from_secs(2));
-    let mut watcher = match notify::PollWatcher::new(tx, config) {
-        Ok(w) => w,
-        Err(_) => return,
-    };
-
-    if let Some(p) = projects_dir() {
-        if p.exists() {
-            let _ = watcher.watch(&p, RecursiveMode::Recursive);
-        }
-    }
-    if let Some(p) = file_history_dir() {
-        if p.exists() {
-            let _ = watcher.watch(&p, RecursiveMode::Recursive);
-        }
-    }
-    if let Some(p) = ide_dir() {
-        if p.exists() {
-            let _ = watcher.watch(&p, RecursiveMode::Recursive);
-        }
-    }
-
+    let win = win.clone();
     std::thread::spawn(move || {
-        while let Ok(Ok(event)) = rx.recv() {
-            match event.kind {
-                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                    // Debounce: wait for quiet period
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    // Drain any pending events
-                    while let Ok(Ok(_)) = rx.try_recv() {}
-                    // Refresh
-                    if let Some(state) = app.try_state::<AppState>() {
-                        let mut files = state.files.lock().unwrap();
-                        let data = {
-                            let mut pid_cache = HashMap::new();
-                            build_session_map(&mut files, &mut pid_cache)
-                        };
-                        let json = serde_json::to_string(&data).unwrap_or_else(|_| "{}".into());
-                        let mut sessions = state.sessions.lock().unwrap();
-                        *sessions = data;
-                        drop(sessions);
-                        let _ = app.emit("sessions-updated", &json);
-                    }
-                }
-                _ => {}
+        const STEPS: u32 = 7;
+        for i in 1..=STEPS {
+            if ANIMATION_GENERATION.load(Ordering::SeqCst) != generation {
+                return;
             }
+            let t = i as f64 / STEPS as f64;
+            let e = 1.0 - (1.0 - t).powi(3);
+            set_rect(
+                &win,
+                Rect::new(
+                    from.x + (to.x - from.x) * e,
+                    from.y + (to.y - from.y) * e,
+                    from.w + (to.w - from.w) * e,
+                    from.h + (to.h - from.h) * e,
+                ),
+            );
+            std::thread::sleep(Duration::from_millis(18));
         }
     });
 }
 
-// ── Window helpers ──────────────────────────────────────────────
-
-fn show_window(win: &tauri::WebviewWindow) {
-    let _ = win.unminimize();
-    let _ = win.show();
-    let _ = win.set_skip_taskbar(true);
-    let _ = win.set_focus();
+fn persist(app: &AppHandle, rect: Rect, edge: Edge, mode: PetMode) {
+    let state = app.state::<AppState>();
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let (screens, idx) = screen_for(&win, &rect);
+    let mut rt = state.inner.lock().unwrap();
+    rt.prefs.position = position_from_rect(&rect, &screens[idx], edge);
+    rt.prefs.hidden = mode == PetMode::EdgeHidden;
+    rt.state.edge = edge;
+    rt.state.hidden = mode == PetMode::EdgeHidden;
+    rt.store.save(&rt.prefs);
 }
 
-fn toggle_visible(win: &tauri::WebviewWindow) {
-    if win.is_visible().unwrap_or(false) {
-        let _ = win.hide();
+/// Apply a display mode to the real window, anchored to the current edge.
+fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let current = tracked_rect(app, &win);
+    let (screens, idx) = screen_for(&win, &current);
+    let scale = screens[idx].scale;
+    let visible = screens[idx].visible;
+    let state = app.state::<AppState>();
+    let (rows, edge, was_mode) = {
+        let rt = state.inner.lock().unwrap();
+        (
+            rt.monitor.snapshot().tasks.len(),
+            rt.state.edge,
+            rt.state.mode,
+        )
+    };
+    let edge = if edge == Edge::None {
+        nearest_edge(&current, &visible)
     } else {
-        show_window(win);
+        edge
+    };
+    let (tw, th) = target_size(mode, rows, scale, current);
+    let base = Rect::new(current.x, current.y, tw, th);
+    let target = match mode {
+        PetMode::EdgeHidden => hide_rect(constrain(base, &visible), edge, HIDDEN_SLIVER * scale),
+        PetMode::Expanded => {
+            if was_mode == PetMode::EdgeHidden {
+                unhide_rect(current, edge, (tw, th), &visible)
+            } else {
+                anchored_resize(base, edge, (tw, th), &visible)
+            }
+        }
+        PetMode::Collapsed => {
+            let base = if was_mode == PetMode::EdgeHidden {
+                unhide_rect(current, edge, (tw, th), &visible)
+            } else {
+                current
+            };
+            anchored_resize(base, edge, (tw, th), &visible)
+        }
+        PetMode::Dragging => current,
+    };
+
+    {
+        let mut rt = state.inner.lock().unwrap();
+        rt.state.mode = mode;
+        rt.state.edge = edge;
+        rt.state.hidden = mode == PetMode::EdgeHidden;
+        rt.suppress_until_ms = now_millis() + 420;
+        let (screens, idx) = screen_for(&win, &target);
+        rt.prefs.position = position_from_rect(&target, &screens[idx], edge);
+        rt.prefs.hidden = rt.state.hidden;
+        let view = state_view(&rt.state, &rt.prefs);
+        rt.store.save(&rt.prefs);
+        drop(rt);
+        let _ = app.emit("pet-state", view);
+    }
+
+    remember_rect(app, target);
+    if animated {
+        animate(&win, current, target);
+    } else {
+        set_rect(&win, target);
+    }
+    persist(app, target, edge, mode);
+}
+
+/// Keep the pet inside a connected screen after display changes / unplug.
+fn reconcile_screens(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let current = tracked_rect(app, &win);
+    let (screens, idx) = screen_for(&win, &current);
+    if screens.is_empty() {
+        return;
+    }
+    let visible = screens[idx].visible;
+    let (mode, edge) = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        (rt.state.mode, rt.state.edge)
+    };
+    if mode == PetMode::Dragging {
+        return;
+    }
+    let target = if mode == PetMode::EdgeHidden && edge != Edge::None {
+        hide_rect(
+            constrain(current, &visible),
+            edge,
+            HIDDEN_SLIVER * screens[idx].scale,
+        )
+    } else {
+        constrain(current, &visible)
+    };
+    if (target.x - current.x).abs() > 0.5
+        || (target.y - current.y).abs() > 0.5
+        || (target.w - current.w).abs() > 0.5
+        || (target.h - current.h).abs() > 0.5
+    {
+        app.state::<AppState>().inner.lock().unwrap().suppress_until_ms = now_millis() + 300;
+        remember_rect(app, target);
+        set_rect(&win, target);
+        persist(app, target, edge, mode);
+    }
+}
+
+fn show_pet(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let state = app.state::<AppState>();
+        let suppress = {
+            let rt = state.inner.lock().unwrap();
+            (rt.state.mode, now_millis() < rt.suppress_until_ms)
+        };
+        if suppress.0 == PetMode::EdgeHidden || suppress.0 == PetMode::Collapsed {
+            enter_mode(app, PetMode::Collapsed, false);
+        }
+    }
+}
+
+fn hide_pet_to_edge(app: &AppHandle) {
+    enter_mode(app, PetMode::EdgeHidden, true);
+}
+
+fn reset_pet_position(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let screens = build_screens(&win);
+    let idx = pick_screen(&screens, 0.0, 0.0);
+    let s = &screens[idx];
+    let size = COLLAPSED_SIZE * s.scale;
+    let rect = constrain(
+        Rect::new(
+            s.visible.right() - size - 24.0 * s.scale,
+            s.visible.y + s.visible.h * 0.45,
+            size,
+            size,
+        ),
+        &s.visible,
+    );
+    {
+        let state = app.state::<AppState>();
+        let mut rt = state.inner.lock().unwrap();
+        rt.state.edge = Edge::Right;
+        rt.state.mode = PetMode::Collapsed;
+        rt.state.hidden = false;
+        rt.prefs.hidden = false;
+        rt.suppress_until_ms = now_millis() + 300;
+        rt.store.save(&rt.prefs);
+    }
+    let _ = win.show();
+    remember_rect(app, rect);
+    set_rect(&win, rect);
+    persist(app, rect, Edge::Right, PetMode::Collapsed);
+}
+
+// ── Commands ────────────────────────────────────────────────────
+
+#[tauri::command]
+fn ping() -> String {
+    "pong".into()
+}
+
+#[tauri::command]
+fn get_snapshot(state: State<'_, AppState>) -> Snapshot {
+    state.inner.lock().unwrap().monitor.snapshot().clone()
+}
+
+#[tauri::command]
+fn get_agents(state: State<'_, AppState>) -> Vec<AgentDescriptor> {
+    state.inner.lock().unwrap().monitor.descriptors()
+}
+
+#[tauri::command]
+fn refresh(app: AppHandle, state: State<'_, AppState>) -> Snapshot {
+    let snapshot = {
+        let mut rt = state.inner.lock().unwrap();
+        rt.monitor.scan(true);
+        rt.monitor.snapshot().clone()
+    };
+    let _ = app.emit("tasks-updated", &snapshot);
+    snapshot
+}
+
+#[tauri::command]
+fn dismiss_task(app: AppHandle, state: State<'_, AppState>, task_id: String) -> bool {
+    let ok = {
+        let mut rt = state.inner.lock().unwrap();
+        rt.monitor.dismiss(&task_id)
+    };
+    if ok {
+        let snapshot = state.inner.lock().unwrap().monitor.snapshot().clone();
+        let _ = app.emit("tasks-updated", &snapshot);
+    }
+    ok
+}
+
+#[tauri::command]
+async fn jump_to_task(
+    app: AppHandle,
+    task_id: String,
+) -> Result<JumpOutcome, String> {
+    let task = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        rt.monitor.task(&task_id).cloned()
+    };
+    let outcome = match task {
+        Some(task) => jump::jump(&task),
+        None => JumpOutcome::failed(&task_id, JumpLevel::L0, "task_gone"),
+    };
+    let _ = app.emit("jump-feedback", &outcome);
+    Ok(outcome)
+}
+
+#[tauri::command]
+fn get_pet_state(state: State<'_, AppState>) -> pet::PetStateView {
+    let rt = state.inner.lock().unwrap();
+    state_view(&rt.state, &rt.prefs)
+}
+
+#[tauri::command]
+fn set_expanded(app: AppHandle, state: State<'_, AppState>, expanded: bool) {
+    let mode = { state.inner.lock().unwrap().state.mode };
+    if expanded {
+        if mode != PetMode::Expanded {
+            enter_mode(&app, PetMode::Expanded, true);
+        }
+    } else if mode == PetMode::Expanded {
+        enter_mode(&app, PetMode::Collapsed, true);
+    }
+}
+
+#[tauri::command]
+fn request_collapse(app: AppHandle, state: State<'_, AppState>) {
+    let (mode, suppressed) = {
+        let rt = state.inner.lock().unwrap();
+        (rt.state.mode, now_millis() < rt.suppress_until_ms)
+    };
+    if mode == PetMode::Expanded && !suppressed {
+        enter_mode(&app, PetMode::Collapsed, true);
+    }
+}
+
+#[tauri::command]
+fn hide_pet(app: AppHandle) {
+    hide_pet_to_edge(&app);
+}
+
+#[tauri::command]
+fn show_pet_command(app: AppHandle) {
+    show_pet(&app);
+}
+
+#[tauri::command]
+fn reset_pet_position_command(app: AppHandle) {
+    reset_pet_position(&app);
+}
+
+#[tauri::command]
+fn open_permission_settings(kind: String) {
+    let kind = if kind == "automation" {
+        PermissionKind::Automation
+    } else {
+        PermissionKind::Accessibility
+    };
+    jump::open_permission_settings(kind);
+}
+
+// ── Watcher + scheduler ─────────────────────────────────────────
+
+fn watch_roots() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let candidates = [
+        home.join(".claude/projects"),
+        home.join(".claude/file-history"),
+        home.join(".claude/ide"),
+        home.join(".codex"),
+        home.join(".codex/sessions"),
+        home.join(".dsh/storages/session_projcache/sessions"),
+        home.join(".dsh/sessions"),
+        home.join(".zcode/v2"),
+    ];
+    candidates.into_iter().filter(|p| p.exists()).collect()
+}
+
+fn start_watcher(tx: Sender<()>) {
+    use notify::{RecursiveMode, Watcher};
+    std::thread::spawn(move || {
+        let (raw_tx, raw_rx) = channel::<()>();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if res.is_ok() {
+                    let _ = raw_tx.send(());
+                }
+            }) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
+        let mut watched = 0;
+        for root in watch_roots() {
+            if watcher.watch(&root, RecursiveMode::Recursive).is_ok() {
+                watched += 1;
+            }
+        }
+        if watched == 0 {
+            return;
+        }
+        loop {
+            if raw_rx.recv().is_err() {
+                return;
+            }
+            loop {
+                match raw_rx.recv_timeout(Duration::from_millis(700)) {
+                    Ok(()) => continue,
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(());
+        }
+    });
+}
+
+fn start_worker(app: AppHandle) {
+    let (tx, rx) = channel::<()>();
+    start_watcher(tx);
+    std::thread::spawn(move || loop {
+        let (interval, hidden, empty) = {
+            let state = app.state::<AppState>();
+            let rt = state.inner.lock().unwrap();
+            let hidden = rt.state.mode == PetMode::EdgeHidden || rt.state.hidden;
+            let empty = rt.monitor.snapshot().tasks.is_empty();
+            (if hidden || empty { 30 } else { 5 }, hidden, empty)
+        };
+        let _ = rx.recv_timeout(Duration::from_secs(interval));
+        while rx.try_recv().is_ok() {}
+
+        let changed = {
+            let state = app.state::<AppState>();
+            let mut rt = state.inner.lock().unwrap();
+            rt.monitor.scan(false)
+        };
+        if changed {
+            let snapshot = {
+                let state = app.state::<AppState>();
+                let rt = state.inner.lock().unwrap();
+                rt.monitor.snapshot().clone()
+            };
+            if !hidden {
+                let _ = app.emit("tasks-updated", &snapshot);
+            }
+            update_tray_tooltip(&app, &snapshot);
+        }
+        if !(hidden && empty) {
+            reconcile_screens(&app);
+        }
+    });
+}
+
+fn update_tray_tooltip(app: &AppHandle, snapshot: &Snapshot) {
+    let waiting = snapshot.tasks.iter().filter(|t| t.needs_attention()).count();
+    let total = snapshot.tasks.len();
+    let label = if total == 0 {
+        "Agent Monitor — no sessions".to_string()
+    } else if waiting > 0 {
+        format!(
+            "Agent Monitor — {} session(s), {} need attention",
+            total, waiting
+        )
+    } else {
+        format!("Agent Monitor — {} session(s)", total)
+    };
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some(&label));
     }
 }
 
@@ -783,54 +596,183 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     use tauri::tray::TrayIconEvent;
 
-    let show_item = MenuItemBuilder::with_id("show", "Show").build(app)?;
+    let show_item = MenuItemBuilder::with_id("show", "Show Pet").build(app)?;
+    let hide_item = MenuItemBuilder::with_id("hide", "Hide to Edge").build(app)?;
+    let reset_item = MenuItemBuilder::with_id("reset", "Reset Position").build(app)?;
     let refresh_item = MenuItemBuilder::with_id("refresh", "Refresh").build(app)?;
-    let prefs_item = MenuItemBuilder::with_id("prefs", "Preferences").build(app)?;
-    let ct_item = MenuItemBuilder::with_id("toggle-ct", "Toggle Click-Thru").build(app)?;
     let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&show_item)
+        .item(&hide_item)
+        .item(&reset_item)
+        .separator()
         .item(&refresh_item)
-        .item(&prefs_item)
-        .item(&ct_item)
         .separator()
         .item(&quit_item)
         .build()?;
 
-    let tray = app.tray_by_id("main-tray").unwrap();
+    let tray = app
+        .tray_by_id("main-tray")
+        .ok_or("tray icon missing; check tauri.conf.json")?;
     tray.set_menu(Some(menu))?;
+    tray.set_tooltip(Some("Agent Monitor"))?;
 
     tray.on_tray_icon_event(|tray, event| {
         if let TrayIconEvent::Click { button, .. } = event {
             if button == tauri::tray::MouseButton::Left {
                 let app = tray.app_handle();
-                if let Some(win) = app.get_webview_window("main") {
-                    toggle_visible(&win);
+                let expanded = {
+                    let state = app.state::<AppState>();
+                    let mode = state.inner.lock().unwrap().state.mode;
+                    mode == PetMode::Expanded
+                };
+                if expanded {
+                    enter_mode(app, PetMode::Collapsed, true);
+                } else {
+                    show_pet(app);
                 }
             }
         }
     });
 
-    tray.on_menu_event(move |app, event| {
-        let id = event.id().as_ref();
-        match id {
-            "show" => {
-                if let Some(win) = app.get_webview_window("main") {
-                    show_window(&win);
-                }
-            }
-            "refresh" => { let _ = app.emit("tray-action", "refresh"); }
-            "prefs" => {
-                if let Some(win) = app.get_webview_window("main") { show_window(&win); }
-                let _ = app.emit("tray-action", "prefs");
-            }
-            "toggle-ct" => { let _ = app.emit("tray-action", "toggle-ct"); }
-            "quit" => std::process::exit(0),
-            _ => {}
+    tray.on_menu_event(move |app, event| match event.id().as_ref() {
+        "show" => show_pet(app),
+        "hide" => hide_pet_to_edge(app),
+        "reset" => reset_pet_position(app),
+        "refresh" => {
+            let snapshot = {
+                let state = app.state::<AppState>();
+                let mut rt = state.inner.lock().unwrap();
+                rt.monitor.scan(true);
+                rt.monitor.snapshot().clone()
+            };
+            let _ = app.emit("tasks-updated", &snapshot);
+            update_tray_tooltip(app, &snapshot);
         }
+        "quit" => {
+            {
+                let state = app.state::<AppState>();
+                let rt = state.inner.lock().unwrap();
+                rt.store.save(&rt.prefs);
+            }
+            app.exit(0);
+        }
+        _ => {}
     });
-
     Ok(())
+}
+
+// ── Window events ───────────────────────────────────────────────
+
+fn handle_window_moved(app: AppHandle) {
+    let suppressed = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        now_millis() < rt.suppress_until_ms
+    };
+    if suppressed {
+        return;
+    }
+    let generation = DRAG_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    {
+        let state = app.state::<AppState>();
+        let mut rt = state.inner.lock().unwrap();
+        if rt.state.mode != PetMode::Dragging {
+            rt.mode_before_drag = rt.state.mode;
+            rt.state.mode = PetMode::Dragging;
+            rt.state.hidden = false;
+        }
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(240));
+        if DRAG_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let Some(win) = app.get_webview_window("main") else {
+            return;
+        };
+        let current = window_rect(&win);
+        let (screens, idx) = screen_for(&win, &current);
+        let visible = screens[idx].visible;
+        let scale = screens[idx].scale;
+        let (snapped, edge) = finish_drag_with(current, &visible, SNAP_DISTANCE * scale);
+        let (mode_before, rows) = {
+            let state = app.state::<AppState>();
+            let rt = state.inner.lock().unwrap();
+            (rt.mode_before_drag, rt.monitor.snapshot().tasks.len())
+        };
+        let mode = match mode_before {
+            PetMode::Expanded => PetMode::Expanded,
+            _ => PetMode::Collapsed,
+        };
+        let (tw, th) = target_size(mode, rows, scale, snapped);
+        let target = anchored_resize(
+            Rect::new(snapped.x, snapped.y, tw, th),
+            edge,
+            (tw, th),
+            &visible,
+        );
+        {
+            let state = app.state::<AppState>();
+            let mut rt = state.inner.lock().unwrap();
+            rt.state.mode = mode;
+            rt.state.edge = edge;
+            rt.state.hidden = false;
+            rt.suppress_until_ms = now_millis() + 350;
+            let view = state_view(&rt.state, &rt.prefs);
+            drop(rt);
+            let _ = app.emit("pet-state", view);
+        }
+        remember_rect(&app, target);
+        set_rect(&win, target);
+        persist(&app, target, edge, mode);
+    });
+}
+
+// ── Headless verification entry ─────────────────────────────────
+
+/// `agent-monitor --dump-tasks`: print the real snapshot as JSON without
+/// starting the GUI. Used by the acceptance checklist and docs evidence.
+pub fn dump_tasks() {
+    let mut monitor = Monitor::new();
+    monitor.scan(true);
+    let first: Vec<String> = monitor.snapshot().tasks.iter().map(|t| t.id.clone()).collect();
+    monitor.scan(true);
+    let second: Vec<String> = monitor.snapshot().tasks.iter().map(|t| t.id.clone()).collect();
+    eprintln!(
+        "dedupe: first={} second={} stable={}",
+        first.len(),
+        second.len(),
+        first == second
+    );
+    let snapshot = monitor.snapshot();
+    match serde_json::to_string_pretty(snapshot) {
+        Ok(json) => println!("{json}"),
+        Err(e) => eprintln!("failed to serialise snapshot: {e}"),
+    }
+}
+
+/// `agent-monitor --jump <task-id>`: run the real graded jump for one task and
+/// print the outcome. Used by the Phase 2 acceptance evidence.
+pub fn jump_task(task_id: &str) {
+    let mut monitor = Monitor::new();
+    monitor.scan(true);
+    match monitor.task(task_id) {
+        Some(task) => match serde_json::to_string_pretty(&jump::jump(task)) {
+            Ok(json) => println!("{json}"),
+            Err(e) => eprintln!("failed to serialise outcome: {e}"),
+        },
+        None => eprintln!("task not found in current snapshot: {task_id}"),
+    }
+}
+
+/// `agent-monitor --dump-agents`: print adapter descriptors/capability matrix.
+pub fn dump_agents() {
+    let monitor = Monitor::new();
+    match serde_json::to_string_pretty(&monitor.descriptors()) {
+        Ok(json) => println!("{json}"),
+        Err(e) => eprintln!("failed to serialise agents: {e}"),
+    }
 }
 
 // ── Entry ───────────────────────────────────────────────────────
@@ -839,39 +781,96 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.set_skip_taskbar(true);
-                let _ = win.set_focus();
-            }
+            show_pet(app);
         }))
-        .manage(AppState {
-            sessions: Mutex::new(HashMap::new()),
-            files: Mutex::new(HashMap::new()),
-        })
+        .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             ping,
-            get_sessions_json,
+            get_snapshot,
+            get_agents,
             refresh,
-            set_clickthrough,
-            set_size,
-            hide_window,
-            quit_app,
-            open_in_vscode,
+            dismiss_task,
+            jump_to_task,
+            get_pet_state,
+            set_expanded,
+            request_collapse,
+            hide_pet,
+            show_pet_command,
+            reset_pet_position_command,
+            open_permission_settings,
         ])
         .setup(|app| {
-            let state = app.state::<AppState>();
-            let mut files = state.files.lock().unwrap();
-            let data = {
-                let mut pid_cache = HashMap::new();
-                build_session_map(&mut files, &mut pid_cache)
+            let handle = app.handle().clone();
+            let win = app.get_webview_window("main").ok_or("main window missing")?;
+
+            // Initial position from persisted prefs, constrained to a live screen.
+            let (screens, idx, prefs, hidden) = {
+                let state = app.state::<AppState>();
+                let rt = state.inner.lock().unwrap();
+                let screens = build_screens(&win);
+                let idx = pick_screen(&screens, 0.0, 0.0);
+                (screens, idx, rt.prefs.clone(), rt.prefs.hidden)
             };
-            let mut sessions = state.sessions.lock().unwrap();
-            *sessions = data;
-            drop(sessions);
-            drop(files);
-            setup_tray(app.handle())?;
-            start_watcher(app.handle().clone());
+            let scale = screens[idx].scale;
+            let size = COLLAPSED_SIZE * scale;
+            let rect = restore_rect(&prefs.position, (size, size), &screens);
+            // macOS ignores set_position until the window has been mapped, so
+            // map first, then place it, and only afterwards build the real mode.
+            let _ = win.show();
+            set_rect(&win, rect);
+            remember_rect(&handle, rect);
+            {
+                let state = app.state::<AppState>();
+                let mut rt = state.inner.lock().unwrap();
+                let (screens, idx) = screen_for(&win, &rect);
+                rt.prefs.position = position_from_rect(&rect, &screens[idx], prefs.position.edge);
+                rt.state.edge = prefs.position.edge;
+                rt.state.mode = if hidden {
+                    PetMode::EdgeHidden
+                } else {
+                    PetMode::Collapsed
+                };
+                rt.state.hidden = hidden;
+                rt.suppress_until_ms = now_millis() + 600;
+            }
+            let _ = win.set_visible_on_all_workspaces(true);
+            if hidden {
+                enter_mode(&handle, PetMode::EdgeHidden, false);
+            }
+
+            setup_tray(&handle)?;
+
+            // React to user drags and display changes.
+            let app_for_events = handle.clone();
+            win.on_window_event(move |event| match event {
+                tauri::WindowEvent::Moved(_) => handle_window_moved(app_for_events.clone()),
+                tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                    reconcile_screens(&app_for_events)
+                }
+                _ => {}
+            });
+
+            // First collection before the UI asks for a snapshot.
+            {
+                let state = app.state::<AppState>();
+                let mut rt = state.inner.lock().unwrap();
+                rt.monitor.scan(true);
+            }
+            let initial = {
+                let state = app.state::<AppState>();
+                let rt = state.inner.lock().unwrap();
+                rt.monitor.snapshot().clone()
+            };
+            update_tray_tooltip(&handle, &initial);
+            // Debug/acceptance aid: force a start mode to verify window geometry
+            // without synthetic clicks. Not used by normal launches.
+            match std::env::var("AGENT_MONITOR_START_MODE").as_deref() {
+                Ok("expanded") => enter_mode(&handle, PetMode::Expanded, false),
+                Ok("edge_hidden") => enter_mode(&handle, PetMode::EdgeHidden, false),
+                Ok("collapsed") => enter_mode(&handle, PetMode::Collapsed, false),
+                _ => {}
+            }
+            start_worker(handle.clone());
             Ok(())
         })
         .run(tauri::generate_context!())

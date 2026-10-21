@@ -23,3 +23,7 @@ Thumbs.db
 
 # Tauri generated
 src-tauri/gen/
+
+# Local build artifacts
+dist/
+docs/perf/*.csv

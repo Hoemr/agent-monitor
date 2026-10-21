@@ -1,10 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/tauri-schema/refs/heads/main/capabilities/v2/default.json",
   "identifier": "default",
-  "description": "Default capability for Claude Float",
+  "description": "Desktop pet capabilities: render events and drag the window.",
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-start-dragging",
     "opener:default"
   ]
 }

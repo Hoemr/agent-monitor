@@ -1,10 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/tauri-schema/refs/heads/main/tauri.conf.v2.0.json",
   "productName": "Agent Monitor",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "identifier": "com.agent.monitor",
   "build": {
-    "beforeDevCommand": "npx -y serve src -l 1420 --no-clipboard",
+    "beforeDevCommand": "python3 -m http.server 1420 --directory src",
     "frontendDist": "../src",
     "devUrl": "http://localhost:1420"
   },
@@ -13,17 +13,21 @@
       {
         "label": "main",
         "title": "Agent Monitor",
-        "width": 360,
-        "height": 520,
-        "resizable": true,
-        "minWidth": 280,
-        "minHeight": 200,
+        "width": 72,
+        "height": 72,
+        "minWidth": 14,
+        "minHeight": 14,
+        "resizable": false,
         "decorations": false,
-        "transparent": false,
+        "transparent": true,
+        "shadow": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "shadow": true,
-        "center": true
+        "focus": false,
+        "acceptFirstMouse": true,
+        "visible": false,
+        "visibleOnAllWorkspaces": true,
+        "center": false
       }
     ],
     "trayIcon": {
@@ -34,11 +38,19 @@
     "withGlobalTauri": true,
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
-    "icon": ["icons/icon.ico"],
-    "targets": ["nsis"]
+    "icon": [
+      "icons/icon.png"
+    ],
+    "targets": [
+      "app"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   }
 }

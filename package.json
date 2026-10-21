@@ -1,12 +1,14 @@
 {
   "name": "agent-monitor",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
-    "serve": "npx -y serve src -l 1420 --no-clipboard"
+    "build": "cargo build --release --manifest-path src-tauri/Cargo.toml",
+    "run": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "ui-test": "bash scripts/ui-test.sh",
+    "perf": "bash scripts/perf.sh",
+    "jump-probe": "bash scripts/jump-probe.sh",
+    "bundle:mac": "bash scripts/bundle-mac.sh"
   },
-  "devDependencies": {
-    "@tauri-apps/cli": "^2"
-  }
+  "description": "Lightweight macOS desktop pet that monitors Codex, DSH, ZCode and VSCode Claude Code sessions."
 }

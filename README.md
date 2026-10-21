@@ -1,249 +1,109 @@
-# Agent Monitor
+# Agent Monitor — desktop pet for multi-agent coding sessions (macOS)
 
-> A native floating desktop widget for real-time AI coding agent session monitoring across all projects.
+A small, quiet desktop pet that shows every parallel coding-agent session in one
+place and jumps to the right app/window/session when you click a task.
 
-![Tauri 2](https://img.shields.io/badge/Tauri-2.0-24C8DB?logo=tauri&logoColor=white)
-![Rust](https://img.shields.io/badge/Rust-1.70+-000000?logo=rust&logoColor=white)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-![License](https://img.shields.io/badge/License-MIT-00ff88)
+Built on the existing Agent Monitor project (Tauri 2 + Rust + vanilla JS) — the
+monitoring core was refactored rather than replaced, the old Claude-Code-only
+scanner was ported into a proper adapter, and the always-on widget became a
+dockable, edge-snapping pet.
 
----
-
-## What Is Agent Monitor?
-
-Agent Monitor is a **pixel-mechanical styled always-on-top widget** that gives you a single pane of glass into every Claude Code session running across all your projects — VSCode and CLI alike.
-
-**Claude Code** is powerful, but its sessions are scattered. You might have three VSCode windows open, each with its own Claude Code conversation, plus a terminal running another one. Agent Monitor puts all of them in one small, resizable window that floats on your desktop and updates in real time.
-
-### At a Glance
-
-- **Which projects** have active Claude Code sessions
-- **What each session is doing right now** — executing tools, thinking, responding, or waiting for your input
-- **Live tool details** — `Running Bash // cargo build`, `Editing // lib.rs`
-- **Token usage**, session uptime, message count, cost estimate
-- **Source** — VSCode or CLI, model name abbreviated (OPUS / SONNET / HAIKU / MIMO)
-
----
-
-## Screenshots
-
-| Folded | Active sessions |
+| Collapsed pet | Expanded task list |
 |---|---|
-| ![collapsed](screenshots/collapsed.png) | ![active](screenshots/active.png) |
+| ![collapsed](screenshots/pet-collapsed.png) | ![expanded](screenshots/pet-expanded.png) |
 
----
+## Supported agents (real local data, no APIs assumed)
 
-## Status System
-
-Agent Monitor uses a terminal-inspired visual language optimized for quick scanning:
-
-### Session Status
-
-| Symbol | Status | Color | Meaning |
+| Agent | Source | Multi-session | Highest verified jump |
 |---|---|---|---|
-| `[>]` | Working | Amber `#ffaa00` | Claude is executing a tool (Bash, Edit, etc.) |
-| `[~]` | Thinking | Purple `#aa66ff` | Claude is reasoning internally |
-| `[#]` | Responding | Cyan `#00ccff` | Claude is generating text output |
-| `[=]` | Idle | Green `#00ff88` | Finished a response, waiting |
-| `[v]` | Done | Dim green `#006633` | Waiting for your next prompt |
+| **Codex** (ChatGPT app + VSCode extension) | `~/.codex/state_5.sqlite` + rollout JSONL + `thread_history_1.sqlite` | thread id | **L3** `codex://threads/<id>` (verified) |
+| **DSH** (DeepSeek Harness) | `~/.dsh/storages/session_projcache/sessions/*.json` | session dir | **L1** (host has no session URL — documented) |
+| **ZCode** | `~/.zcode/v2/tasks-index.sqlite` | `task_id` | **blocked** on this host (`ZCode.app` exits immediately); data/mapping implemented |
+| **Claude Code** (VSCode plugin `anthropic.claude-code`, + CLI) | `~/.claude/projects/**/*.jsonl`, `file-history/`, `ide/*.lock` | transcript UUID | **L2** VSCode window (verified) |
+| Terminal-hosted CLI | same transcripts, `host=cli` | tty resolved at click time | **L1 verified**, L3 tab selection implemented/未验证 |
 
-### Project Status
+Full matrix with evidence and limitations: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) ·
+jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md).
 
-| Badge | Meaning |
-|---|---|
-| `N LIVE` / `[+]` | Project has active sessions (working/thinking/responding) |
-| `DONE` / `[v]` | All sessions in this project are completed |
+## Features
 
-### Header Counters
+* One unified task list: agent, title, unified status (running / waiting input /
+  waiting approval / completed / failed / idle / unknown), real last-activity time,
+  short summary, and the actual jump level (`L3`…`L0`).
+* **Jump with honest degradation**: session → window → app → nothing. A level is
+  reported only after a read-back check; failures/degradations show a short toast
+  with a “Grant permission” action when needed.
+* **Desktop pet**: drag anywhere, snap to the nearest screen edge, hide to a 14 px
+  sliver, hover/click to expand inward, 5 visible rows with scroll, quiet idle dot.
+* **Multi-display aware**: placement uses each screen's *visible frame* (menu bar +
+  Dock excluded), restores by screen identity + relative position, and recovers
+  when a screen disappears.
+* **Reliable recall**: tray → Show Pet / Reset Position; a second launch also
+  restores the pet. It never steals keyboard focus on launch, updates, or hover.
+* **Low resource use**: event-driven file watching with a slow fallback tick; no
+  per-task timers; no faster-than-30 s UI timer; identical snapshots are not
+  re-rendered.
+* **Local only**: reads local files/SQLite read-only. No upload, no telemetry, no
+  network calls. Titles stay short; conversation bodies are not stored.
 
-| Counter | Meaning |
-|---|---|
-| Green `[NN]` | Total tracked session files across all projects |
-| Yellow `[NN]` | Sessions NOT yet done — needs your attention |
+## Build and run
 
-### Smart Status Detection
-
-- **Agent multi-step awareness** — Quick pauses between tool calls are NOT mistaken for "done". Session stays "working" while Claude is still processing
-- **Silence timeout** — Stuck responding/thinking sessions auto-convert to "done" after 10 seconds of no file changes
-- **Long-thinking detection** — Sessions in the thinking phase for 1-2 minutes are correctly detected via file-history directory mtime, even when the JSONL transcript hasn't been updated yet
-
----
-
-## How It Works
-
-### Session Discovery
-
-```
-~/.claude/
-├── projects/                    # All Claude Code sessions live here
-│   ├── d--dev-MyProject/        # Encoded project path (workspaceToProjectName)
-│   │   ├── <uuid>.jsonl        # Session transcript files
-│   │   └── ...
-│   └── ...
-├── file-history/                # Per-session activity tracking
-│   ├── <session-id>/           # Directory mtime = last activity time
-│   └── ...
-└── ide/                         # VSCode integration
-    ├── <PID>.lock              # Active VSCode window metadata
-    └── ...
-```
-
-1. **Discovery** — Scans `~/.claude/projects/` for all session transcript (`.jsonl`) files
-2. **Active detection** — Cross-references with `~/.claude/file-history/` directory modification times
-3. **IDE matching** — Parses `~/.claude/ide/*.lock` files, checks PIDs are alive, encodes workspace folders to match project directories
-4. **Incremental parsing** — Tracks file modification times and byte positions; only re-parses files that have changed since last scan
-5. **Real-time updates** — `PollWatcher` (mtime polling every 2 seconds) + frontend fallback polling
-
-### Status Parsing
-
-Each JSONL line is parsed to extract:
-- **Message role** — `user` (your prompts + tool results) vs `assistant` (Claude's responses)
-- **Content blocks** — `tool_use` (tool calls), `thinking` (reasoning), `text` (visible output)
-- **Stop reason** — `tool_use` (Claude handed off to a tool) vs `end_turn` (Claude finished its turn)
-- **Metadata** — model name, token usage, cost, timestamp
-
-### Session Caching
-
-- **Mtime-aware** — Files are only re-parsed when their modification time changes
-- **PID cache** — IDE lock file PID liveness is cached to avoid repeated `tasklist` calls
-- **Incremental reads** — Tracks byte offsets, seeks to last position, reads only new data
-
----
-
-## Installation
-
-### Download (Recommended)
-
-Go to [GitHub Releases](https://github.com/Hoemr/agent-monitor/releases) and download the binary for your platform. No installer, no dependencies.
-
-### npm
+Requirements: macOS 11+, Rust (stable), Command Line Tools. No Xcode project and
+no Node build step are required.
 
 ```bash
-npm install -g agent-monitor
-agent-monitor
+# production build (frontend assets are embedded via tauri's custom-protocol)
+cargo build --release --manifest-path src-tauri/Cargo.toml
+src-tauri/target/release/agent-monitor          # run the pet
+
+# verify adapters without opening a window
+src-tauri/target/release/agent-monitor --dump-agents
+src-tauri/target/release/agent-monitor --dump-tasks
+
+# one real jump (prints the graded outcome)
+src-tauri/target/release/agent-monitor --jump 'codex:<thread-id>'
 ```
 
-### Homebrew (macOS)
+### macOS .app bundle
 
 ```bash
-brew tap Hoemr/agent-monitor
-brew install agent-monitor
+bash scripts/bundle-mac.sh     # → dist/Agent Monitor.app (ad-hoc signed, LSUIElement)
+open "dist/Agent Monitor.app"
 ```
 
-### Platform Binaries
+The first time you click a task, macOS may ask for **Automation** (to focus the
+target window) and **Accessibility** (to raise a specific window). The app only
+uses them on your click, explains the need in the toast, and links to the exact
+System Settings pane. It never resets or forces permissions.
 
-| Platform | File |
-|---|---|
-| **Windows** | `agent-monitor.exe` |
-| **macOS** (Intel) | `agent-monitor-x86_64-apple-darwin` |
-| **macOS** (Apple Silicon) | `agent-monitor-aarch64-apple-darwin` |
-| **Linux** | `agent-monitor-x86_64-unknown-linux-gnu` |
-
-Releases are built automatically by GitHub Actions on every version tag (`v*`).
-
-### Build from Source
+## Development
 
 ```bash
-git clone https://github.com/Hoemr/agent-monitor.git
-cd agent-monitor
-npm install
-npx tauri build
+npm test          # cargo test (46 unit tests)
+npm run ui-test   # 24 headless UI checks (Chrome drives the real page)
+npm run perf      # 5 min × hidden / idle / expanded sampling of the release app
+npm run jump-probe
 ```
 
-Binary at `src-tauri/target/release/`. Prerequisites: [Rust](https://rustup.rs/) 1.70+, [Node.js](https://nodejs.org/) 18+. Linux additionally requires `libwebkit2gtk-4.1-dev`.
+Layout/design notes for the frontend contract: [`docs/UI_CONTRACT.md`](docs/UI_CONTRACT.md).
+Adding an agent: [`docs/NEW_AGENT.md`](docs/NEW_AGENT.md) — one adapter file + one
+registry line; no UI or monitor changes.
 
----
+Extension acceptance uses the clearly-labelled synthetic adapter:
 
-## Usage
-
-| Action | How |
-|---|---|
-| Open / Close window | Left-click tray icon |
-| Move window | Drag the header |
-| Resize window | Drag any edge or corner |
-| Expand / Collapse project | Click the project folder header |
-| Open session in VSCode | Click any session row |
-| Manual refresh | Click `[R]` button |
-| Context menu | Right-click anywhere in the window |
-| Adjust polling speed | Right-click → Poll: 3s / 5s / 10s |
-| Hide to tray | Right-click → Hide Window |
-| Quit | Right-click → Quit or tray menu → Quit |
-
----
-
-## Design Philosophy
-
-### Why a Native Desktop Widget?
-
-Web dashboards live in a browser tab — easy to lose among dozens of other tabs. Terminal tools like `claude status` require you to type a command every time you want to check.
-
-A floating always-on-top widget is **always visible but never in the way**. You can glance at it while coding, see that a long-thinking session has started responding, and jump back in at exactly the right moment.
-
-### Why Tauri 2.0?
-
-| | Tauri 2.0 | Electron |
-|---|---|---|
-| Binary size | ~4.5MB | ~120MB+ |
-| Memory (idle) | ~15MB | ~80MB+ |
-| Native feel | Yes (OS WebView) | Chromium embedded |
-| Startup time | < 1 second | 3-5 seconds |
-| Bundled runtime | No | Yes (embedded) |
-
-### Pixel-Mechanical Aesthetic
-
-The dark terminal color palette (`#0a0a0f` background, `#00ff88` green, `#ffaa00` amber) with Consolas monospace, sharp borders, and glowing status indicators is deliberate. It signals: **this is a tool for programmers, by programmers**.
-
----
-
-## Compared to Alternatives
-
-| Feature | Agent Monitor | claude-super-monitor | cc-switch |
-|---|---|---|---|
-| **Interface** | Native floating widget | Web dashboard | Desktop app |
-| **Always-on-top** | Yes | No | No |
-| **Multi-project view** | Yes | Yes | Per-session |
-| **Real-time status** | 2s PollWatcher | fs.watch + WS | N/A |
-| **Session detection** | file-history + IDE | file-history + IDE | N/A |
-| **Tool details** | Yes | Yes | No |
-| **Token/cost tracking** | Yes | Estimated | Yes |
-| **Interactive hooks** | No | Yes (user questions) | N/A |
-| **Memory usage** | ~15MB | ~80MB | ~30MB |
-| **Install size** | ~4.5MB | ~50MB | ~15MB |
-
----
-
-## Project Structure
-
-```
-agent-monitor/
-├── src/                        # Frontend (HTML/CSS/JS)
-│   ├── index.html
-│   ├── style.css               # Pixel-mechanical theme
-│   └── main.js                 # Rendering, context menu, polling
-├── src-tauri/                  # Rust backend
-│   ├── src/
-│   │   ├── main.rs             # Entry point
-│   │   └── lib.rs              # Scanner, parser, watcher, tray
-│   ├── Cargo.toml
-│   ├── tauri.conf.json         # Window/tray/security config
-│   └── icons/                  # icon.ico + icon.png
-├── gen-icon.js                 # Pixel-art icon generator
-├── README.md                   # This file (English)
-└── README_ZH.md                # Chinese version
+```bash
+AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
 ```
 
----
+## Known limitations
 
-## Platform Support
-
-| Platform | Status |
-|---|---|
-| **Windows 10/11** | Fully supported and tested |
-| **macOS** | Should work (built on Tauri 2.0 cross-platform) |
-| **Linux** | Should work (requires WebKitGTK) |
-
----
-
-## License
-
-MIT
+* Codex shows an AI-generated window title while its database stores the first
+  prompt, so Codex uses navigation evidence for L3 and cannot do exact-title L2.
+* DSH is a single-window Electron app whose only deep link is `dsh://open` (focus),
+  so session-level jumping is impossible and is reported as L1.
+* `ZCode.app` (Electron 41) exits immediately on the test host (macOS 27 beta);
+  its data is shown, its jump is reported as unconfirmed. Details in `docs/JUMP.md`.
+* Physical multi-display, Space/full-screen, and first-run TCC prompts were **not
+  executed** on this single-display host; see `docs/ACCEPTANCE.md` for repro steps.
+* Performance numbers are measured on the test Mac in `docs/PERF.md` — budget
+  figures there are observations, not platform guarantees.
