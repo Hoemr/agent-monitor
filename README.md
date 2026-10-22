@@ -203,8 +203,12 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
 * **Low resource use**: event-driven file watching with a slow fallback tick; no
   per-task timers; no faster-than-30 s UI timer; identical snapshots are not
   re-rendered.
-* **Local only**: reads local files/SQLite read-only. No upload, no telemetry, no
-  network calls. Titles stay short; conversation bodies are not stored.
+* **Local only**: reads local files/SQLite read-only — no account, no upload, no
+  telemetry. The only outbound requests are the updater's GitHub Releases check
+  (one silent HTTPS GET for `latest.json` ~4 s after launch when automatic checks
+  are on, or when you click Check for Updates) and the signed tarball download
+  you explicitly start; nothing else talks to the network. Titles stay short;
+  conversation bodies are not stored.
 
 ## Settings
 
@@ -216,8 +220,9 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
 
 Settings live in `~/Library/Application Support/agent-monitor/settings.json`
 (atomic writes, corrupt file → `settings.json.bak` + defaults), placement in
-`pet.json`, ignored tasks in `dismissed.json`. Nothing leaves the machine; there
-is no account, telemetry or cloud sync. Full key-by-key contract:
+`pet.json`, ignored tasks in `dismissed.json`. These files stay on your Mac; there
+is no account, telemetry or cloud sync (the only outbound request is the updater
+check described above). Full key-by-key contract:
 [`docs/SETTINGS.md`](docs/SETTINGS.md).
 
 ## Build and run
@@ -317,7 +322,8 @@ AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
   shows the live status and the exact panes).
 * `retention_hours` now applies uniformly: completing an IDE-hosted Claude Code
   session older than the configured window (default 6 h, previously fixed 24 h
-  for IDE sessions) hides it; ZCode's newest-3 fallback is unchanged.
+  for IDE sessions) hides it, and ZCode no longer keeps the newest three rows
+  regardless of age — its ended sessions follow `retention_hours` too.
 * `--dump-tasks` / `--dump-agents` honour `settings.json` (agent switches and
   retention) but do not hide dismissed tasks, so they can differ from the GUI
   for tasks you explicitly dismissed.
