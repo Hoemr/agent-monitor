@@ -60,6 +60,8 @@ renders whatever the snapshot contains.
 | `open_permission_settings` | `kind: "accessibility"\|"automation"` | — | system pane |
 | `get_jump_diagnostics` | — | JumpDiagnostics | permission + per-agent jump self-check (see `docs/JUMP.md`) |
 | `reveal_app_in_finder` | — | Result | reveal the .app bundle so it can be added to Accessibility |
+| `request_accessibility_permission` | — | `Result<bool, String>` | native AX prompt for the current app; `true` = already trusted, `false` = prompt shown |
+| `reset_app_permissions` | — | `Result<string, String>` | `tccutil reset Accessibility/AppleEvents` for **this bundle id only** (never machine-wide); returns a human-readable summary |
 | `check_for_update` | — | UpdateCheck | in-app updater check (`{current_version, available, version?, notes?, pub_date?}`) |
 | `install_update` | — | Result | download + verify + install the update in place; emits progress events |
 | `restart_app` | — | — | restart to finish an installed update |
@@ -208,18 +210,18 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   one row per task showing agent name, title (ellipsis + `title` tooltip), status
   text **and** icon (not colour alone), relative last-activity time, and
   jump-level hint.
-* Collapsed/hidden “new completions”: `seenAtSecs` is set at boot and refreshed
-  whenever the panel is expanded; the collapsed pet shows an **unfilled green
-  ring** (16 px, 1 px green border, 8 % tint, green tabular number) with the count
-  of `completed` tasks whose activity is newer than that, and the expanded header
-  shows the same count as a chip. `new_badge=false` hides both. The edge-hidden
-  tab shows a filled 6 px dot instead of a number.
+* “New completions”: `seenAtSecs` is set at boot and refreshed whenever the panel
+  is expanded. There is **no collapsed count ring** any more (removed in 0.7.1);
+  the expanded header shows the count as a chip and every row completed since the
+  last look carries a green dot + “newly completed” label while the panel stays
+  open. The collapsed pet only shows the semantic green status dot (below).
+  `new_badge=false` hides the header chip, the row markers and the green dot.
 * Jump notices never render inside the small pet window: the toast is painted only
   while the panel is expanded/dragging. While collapsed/edge-hidden/tray-hidden a
-  text-free notice dot (top-left; amber = degraded, red = failed, blue = info) is
-  shown instead, the notice lifetime is extended (~30 s), and expanding restores
-  the full toast with its action button. The pending notice is included in the
-  collapsed pet's `aria-label`/`title`.
+  text-free notice dot (**bottom-right**; amber = degraded, red = failed, blue =
+  info) is shown instead, the notice lifetime is extended (~30 s), and expanding
+  restores the full toast with its action button. The pending notice is included
+  in the collapsed pet's `aria-label`/`title`.
 * Edge-hidden geometry: the window becomes a `hidden_sliver × hidden_sliver`
   square (8–24 pt) flush with the snapped screen edge — the snapped side is
   invisible and the two perpendicular sides only expose that small square. The
@@ -268,13 +270,18 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   since the last look are captured and each such row carries a green “newly
   completed” marker while the panel stays open (the header chip still shows the
   count; the collapsed green ring is unchanged).
-* Collapsed pet status dots (semantic, can coexist, top-left vertical cluster):
-  **yellow** = at least one session waits for an answer, **green** = at least one
-  new completion since the last look, **red** = at least one failed/interrupted
-  session. The cluster is hidden while the panel is expanded and uses a compact
-  variant in the 14 px edge/tray-hidden tab. The jump-feedback notice dot moved to
-  the bottom-right corner so it never collides with the status cluster. Each dot
-  and the cluster carry localized `aria-label`/`title` text.
+* Collapsed pet status capsule (semantic, can coexist, top-left): a small
+  translucent macOS-traffic-light-style vertical capsule (hairline border, inset
+  highlight, soft shadow, no `backdrop-filter`) holding three 6 px glass-bead
+  dots — **amber** = at least one session waits for an answer, **green** = at
+  least one new completion since the last look, **red** = at least one
+  failed/interrupted session. Only the amber dot gently breathes (2.6 s, scale
+  1→1.06 + glow) while a question is pending; `animations=off` and Reduce Motion
+  make it static. The capsule is hidden while the panel is expanded and shrinks
+  to a single 3 px highest-priority dot (question > failed > new) in the 14 px
+  edge/tray-hidden tab. The jump-feedback notice dot lives in the bottom-right
+  corner so it never collides with the capsule. Each dot and the capsule carry
+  localized `aria-label`/`title` text.
 * Soft jump warnings (`degraded` / `unconfirmed`) are shown **once per task and
   reason per session**; repeated clicks on the same stale target do not re-toast.
   `failed` outcomes are always reported. This is in-memory only.
@@ -304,4 +311,14 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   inline double confirmation.
 * Readability first: solid background (no vibrancy layer), system font stack,
   semantic colours, `light-dark()` tokens, explicit `appearance` override.
+* Settings → Jump permissions: the first-run/ad-hoc guide is a **collapsed
+  `<details>`** (CTA in the summary when grants are missing); an “App location”
+  row shows the running bundle path so the user can verify which copy System
+  Settings must contain. When Accessibility is missing a stale-grant alert
+  explains that ad-hoc signatures change on rebuild. Actions: **Request
+  permission** (`request_accessibility_permission`, native AX prompt), per-row
+  **Open** (`open_permission_settings`), **Reveal App**, **Check again**, and an
+  inline-confirmed **Reset this app's permissions…** (`reset_app_permissions`,
+  this bundle id only). Returning focus to the Settings window re-runs the
+  self-check, so toggling the switch in System Settings updates the pills.
 * All controls are native-focusable with visible focus rings and `aria-label`s.

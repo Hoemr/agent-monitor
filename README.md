@@ -22,11 +22,11 @@ dockable, edge-snapping pet.
 
 ### Collapsed / hidden states
 
-| Collapsed: attention + new-completion ring | Collapsed: pending notice dot | Edge-hidden tab |
+| Collapsed: semantic status capsule | Collapsed: pending notice dot | Edge-hidden tab |
 |---|---|---|
-| ![collapsed ring badge](screenshots/pet-collapsed-new-badge-ring-dark.png) | ![collapsed notice dot](screenshots/pet-collapsed-notice-dot-dark.png) | ![edge hidden tab](screenshots/pet-edge-tab-dark.png) |
+| ![collapsed status capsule](screenshots/pet-capsule-dark.png) | ![collapsed notice dot](screenshots/pet-collapsed-notice-dot-dark.png) | ![edge hidden tab](screenshots/pet-edge-tab-dark.png) |
 
-*(Solid blue = tasks waiting for you; unfilled green ring = tasks completed since you last opened the panel; small amber/red dot top-left = a jump notice is pending (the full message appears when the panel expands). The hidden state is a small square tab attached to the screen edge — the snapped side is off-screen, so only that nub shows.)*
+*(Solid blue = tasks waiting for you; top-left translucent capsule = macOS-style status beads: amber = a session is waiting on a question, green = new completions since you last opened, red = failed/interrupted — all can show at once; bottom-right small amber/red/blue dot = a jump notice is pending (the full message appears when the panel expands). The hidden state is a small square tab attached to the screen edge — the snapped side is off-screen, so only that nub shows.)*
 
 ### Settings window (Cmd+, · tray → Settings… · footer gear)
 
@@ -60,10 +60,14 @@ capability table (see [`docs/JUMP.md`](docs/JUMP.md)).
 
 | Attention alerts | Jump permissions & self-check |
 |---|---|
-| ![attention settings](screenshots/settings-attention-dark.png) | ![jump setup](screenshots/settings-jump-dark.png) |
-| ![attention settings light](screenshots/settings-attention-light.png) | ![jump setup light](screenshots/settings-jump-light.png) |
+| ![attention settings](screenshots/settings-attention-dark.png) | ![jump permissions](screenshots/settings-jump-permissions-dark.png) |
 
-![jump setup in Chinese](screenshots/settings-jump-zh.png)
+Repairing a stale grant (collapsed guide, app location, Request permission /
+Reset this app's permissions):
+
+![jump permissions light](screenshots/settings-jump-permissions-light.png)
+
+![jump permissions in Chinese](screenshots/settings-jump-permissions-zh.png)
 
 ### New completions, status dots & in-app updates (0.7.0)
 
@@ -139,24 +143,30 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
   that is already visible opens without a click.
 * **Jump setup & self-check in Settings → Jump**: live Accessibility /
   Automation / window-read status, one-click buttons to open the exact System
-  Settings pane or reveal the app for dragging into Accessibility, a first-run
-  guide, re-check, ad-hoc re-grant note, and a per-agent capability table
-  (max level, installed/running, deep-link support). Headless equivalent:
-  `--jump-diagnostics`. Details in [`docs/JUMP.md`](docs/JUMP.md).
+  Settings pane or reveal the app for dragging into Accessibility, a collapsible
+  first-run guide, re-check, the running bundle path, and a per-agent capability
+  table (max level, installed/running, session-route support). When System
+  Settings shows a grant but the app still reports “Not granted” (ad-hoc
+  rebuilds/another copy), the pane explains it and offers **Request permission**
+  (native AX prompt) and an inline-confirmed **Reset this app's permissions**
+  (this bundle only). It re-checks automatically when you return from System
+  Settings. Headless equivalent: `--jump-diagnostics`. Details in
+  [`docs/JUMP.md`](docs/JUMP.md).
 * **Desktop pet**: drag anywhere, snap to the nearest screen edge, hide to a
   small square tab (8–24 px) whose snapped side is fully off-screen (or to the
   menu bar when edge-hiding is disabled), hover/click to expand inward, 3/5/8
   visible rows with scroll, quiet idle dot. The footer shows
   `visible / total` sessions (e.g. `5 / 119`) so the count matches what the
   window can display.
-* **New-completion indicator**: while collapsed/hidden, an unfilled green ring
-  (and the expanded header chip) shows how many tasks completed since you last
-  looked at the panel — switchable with `new_badge`. When you open the panel,
-  the rows that are new carry a green “newly completed” marker, so you can see
-  *which* ones changed, not just the count.
-* **Three status dots while collapsed**: a compact top-left cluster shows
-  **yellow** (a session is waiting on a question), **green** (new completions
-  since your last look) and **red** (failed/interrupted sessions). All three can
+* **New-completion indicator**: the expanded header chip shows how many tasks
+  completed since you last looked at the panel, and the rows that are new carry
+  a green “newly completed” dot, so you can see *which* ones changed — not just
+  the count (switchable with `new_badge`; there is no collapsed count ring any
+  more).
+* **macOS-style status capsule while collapsed**: a small translucent
+  traffic-light capsule at the top-left holds **amber** (a session is waiting on
+  a question, gently breathing), **green** (new completions since your last
+  look) and **red** (failed/interrupted sessions) glass beads. All three can
   appear at once and each has an accessible label; the jump-feedback notice dot
   moved to the bottom-right corner so the two never collide.
 * **Updates built in**: Settings → Updates (and tray → Check for Updates…) checks
@@ -243,8 +253,8 @@ System Settings pane. It never resets or forces permissions.
 ## Development
 
 ```bash
-npm test          # cargo test (151 unit tests: model/monitor/attention/agents/pet/settings/icons/jump/ax/update)
-npm run ui-test   # 210 headless UI checks (pet 129 + settings 81, real DOM events)
+npm test          # cargo test (155 unit tests: model/monitor/attention/agents/pet/settings/icons/jump/ax/update)
+npm run ui-test   # 237 headless UI checks (pet 136 + settings 101, real DOM events)
 npm run perf      # 5 min × hidden / idle / expanded sampling of the release app
 npm run jump-probe
 ```
@@ -277,8 +287,15 @@ AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
   <workspace>` and then AX window matching.
 * Updates are **full-artifact in-app updates** (like cc-switch), not binary
   deltas: the normal ~9 MB `.app` tarball is downloaded and swapped in place.
-  The bundle is ad-hoc signed, so macOS may ask for Accessibility/Automation
-  again after an update (Settings → Jump shows the live status).
+  The bundle is ad-hoc signed, so every update/rebuild can invalidate the
+  Accessibility/Automation grant; System Settings may still show the old
+  checkbox. Settings → Jump shows the live status, auto-refreshes on return and
+  offers **Request permission** plus a **Reset this app's permissions** action to
+  repair stale records.
+* **Never run `tccutil reset Accessibility` without a bundle id** — it clears the
+  machine-wide Accessibility grants of every app, and only the user can restore
+  them in System Settings. The in-app reset is hard-restricted to
+  `com.agent.monitor`.
 * The GitHub Release must be **published** (not a draft/prerelease) and carry
   `latest.json` + the signed macOS tarball; until a newer release exists the
   updater correctly reports "up to date". CI needs

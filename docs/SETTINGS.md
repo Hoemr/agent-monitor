@@ -29,7 +29,7 @@ P0 的全部设置项都不需要重启。
 | `appearance` | `system \| light \| dark` | `system` | — | 即时：`Window::set_theme`（macOS 为 app 级）+ 页面 `color-scheme`，vibrancy 材质同步 |
 | `show_summary` | bool | `true` | — | 即时：桌宠行内第二行摘要显隐 |
 | `show_jump_level` | bool | `true` | — | 即时：行尾 L3/L2/L1/L0 显隐 |
-| `new_badge` | bool | `true` | — | 即时：收起/隐藏时显示“自上次查看后新完成”的绿色角标与数量（0 时自动隐藏） |
+| `new_badge` | bool | `true` | — | 即时：展开时显示“自上次查看后新完成”的 header chip，并给这些行加绿色“新完成”标记；收起态只由左上角绿色状态点表示（0.7.1 起不再显示左下角数字环） |
 
 ### 提醒 / 待回答（attention）
 
@@ -87,8 +87,24 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 
 跳转页同时是**配置向导与自检**：辅助功能/自动化/窗口读取三项权限状态、打开对应系统
 设置面板、在访达中显示 App（拖入辅助功能列表）、重新自检，以及每个 Agent 的最高跳转
-等级、安装/运行状态和限制说明。完整步骤与诊断字段见 [`docs/JUMP.md`](JUMP.md) 的
-“Setup, permissions and self-check”一节。
+等级、安装/运行状态和限制说明。首次配置/修复说明是可折叠的 `<details>`（保持页面简洁），
+顶部同时显示**当前运行的 App 路径**，方便核对系统设置里授权的是不是这一份拷贝。
+辅助功能未授权时会出现“系统设置里勾选了但仍显示未授权”的提示与修复动作：
+
+* **请求授权**（`request_accessibility_permission`）：触发 macOS 原生 AX 授权提示，把
+  **当前这份 App** 加入辅助功能列表；
+* **重置本应用授权…**（`reset_app_permissions`，二次确认）：仅清除
+  `com.agent.monitor` 自己的 Accessibility/AppleEvents 记录（绝不触碰其他 App），
+  然后可用“在访达中显示 App”重新添加当前版本；
+* 从系统设置切回本窗口时自动重新自检；`重新检查` 也可手动刷新。
+
+> 维护者注意：`tccutil reset Accessibility` **不带 bundle id** 会清空整台机器所有 App
+> 的辅助功能授权，只能由用户在系统设置里重新勾选。应用内的重置命令已硬编码为
+> `tccutil reset <service> com.agent.monitor` 并对此做了单测，任何情况下都不会省略
+> bundle id。
+
+完整步骤与诊断字段见 [`docs/JUMP.md`](JUMP.md) 的
+“Setup, permissions and self-check”与“Permission repair”两节。
 
 ### 数据 / 恢复
 
@@ -122,6 +138,8 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 | `open_data_dir` | — | `Result<(), String>` | Finder 打开数据目录 |
 | `get_jump_diagnostics` | — | 见 [`docs/JUMP.md`](JUMP.md) | 跳转自检：辅助功能/自动化/窗口读取 + 各 Agent 安装/运行/最高等级 |
 | `reveal_app_in_finder` | — | `Result<(), String>` | 在访达中显示 Agent Monitor.app（方便拖入辅助功能列表） |
+| `request_accessibility_permission` | — | `Result<bool, String>` | 原生 AX 授权提示；`true`=已授权，`false`=已弹出提示 |
+| `reset_app_permissions` | — | `Result<String, String>` | 仅重置本 bundle（`com.agent.monitor`）的 Accessibility/AppleEvents 记录 |
 | `check_for_update` | — | `{current_version, available, version?, notes?, pub_date?}` | 应用内更新检查 |
 | `install_update` | — | `Result<(), String>` | 下载、校验签名并就地安装；过程中发 `update-progress` |
 | `restart_app` | — | — | 重启以完成已安装的更新 |
@@ -143,7 +161,7 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
   "pet_path": "…/pet.json",
   "dismissed_path": "…/dismissed.json",
   "version": 1,
-  "app_version": "0.7.0",
+  "app_version": "0.7.1",
   "system_language": "zh",
   "legacy_imported": true,
   "corrupt_backup": null
@@ -187,7 +205,7 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 source ~/.cargo/env
 cargo test --release --manifest-path src-tauri/Cargo.toml      # 含 settings/pet/monitor 单测
 cargo build --release --manifest-path src-tauri/Cargo.toml
-bash scripts/ui-test.sh              # 桌宠（129 项）+ 设置窗口（81 项），聚合退出码
+bash scripts/ui-test.sh              # 桌宠（136 项）+ 设置窗口（101 项），聚合退出码
 bash scripts/ui-test-settings.sh     # 只跑设置窗口
 src-tauri/target/release/agent-monitor --dump-tasks   # 打印生效的 enabled/retention/rows
 src-tauri/target/release/agent-monitor --jump-diagnostics  # 跳转权限/应用自检 JSON
@@ -197,6 +215,8 @@ swift scripts/wins-probe.swift <pid>  # 真实窗口 bounds + activationPolicy
 ```
 
 调试辅助（仅验收用，正常启动不设置）：`AGENT_MONITOR_START_MODE=expanded|edge_hidden|tray_hidden|collapsed`、
+`AGENT_MONITOR_DUMP_JUMP_DIAGNOSTICS=<path>`（启动约 1.5s 后把跳转自检 JSON 写到文件，供排查）、
+`AGENT_MONITOR_REQUEST_AX_PROMPT=1`（启动约 2s 后为当前 App 弹出辅助功能授权提示）、
 `AGENT_MONITOR_OPEN_SETTINGS=1`（启动即打开设置窗口，便于探测窗口与 accessory 状态）、
 `AGENT_MONITOR_DEBUG_GEOMETRY=1`、`AGENT_MONITOR_DEBUG_TRAY=1`。
 

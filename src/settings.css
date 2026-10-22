@@ -647,6 +647,14 @@ body {
 .btn.danger { color: var(--danger); }
 .btn:disabled { opacity: 0.45; }
 .btn:disabled:hover { background: var(--btn-bg); }
+.btn.primary {
+  background: var(--accent);
+  color: #ffffff;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.10), 0 0.5px 1.5px rgba(0, 0, 0, 0.20);
+}
+.btn.primary:hover { background: var(--accent); filter: brightness(1.07); }
+.btn.primary:active { background: var(--accent); filter: brightness(0.94); }
+.btn.primary:disabled:hover { background: var(--accent); filter: none; }
 .btn.plain {
   background: transparent;
   box-shadow: none;
@@ -722,6 +730,88 @@ body {
   color: var(--unknown-fg);
   background: var(--unknown-bg);
   box-shadow: inset 0 0 0 0.5px var(--unknown-border);
+}
+
+/* Collapsible setup guide: a native <details> with a macOS-style disclosure. */
+.guide {
+  background: var(--card);
+  border-radius: 10px;
+  box-shadow: 0 0 0 0.5px var(--card-border), 0 1px 2px rgba(0, 0, 0, 0.035);
+  overflow: hidden;
+}
+.guide-summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text);
+  cursor: default;
+  outline: none;
+  list-style: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.guide-summary::-webkit-details-marker { display: none; }
+.guide-summary::marker { content: ""; }
+.guide-summary:hover { background: var(--fill-hover); }
+.guide-summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+.guide-chevron {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  margin-left: 1px;
+  border-right: 1.5px solid var(--text-tertiary);
+  border-bottom: 1.5px solid var(--text-tertiary);
+  transform: rotate(-45deg);
+  transition: transform 140ms ease;
+}
+.guide[open] .guide-chevron { transform: rotate(45deg); }
+.guide-summary-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.guide-summary-text[data-guide-missing="true"] { color: var(--warn-fg); }
+.guide-summary-hint {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+.guide-body { border-top: 1px solid var(--row-sep); padding-bottom: 4px; }
+.guide-note {
+  margin: 8px 14px 0;
+  font-size: 11px;
+  line-height: 1.42;
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+.guide-note-warn { color: var(--warn-fg); }
+.guide-path {
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+/* “Checked but still not granted” one-liner above the status rows. */
+.stale-alert {
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 11.5px;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
 }
 
 /* Numbered first-run guide (real <ol>, counter-drawn badges). */

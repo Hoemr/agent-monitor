@@ -504,18 +504,19 @@ frame.addEventListener('load', async function () {
       T.restoreCalls.indexOf('fx:invalid') !== -1 && restored && toast.hidden === true,
       'restoreCalls=' + T.restoreCalls.join(',') + ' restored=' + restored + ' toastHidden=' + toast.hidden);
 
-    // ── New-completion badge, custom icons, edge-hidden tab (new) ────
+    // ── New-completion surfaces, custom icons, edge-hidden tab ────────
     await T.setSettings({
       auto_dismiss_invalid: false, new_badge: true, icon_style: 'builtin',
       language: 'en'
     });
-    var newBadge = doc.getElementById('new-badge');
     var headerNew = doc.getElementById('header-new');
     var petIcon = doc.getElementById('pet-icon');
     var glyph = doc.querySelector('.pet-glyph');
     var pet = doc.getElementById('pet');
+    var statusGreenDot = doc.getElementById('status-dot-new');
 
-    // 21. seenAtSecs only advances while the panel is open
+    // 21. the collapsed green count ring is gone; the baseline still only
+    //     advances while the panel is open
     T.applyPetState({ mode: 'expanded', edge: 'right' });
     await sleep(30);
     var seenWhileOpen = T.seenAtSecs;
@@ -524,59 +525,71 @@ frame.addEventListener('load', async function () {
     var completedAt = Math.floor(Date.now() / 1000);
     T.setMockSnapshot(completedOnly(completedAt));
     await sleep(30);
-    check('new completion shows on the collapsed pet',
-      newBadge.hidden === false && newBadge.textContent === '1' &&
-      T.petState.mode === 'collapsed' && T.seenAtSecs === seenWhileOpen,
-      'hidden=' + newBadge.hidden + ' n=' + newBadge.textContent +
-      ' seen=' + T.seenAtSecs + '/' + seenWhileOpen);
-    check('collapsed aria-label mentions new completions',
-      /newly completed|个新完成/.test(pet.getAttribute('aria-label') || ''),
+    check('collapsed new-completion count ring is gone',
+      doc.getElementById('new-badge') === null &&
+      T.petState.mode === 'collapsed' && T.seenAtSecs === seenWhileOpen &&
+      statusGreenDot.hidden === false,
+      'ring=' + doc.getElementById('new-badge') +
+      ' seen=' + T.seenAtSecs + '/' + seenWhileOpen +
+      ' greenDotHidden=' + statusGreenDot.hidden);
+    check('collapsed aria-label no longer announces a new-completion count',
+      !/newly completed|个新完成/.test(pet.getAttribute('aria-label') || ''),
       pet.getAttribute('aria-label'));
 
-    // 21b. the badge is a quiet unfilled ring, not a solid green blob
-    var nbStyle = win.getComputedStyle(newBadge);
-    var nbBg = rgbaParts(nbStyle.backgroundColor);
-    var nbBorder = rgbaParts(nbStyle.borderTopColor);
-    var nbColor = rgbaParts(nbStyle.color);
-    var nbRect = newBadge.getBoundingClientRect();
-    check('new-completion badge is an unfilled green ring',
-      newBadge.hidden === false &&
-      Math.round(nbRect.width) === 16 && Math.round(nbRect.height) === 16 &&
-      nbStyle.borderTopWidth === '1px' && nbStyle.borderTopStyle === 'solid' &&
-      !!nbBorder && nbBorder.g > nbBorder.r && nbBorder.g > nbBorder.b &&
-      (!nbBg || nbBg.a <= 0.08) &&
-      !!nbColor && nbColor.g > nbColor.r && nbColor.g > nbColor.b &&
-      nbStyle.fontVariantNumeric.indexOf('tabular-nums') !== -1,
-      'size=' + Math.round(nbRect.width) + 'x' + Math.round(nbRect.height) +
-      ' bg=' + nbStyle.backgroundColor + ' border=' + nbStyle.borderTopWidth + ' ' +
-      nbStyle.borderTopColor + ' color=' + nbStyle.color);
+    // 21b. no dead count-ring markup or CSS remains anywhere
+    var ringRules = 0;
+    try {
+      var ringSheets = doc.styleSheets;
+      for (var rsi = 0; rsi < ringSheets.length; rsi++) {
+        var ringRuleList = ringSheets[rsi].cssRules || [];
+        for (var rri = 0; rri < ringRuleList.length; rri++) {
+          if ((ringRuleList[rri].selectorText || '').indexOf('new-badge') !== -1) ringRules++;
+        }
+      }
+    } catch (e) { ringRules = -1; }
+    check('no collapsed count-ring element or CSS remains',
+      ringRules === 0 && doc.querySelectorAll('.new-badge').length === 0,
+      'cssRules=' + ringRules + ' nodes=' + doc.querySelectorAll('.new-badge').length);
 
-    // 22. expanding acknowledges the batch: badge resets, header chip shows it
+    // 22. expanding reveals the batch as the header chip (no collapsed counter)
     T.applyPetState({ mode: 'expanded', edge: 'right' });
     await sleep(30);
-    check('expanding resets the new badge to 0',
-      newBadge.hidden === true && newBadge.textContent === '0',
-      'hidden=' + newBadge.hidden + ' n=' + newBadge.textContent);
     check('header chip announces the revealed completions',
       headerNew.hidden === false && /^1 (new|个新完成)$/.test(headerNew.textContent.trim()),
       'hidden=' + headerNew.hidden + ' text=' + headerNew.textContent);
+    check('no collapsed count reappears while expanded',
+      doc.getElementById('new-badge') === null,
+      'ring=' + doc.getElementById('new-badge'));
 
-    // 23. new_badge=false hides the indicator, re-enabling brings it back
+    // 23. new_badge gates the green status dot, the header chip and the row
+    //     markers (there is no collapsed count to hide any more)
     T.applyPetState({ mode: 'collapsed', edge: 'right' });
     var futureAt = Math.floor(Date.now() / 1000) + 5;
     T.setMockSnapshot(completedOnly(futureAt));
     await sleep(20);
-    var badgeWasVisible = newBadge.hidden === false && newBadge.textContent === '1';
+    var greenDotWasVisible = statusGreenDot.hidden === false &&
+      win.getComputedStyle(statusGreenDot).display !== 'none';
     await T.setSettings({ new_badge: false });
     await sleep(20);
-    check('new_badge=false hides the indicator',
-      badgeWasVisible && newBadge.hidden === true,
-      'before=' + badgeWasVisible + ' hidden=' + newBadge.hidden);
+    check('new_badge=false hides the collapsed green status dot',
+      greenDotWasVisible && statusGreenDot.hidden === true,
+      'before=' + greenDotWasVisible + ' hidden=' + statusGreenDot.hidden);
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    T.setMockSnapshot(completedOnly(futureAt));
+    await sleep(30);
+    check('new_badge=false hides the header chip and row markers',
+      headerNew.hidden === true &&
+      doc.querySelectorAll('.task.new-completed').length === 0,
+      'headerHidden=' + headerNew.hidden +
+      ' marked=' + doc.querySelectorAll('.task.new-completed').length);
     await T.setSettings({ new_badge: true });
-    await sleep(20);
-    check('new_badge=true restores the indicator',
-      newBadge.hidden === false && newBadge.textContent === '1',
-      'hidden=' + newBadge.hidden + ' n=' + newBadge.textContent);
+    T.setMockSnapshot(completedOnly(futureAt));
+    await sleep(30);
+    check('new_badge=true restores the header chip and row markers',
+      headerNew.hidden === false &&
+      doc.querySelectorAll('.task.new-completed').length === 1,
+      'headerHidden=' + headerNew.hidden +
+      ' marked=' + doc.querySelectorAll('.task.new-completed').length);
     T.applyPetState({ mode: 'expanded', edge: 'right' });
     T.setMockSnapshot(fixture());
     await sleep(20);
@@ -631,7 +644,7 @@ frame.addEventListener('load', async function () {
         for (var ri = 0; ri < rules.length; ri++) {
           var selector = rules[ri].selectorText || '';
           if (selector.indexOf('mode-edge_hidden') !== -1 &&
-              (selector.indexOf('.pet-grip') !== -1 || selector.indexOf('#new-badge') !== -1)) {
+              selector.indexOf('.pet-grip') !== -1) {
             nubRules = true;
             break;
           }
@@ -646,7 +659,8 @@ frame.addEventListener('load', async function () {
       'cssom=' + nubRules + ' grip=' + gripStyle.display + ' ' +
       Math.round(gripRect.width) + 'x' + Math.round(gripRect.height));
 
-    // 27. custom artwork on the tab: prefer the hidden slot, badge becomes a dot
+    // 27. custom artwork on the tab: prefer the hidden slot; the count ring is
+    //     gone and the semantic green dot remains as the compact lead dot
     await T.setSettings({ icon_style: 'custom' });
     await sleep(20);
     check('edge-hidden tab prefers the hidden icon slot',
@@ -655,15 +669,15 @@ frame.addEventListener('load', async function () {
     var hiddenCompletedAt = Math.floor(Date.now() / 1000) + 5;
     T.setMockSnapshot(completedOnly(hiddenCompletedAt));
     await sleep(30);
-    var dotStyle = win.getComputedStyle(newBadge);
-    var dotBg = rgbaParts(dotStyle.backgroundColor);
-    check('edge-hidden new badge is a filled 6 px dot',
-      newBadge.hidden === false && newBadge.classList.contains('dot') &&
-      Math.round(parseFloat(dotStyle.width)) === 6 &&
-      Math.round(parseFloat(dotStyle.height)) === 6 &&
-      !!dotBg && dotBg.a > 0.9 && dotBg.g > dotBg.r && dotBg.g > dotBg.b,
-      'hidden=' + newBadge.hidden + ' class=' + newBadge.className +
-      ' ' + dotStyle.width + 'x' + dotStyle.height + ' bg=' + dotStyle.backgroundColor);
+    var hiddenGreenStyle = win.getComputedStyle(statusGreenDot);
+    check('edge-hidden tab has no count ring but keeps the semantic dot',
+      doc.getElementById('new-badge') === null &&
+      statusGreenDot.hidden === false &&
+      hiddenGreenStyle.display !== 'none' &&
+      Math.round(parseFloat(hiddenGreenStyle.width)) === 3,
+      'ring=' + doc.getElementById('new-badge') +
+      ' greenHidden=' + statusGreenDot.hidden +
+      ' width=' + hiddenGreenStyle.width);
 
     // ── Notice: toast only while expanded, dot while collapsed ──────
     T.clearNotice();
@@ -1092,6 +1106,61 @@ frame.addEventListener('load', async function () {
       dotFailed.title === '1 interrupted or failed',
       'q=' + dotQuestion.title + ' n=' + dotNew.title + ' f=' + dotFailed.title);
 
+    // 42b. macOS-style capsule shell + glass-bead dots (computed styles)
+    var capsuleStyle = win.getComputedStyle(statusDots);
+    var capsuleBg = rgbaParts(capsuleStyle.backgroundColor);
+    var capsuleRect = rectOf(statusDots);
+    check('status dots sit in a translucent rounded capsule',
+      !!capsuleBg && capsuleBg.a > 0.2 && capsuleBg.a < 0.95 &&
+      parseFloat(capsuleStyle.borderTopWidth) > 0 &&
+      parseFloat(capsuleStyle.borderTopWidth) <= 1.25 &&
+      parseFloat(capsuleStyle.borderTopLeftRadius) >= capsuleRect.height / 2 - 1 &&
+      capsuleStyle.boxShadow.indexOf('inset') !== -1 &&
+      (capsuleStyle.backdropFilter === undefined || capsuleStyle.backdropFilter === 'none') &&
+      (capsuleStyle.filter === undefined || capsuleStyle.filter === 'none'),
+      'bg=' + capsuleStyle.backgroundColor + ' border=' + capsuleStyle.borderTopWidth +
+      ' radius=' + capsuleStyle.borderTopLeftRadius +
+      ' backdrop=' + capsuleStyle.backdropFilter);
+    check('status dots use gradient fills with an inner highlight',
+      [dotQuestion, dotNew, dotFailed].every(function (dot) {
+        var style = win.getComputedStyle(dot);
+        return style.backgroundImage.indexOf('radial-gradient') !== -1 &&
+          style.boxShadow.indexOf('inset') !== -1 &&
+          Math.round(parseFloat(style.width)) === 6;
+      }),
+      'q=' + win.getComputedStyle(dotQuestion).backgroundImage.slice(0, 70));
+    check('amber dot breathes only while a question is pending',
+      win.getComputedStyle(dotQuestion).animationName === 'dot-breathe' &&
+      win.getComputedStyle(dotQuestion).animationDuration === '2.6s' &&
+      win.getComputedStyle(dotNew).animationName === 'none' &&
+      win.getComputedStyle(dotFailed).animationName === 'none',
+      'q=' + win.getComputedStyle(dotQuestion).animationName + ' ' +
+      win.getComputedStyle(dotQuestion).animationDuration +
+      ' n=' + win.getComputedStyle(dotNew).animationName +
+      ' f=' + win.getComputedStyle(dotFailed).animationName);
+
+    // 42c. the capsule is translucent in both appearances (and differs)
+    await T.setSettings({ appearance: 'light' });
+    await sleep(20);
+    var lightCapsuleBgText = win.getComputedStyle(statusDots).backgroundColor;
+    var lightCapsuleBg = rgbaParts(lightCapsuleBgText);
+    var lightCapsuleBorder = rgbaParts(win.getComputedStyle(statusDots).borderTopColor);
+    await T.setSettings({ appearance: 'dark' });
+    await sleep(20);
+    var darkCapsuleBgText = win.getComputedStyle(statusDots).backgroundColor;
+    var darkCapsuleBg = rgbaParts(darkCapsuleBgText);
+    var darkCapsuleBorder = rgbaParts(win.getComputedStyle(statusDots).borderTopColor);
+    check('capsule is translucent in both light and dark appearances',
+      !!lightCapsuleBg && lightCapsuleBg.a > 0.2 && lightCapsuleBg.a < 0.95 &&
+      !!darkCapsuleBg && darkCapsuleBg.a > 0.2 && darkCapsuleBg.a < 0.95 &&
+      lightCapsuleBg.r !== darkCapsuleBg.r &&
+      !!lightCapsuleBorder && lightCapsuleBorder.a > 0 &&
+      !!darkCapsuleBorder && darkCapsuleBorder.a > 0 &&
+      win.getComputedStyle(dotNew).backgroundImage.indexOf('radial-gradient') !== -1,
+      'light=' + lightCapsuleBgText + ' dark=' + darkCapsuleBgText);
+    await T.setSettings({ appearance: 'system' });
+    await sleep(20);
+
     // 43. each dot is independently absent
     T.setMockSnapshot(stateFixture({ newCompleted: false, failed: false, question: true }));
     await sleep(20);
@@ -1110,6 +1179,17 @@ frame.addEventListener('load', async function () {
       dotFailed.hidden === false && dotQuestion.hidden === true && dotNew.hidden === true,
       'q=' + dotQuestion.hidden + ' n=' + dotNew.hidden + ' f=' + dotFailed.hidden);
 
+    // 43b. the breathing animation exists only while a question dot is shown
+    T.setMockSnapshot(stateFixture({ newCompleted: true, failed: true, question: false }));
+    await sleep(20);
+    check('no breathing animation when no question is pending',
+      dotQuestion.hidden === true &&
+      win.getComputedStyle(dotQuestion).animationName === 'none' &&
+      win.getComputedStyle(dotNew).animationName === 'none' &&
+      win.getComputedStyle(dotFailed).animationName === 'none',
+      'qHidden=' + dotQuestion.hidden +
+      ' qAnim=' + win.getComputedStyle(dotQuestion).animationName);
+
     // 44. cluster hidden while the panel is open
     T.setMockSnapshot(stateFixture({ newCompleted: true, failed: true, question: true }));
     T.applyPetState({ mode: 'expanded', edge: 'right' });
@@ -1118,9 +1198,9 @@ frame.addEventListener('load', async function () {
       statusDots.hidden === true && win.getComputedStyle(statusDots).display === 'none',
       'hidden=' + statusDots.hidden + ' display=' + win.getComputedStyle(statusDots).display);
 
-    // 45. cluster fits inside the collapsed pet at 48 and 72 px, clear of the
-    //     attention badge, the green completion ring and the glyph
-    var sizesR3 = [48, 72];
+    // 45. capsule fits inside the collapsed pet at 48, 72 and 96 px, clear of
+    //     the attention badge and the glyph (narrower in the 48 px band)
+    var sizesR3 = [48, 72, 96];
     var fitResults = [];
     for (var siR3 = 0; siR3 < sizesR3.length; siR3++) {
       await T.setSettings({ collapsed_size: sizesR3[siR3] });
@@ -1135,14 +1215,12 @@ frame.addEventListener('load', async function () {
           return rectInside(petRectR3, rectOf(dot));
         }),
         noBadge: !rectsOverlap(clusterRectR3, rectOf(badge)),
-        noRing: !rectsOverlap(clusterRectR3, rectOf(newBadge)),
         noGlyph: !rectsOverlap(clusterRectR3, rectOf(glyph))
       });
     }
-    check('cluster fits the collapsed pet at 48 and 72 px without collisions',
+    check('capsule fits the collapsed pet at 48, 72 and 96 px without collisions',
       fitResults.every(function (result) {
-        return result.inside && result.dotsInside && result.noBadge &&
-          result.noRing && result.noGlyph;
+        return result.inside && result.dotsInside && result.noBadge && result.noGlyph;
       }),
       JSON.stringify(fitResults));
 
@@ -1200,8 +1278,7 @@ frame.addEventListener('load', async function () {
       noticeRectR3.left > petRectR3b.left + petRectR3b.width / 2 &&
       noticeRectR3.top > petRectR3b.top + petRectR3b.height / 2 &&
       !rectsOverlap(noticeRectR3, rectOf(statusDots)) &&
-      !rectsOverlap(noticeRectR3, rectOf(badge)) &&
-      !rectsOverlap(noticeRectR3, rectOf(newBadge)),
+      !rectsOverlap(noticeRectR3, rectOf(badge)),
       'dot=' + JSON.stringify(noticeRectR3) + ' pet=' + JSON.stringify(petRectR3b));
 
     // 48. 14 px tab: notice dot bottom-right, no collision with any other dot
@@ -1215,16 +1292,15 @@ frame.addEventListener('load', async function () {
       noticeRectTabR3.left > tabRectR3b.left + tabRectR3b.width / 2 &&
       noticeRectTabR3.top > tabRectR3b.top + tabRectR3b.height / 2 &&
       !rectsOverlap(noticeRectTabR3, rectOf(statusDots)) &&
-      !rectsOverlap(noticeRectTabR3, rectOf(badge)) &&
-      !rectsOverlap(noticeRectTabR3, rectOf(newBadge)),
+      !rectsOverlap(noticeRectTabR3, rectOf(badge)),
       'notice=' + JSON.stringify(noticeRectTabR3) + ' tab=' + JSON.stringify(tabRectR3b));
 
-    // 49. animations=off keeps the static status dots visible
+    // 49. animations=off removes the breathing animation but keeps the dots
     T.applyPetState({ mode: 'collapsed', edge: 'right' });
     await T.setSettings({ animations: 'off' });
     T.setMockSnapshot(stateFixture({ newCompleted: true, failed: true, question: true }));
     await sleep(30);
-    check('animations=off still shows the static status dots',
+    check('animations=off removes the breathing animation but keeps the dots',
       statusDots.hidden === false &&
       [dotQuestion, dotNew, dotFailed].every(function (dot) {
         return dot.hidden === false && win.getComputedStyle(dot).display !== 'none' &&
@@ -1232,6 +1308,29 @@ frame.addEventListener('load', async function () {
       }),
       'hidden=' + statusDots.hidden +
       ' qAnim=' + win.getComputedStyle(dotQuestion).animationName);
+    // 49b. the Reduce Motion media rule disables the breathing animation too
+    var reduceMotionRule = false;
+    try {
+      for (var msi = 0; msi < doc.styleSheets.length; msi++) {
+        var mRules = doc.styleSheets[msi].cssRules || [];
+        for (var mri = 0; mri < mRules.length; mri++) {
+          var mRule = mRules[mri];
+          if (mRule.type !== 4 ||
+              (mRule.conditionText || '').indexOf('prefers-reduced-motion') === -1) continue;
+          var innerRules = mRule.cssRules || [];
+          for (var iri = 0; iri < innerRules.length; iri++) {
+            var innerSel = innerRules[iri].selectorText || '';
+            var animValue = innerRules[iri].style.animationName || innerRules[iri].style.animation;
+            if (innerSel.indexOf('.status-dot.question') !== -1 &&
+                String(animValue).indexOf('none') !== -1) {
+              reduceMotionRule = true;
+            }
+          }
+        }
+      }
+    } catch (e) { reduceMotionRule = false; }
+    check('reduced-motion CSS disables the breathing animation',
+      reduceMotionRule, 'cssom=' + reduceMotionRule);
     await T.setSettings({ animations: 'system' });
 
     // ── Update-available notice (new) ───────────────────────────────

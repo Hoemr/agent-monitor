@@ -111,7 +111,6 @@ var I18N = {
     dragHint: 'Drag to move',
     notice: 'Notice: ',
     newBadge: '{n} new',
-    newAria: '{n} newly completed',
     newRowAria: 'Newly completed',
     questionChip: '{n} waiting',
     questionChipAria: '{n} sessions waiting for your answer',
@@ -173,7 +172,6 @@ var I18N = {
     dragHint: '拖动以移动',
     notice: '提示：',
     newBadge: '{n} 个新完成',
-    newAria: '{n} 个新完成',
     newRowAria: '新完成',
     questionChip: '{n} 待回答',
     questionChipAria: '{n} 个会话等待你的回答',
@@ -238,7 +236,6 @@ var petEl = document.getElementById('pet');
 var petIconEl = document.getElementById('pet-icon');
 var glyphEl = petEl.querySelector('.pet-glyph');
 var badgeEl = document.getElementById('badge');
-var newBadgeEl = document.getElementById('new-badge');
 var noticeDotEl = document.getElementById('notice-dot');
 var statusDotsEl = document.getElementById('status-dots');
 var statusDotQuestionEl = document.getElementById('status-dot-question');
@@ -292,11 +289,11 @@ var dragged = false;
 // `seenAtSecs` is the last moment the user looked at the panel. It is set at
 // boot and refreshed on every render while the panel is open — never while the
 // pet is collapsed/edge-hidden/tray-hidden. Completed tasks newer than it are
-// surfaced on the collapsed pet and as a header chip.
+// surfaced as the expanded header chip and as per-row "new" markers.
 var seenAtSecs = Math.floor(Date.now() / 1000);
-// Count captured when the panel opens, shown in the header while it is open
-// (the pet badge itself resets to 0 at that moment because the user now sees
-// the list).
+// Count captured when the panel opens, shown in the header while it is open.
+// There is no collapsed count: the collapsed pet only carries the semantic
+// status dot for "some task completed since the last look".
 var pendingHeaderNew = 0;
 // Completed task ids captured when the panel opens (same frozen baseline as the
 // header count), so the rows themselves can carry a "new" marker while it stays
@@ -399,10 +396,6 @@ function updatePetAria() {
     ? t('questionAria').replace('{n}', questions)
     : '';
   if (questionText) label += separator + questionText;
-  var newCount = countNewCompleted();
-  if (newCount > 0 && settings.new_badge !== false) {
-    label += separator + t('newAria').replace('{n}', newCount);
-  }
   // A pending notice is only announced while the pet is the visible surface.
   var noticeText = notice && !isPanelOpen() ? noticeMessage() : '';
   if (noticeText) label += separator + t('notice') + noticeText;
@@ -444,13 +437,6 @@ function updateNewIndicators() {
   // While the panel is open the user is looking: advance the baseline. The
   // counts painted below therefore reflect what was waiting *before* opening.
   if (open) seenAtSecs = nowSecs();
-
-  var count = open ? 0 : countNewCompleted();
-  var showBadge = enabled && count > 0;
-  newBadgeEl.hidden = !showBadge;
-  newBadgeEl.textContent = count > 99 ? '99+' : String(count);
-  newBadgeEl.classList.toggle('dot',
-    petState.mode === 'edge_hidden' || petState.mode === 'tray_hidden');
 
   var showHeader = enabled && open && pendingHeaderNew > 0;
   headerNewEl.hidden = !showHeader;
@@ -701,6 +687,10 @@ function applySettings(next) {
   // the packaged app.
   var collapsedSize = Math.max(48, Math.min(96, Number(settings.collapsed_size) || 72));
   document.documentElement.style.setProperty('--collapsed-size', collapsedSize + 'px');
+  // The status capsule shares the top-left corner with the centred glyph. At the
+  // smallest sizes there is not enough room for both at full size, so CSS uses
+  // a tighter capsule and a slightly narrower glyph for that band.
+  appEl.setAttribute('data-pet-size', collapsedSize < 64 ? 'xs' : 'md');
 
   petState.max_visible_rows = settings.max_visible_rows;
   petState.hover_expand_ms = settings.hover_expand_ms;
@@ -1410,8 +1400,8 @@ function mockSnapshot() {
       { id: 'dsh:5', agent_key: 'dsh', agent_name: 'DSH', host: 'desktop', title: 'Training-free DRE literature positioning audit with a very long title that must be ellipsized', status: 'failed', status_reason: 'turn aborted', last_activity_secs: now - 7200, collected_at_secs: now, summary: 'turn 3', origin: 'cache', target: {}, target_validity: 'invalid', invalid_reason: 'workspace_missing', capability: { max_level: 'L3', notes: '', requires: [] }, level: 'L0', pinned: false },
       { id: 'sim:6', agent_key: 'simulated', agent_name: 'Simulated Agent', host: 'fixture', title: 'Extension acceptance fixture', status: 'running', status_reason: 'fixture', last_activity_secs: now - 5, collected_at_secs: now, summary: 'fixture', origin: 'synthetic', target: {}, target_validity: 'unconfirmed', invalid_reason: null, capability: { max_level: 'L1', notes: '', requires: [] }, level: 'L1', pinned: false }
   ];
-  // Design-preview helper: `?mock=collapsed&new=1` paints the new-completion
-  // badge that only appears after a completion while the panel was closed.
+  // Design-preview helper: `?mock=collapsed&new=1` adds a completion that only
+  // shows as the green collapsed status dot / expanded header chip + row marker.
   if (/[?&]new=1\b/.test(location.search)) {
     tasks.unshift({
       id: 'zcode:new', agent_key: 'zcode', agent_name: 'ZCode', host: 'desktop',

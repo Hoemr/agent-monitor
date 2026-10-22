@@ -266,3 +266,76 @@ Measured on the live host (real release build):
 The pet UI additionally shows soft (`degraded`/`unconfirmed`) jump notices **once
 per task+reason per session**, so repeated clicks on the same stale target stay
 silent; hard failures are still always reported.
+
+
+## Permission repair — "checked in System Settings but still Not granted" (0.7.1)
+
+macOS TCC binds Accessibility/Automation grants to the code identity of the
+bundle. This app is **ad-hoc signed**, so every rebuild produces a new cdhash:
+System Settings can keep showing an old, still-checked Agent Monitor entry while
+the currently running copy is not actually trusted. Running a different copy
+(e.g. `dist/Agent Monitor.app` vs an installed `/Applications/…`) has the same
+effect. The Settings window also used to check once, so it could simply be
+**stale UI** after the user toggled the switch.
+
+Settings → Jump now handles both cases:
+
+1. **Auto refresh**: regaining focus (or becoming visible) while the Jump pane is
+   selected re-runs `get_jump_diagnostics`; the pills update after returning
+   from System Settings. No polling.
+2. **App location** row: shows `app_bundle_path` of the running bundle, so the
+   user can confirm the entry in System Settings is that exact copy.
+3. **Request permission** button → `request_accessibility_permission()`: calls
+   `AXIsProcessTrustedWithOptions(AXTrustedCheckOptionPrompt=true)` in the app's
+   own process, so macOS offers to add the current binary to Accessibility.
+4. **Reveal App** → `reveal_app_in_finder()` to drag the current bundle into the
+   list (or use the `+` button).
+5. **Reset this app's permissions…** → `reset_app_permissions()`: inline-confirmed
+   `tccutil reset Accessibility com.agent.monitor` and `tccutil reset AppleEvents
+   com.agent.monitor`, then re-add the current build. The argv builder is
+   hard-guarded and unit-tested to always include the bundle id; it never resets
+   other apps.
+6. The first-run guide and the ad-hoc re-sign explanation are collapsed inside a
+   `<details>` element, so the pane stays compact. A one-line amber alert appears
+   only when Accessibility is missing; the same repair copy is inside the guide.
+
+Debug/acceptance aids (never set by normal users):
+
+```bash
+# Write the current jump diagnostics JSON ~1.5 s after startup (works in the real .app)
+launchctl setenv AGENT_MONITOR_DUMP_JUMP_DIAGNOSTICS /tmp/am-jump-diag.json
+open -n "dist/Agent Monitor.app"; sleep 3
+cat /tmp/am-jump-diag.json
+launchctl unsetenv AGENT_MONITOR_DUMP_JUMP_DIAGNOSTICS
+
+# Ask macOS for the Accessibility prompt for the current app ~2 s after startup
+launchctl setenv AGENT_MONITOR_REQUEST_AX_PROMPT 1
+open -n "dist/Agent Monitor.app"
+launchctl unsetenv AGENT_MONITOR_REQUEST_AX_PROMPT
+```
+
+> **Do not run `tccutil reset Accessibility` without a bundle id.** It clears the
+> machine-wide Accessibility records of *every* app on the Mac, and those grants
+> can only be restored by the user in System Settings → Privacy & Security →
+> Accessibility. The app's own reset command is restricted to
+> `com.agent.monitor` and refuses to run without a bundle id.
+
+### Measured in-app diagnostics (real packaged app, round 5)
+
+The debug dump launched against `dist/Agent Monitor.app` reports:
+
+```jsonc
+{
+  "accessibility": { "granted": false, "detail": null },
+  "automation":    { "granted": true,  "detail": null },
+  "window_access": { "granted": false, "detail": "needs_accessibility" },
+  "system_events": true,
+  "app_bundle_path": "…/dist/Agent Monitor.app"
+}
+```
+
+The `false` here is the true state of the host after an accidental machine-wide
+Accessibility reset during testing (see `docs/ACCEPTANCE.md` Phase 9); it proves
+the dump reads the **real bundle** and reports honestly. Once the user re-grants
+Accessibility for this copy, the same dump/pane shows `true` and window-level
+jumps work again.

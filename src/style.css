@@ -139,12 +139,14 @@ body {
 .no-tasks #pet { opacity: 0.62; }
 .no-tasks #pet:hover { opacity: 0.9; }
 
-/* ── Collapsed semantic status cluster ────────────────────── *
- * Three independent dots in the top-left corner: amber = a session is waiting
- * on a question, green = a task completed since the last look, red = a session
- * failed/interrupted. A vertical stack keeps them clear of the blue attention
- * badge (top-right), the green completion ring (bottom-left) and the glyph,
- * even at collapsed_size 48. The jump-notice dot now lives bottom-right. */
+/* ── Collapsed semantic status capsule (top-left) ─────────── *
+ * macOS-traffic-light-inspired vertical capsule: a translucent material shell
+ * (hairline border, inset top highlight, soft drop shadow — never
+ * `backdrop-filter`, the window itself is transparent) holding three 6 px
+ * glass-bead dots: amber = a session is waiting on a question, green = a task
+ * completed since the last look, red = a session failed/interrupted. The blue
+ * attention badge stays top-right and the jump-notice dot bottom-right, so the
+ * capsule never collides with them in any mode. */
 .status-dots {
   position: absolute;
   top: 4px;
@@ -152,7 +154,14 @@ body {
   z-index: 1;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 2px;
+  border-radius: 999px;
+  background: light-dark(rgba(255, 255, 255, 0.55), rgba(40, 40, 44, 0.55));
+  border: 0.5px solid light-dark(rgba(0, 0, 0, 0.16), rgba(255, 255, 255, 0.16));
+  box-shadow: inset 0 0.5px 0 light-dark(rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.16)),
+    0 1px 3px rgba(0, 0, 0, 0.24);
   pointer-events: none;
 }
 .status-dots[hidden] { display: none; }
@@ -162,14 +171,54 @@ body {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--dot-color, var(--text-tertiary));
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28),
-    0 0 0 2px rgba(255, 255, 255, 0.14);
+  background-color: var(--dot-color, var(--text-tertiary));
+  /* Lit from the top-left with a slightly darker rim: a tiny glass bead. */
+  background-image: radial-gradient(circle at 35% 28%,
+    rgba(255, 255, 255, 0.6) 0%,
+    var(--dot-color, var(--text-tertiary)) 46%,
+    color-mix(in srgb, var(--dot-color, var(--text-tertiary)) 76%, #000) 100%);
+  border: 0.5px solid rgba(0, 0, 0, 0.18);
+  box-shadow: inset 0 0.5px 0.5px rgba(255, 255, 255, 0.55),
+    inset 0 -1px 1px rgba(0, 0, 0, 0.2),
+    0 0.5px 1.5px rgba(0, 0, 0, 0.25);
 }
 .status-dot[hidden] { display: none; }
 .status-dot.question { --dot-color: var(--status-waiting); }
 .status-dot.new { --dot-color: var(--status-running); }
 .status-dot.failed { --dot-color: var(--status-failed); }
+
+/* Only the amber dot breathes — a soft glow plus 1 → 1.06 scale while a
+ * question is pending (the dot only exists then). Green and red stay static;
+ * animations=off / Reduce Motion turn the breathing off (see Motion section). */
+@keyframes dot-breathe {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: inset 0 0.5px 0.5px rgba(255, 255, 255, 0.55),
+      inset 0 -1px 1px rgba(0, 0, 0, 0.2),
+      0 0.5px 1.5px rgba(0, 0, 0, 0.25),
+      0 0 0 0 color-mix(in srgb, var(--status-waiting) 0%, transparent);
+  }
+  50% {
+    transform: scale(1.06);
+    box-shadow: inset 0 0.5px 0.5px rgba(255, 255, 255, 0.55),
+      inset 0 -1px 1px rgba(0, 0, 0, 0.2),
+      0 0.5px 1.5px rgba(0, 0, 0, 0.25),
+      0 0 4px 1px color-mix(in srgb, var(--status-waiting) 55%, transparent);
+  }
+}
+.status-dot.question:not([hidden]) {
+  animation: dot-breathe 2600ms ease-in-out infinite;
+}
+
+/* Smallest pet sizes: a tighter shell and a slightly narrower glyph keep the
+ * capsule clear of the centred three-bar glyph at collapsed_size 48. */
+#app[data-pet-size="xs"] .status-dots {
+  top: 3px;
+  left: 3px;
+  padding: 2px 1px;
+  gap: 2px;
+}
+#app[data-pet-size="xs"] .pet-glyph { width: 18px; }
 
 #badge {
   position: absolute;
@@ -243,31 +292,6 @@ body {
   -webkit-user-drag: none;
 }
 .pet-icon[hidden] { display: none; }
-
-/* New-completion badge: a quiet, unfilled green ring (16 px) in the bottom-left
- * corner, so it reads as a secondary signal next to the solid blue attention
- * badge (18 px, top-right). It appears after the panel has been closed while
- * tasks completed (see `seenAtSecs` in main.js). */
-.new-badge {
-  position: absolute;
-  bottom: 4px;
-  left: 4px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 2px;
-  border-radius: 8px;
-  background: rgba(48, 209, 88, 0.08);
-  border: 1px solid var(--status-running);
-  color: var(--status-running);
-  font-size: 10px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-}
-.new-badge[hidden] { display: none; }
 
 /* Jump-feedback notice while the panel is closed: a text-free dot in the
  * bottom-right corner (the top-left corner is the semantic status cluster). It
@@ -691,20 +715,29 @@ body {
   padding: 0;
 }
 
-/* 14 px edge/tray tab: a single 3 px highest-priority dot (question > failed >
- * new, marked `.lead` in main.js) so the cluster never overflows the tab. */
+/* 14 px edge/tray tab: the capsule shrinks to a single 3 px highest-priority
+ * dot (question > failed > new, marked `.lead` in main.js). Its shell chrome is
+ * dropped there — a bordered capsule would touch the other corner dots — and
+ * the mini dot stays static (a glow would bleed outside the nub). */
 #app.mode-edge_hidden .status-dots,
 #app.mode-tray_hidden .status-dots {
   top: 1px;
   left: 1px;
   gap: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 #app.mode-edge_hidden .status-dot,
 #app.mode-tray_hidden .status-dot {
   width: 3px;
   height: 3px;
+  border: 0;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
 }
+#app.mode-edge_hidden .status-dot.question,
+#app.mode-tray_hidden .status-dot.question { animation: none; }
 #app.mode-edge_hidden .status-dots .status-dot,
 #app.mode-tray_hidden .status-dots .status-dot { display: none; }
 #app.mode-edge_hidden .status-dots .status-dot.lead,
@@ -732,9 +765,8 @@ body {
 /* A custom icon already fills the tab; no grip line on top of it. */
 #app.mode-edge_hidden #pet.custom-icon .pet-grip { display: none; }
 
-/* Badges on a 14 px tab: 6 px dots without text. */
-#app.mode-edge_hidden #badge,
-#app.mode-edge_hidden #new-badge {
+/* The attention badge on a 14 px tab: a 6 px dot without text. */
+#app.mode-edge_hidden #badge {
   min-width: 6px;
   width: 6px;
   height: 6px;
@@ -744,15 +776,9 @@ body {
   line-height: 0;
   color: transparent;
   box-shadow: none;
-}
-#app.mode-edge_hidden #badge { top: 2px; right: 2px; z-index: 1; }
-/* The ring collapses to a filled dot so it stays legible at 6 px. */
-#app.mode-edge_hidden #new-badge {
-  bottom: 2px;
-  left: 2px;
+  top: 2px;
+  right: 2px;
   z-index: 1;
-  border: 0;
-  background: var(--status-running);
 }
 #app.mode-edge_hidden .notice-dot,
 #app.mode-tray_hidden .notice-dot {
@@ -809,6 +835,8 @@ body {
   #pet, .task, .dismiss, .icon-btn, .link-btn { transition: none; }
   /* Belt and braces: main.js never adds `.alerting` in this mode. */
   #pet.alerting, #badge.alerting { animation: none; }
+  /* The amber "waiting question" dot stays visible but static. */
+  .status-dot.question:not([hidden]) { animation: none; }
 }
 
 html[data-animations="off"] #pet,
@@ -821,10 +849,17 @@ html[data-animations="off"] .link-btn {
   animation: none !important;
 }
 
+html[data-animations="off"] .status-dot.question:not([hidden]) {
+  animation: none !important;
+}
+
 html[data-animations="always"] #pet {
   transition: box-shadow 150ms ease, border-color 150ms ease, opacity 150ms ease;
 }
 /* `always` must win over the OS Reduce Motion media query above. */
+html[data-animations="always"] .status-dot.question:not([hidden]) {
+  animation: dot-breathe 2600ms ease-in-out infinite;
+}
 html[data-animations="always"] #pet.alerting { animation: pet-pulse 1000ms ease-out 1; }
 html[data-animations="always"] #badge.alerting { animation: badge-pulse 1000ms ease-out 1; }
 html[data-animations="always"] .task,

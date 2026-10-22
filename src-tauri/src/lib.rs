@@ -892,6 +892,25 @@ fn reveal_app_in_finder() -> Result<(), String> {
     jump::reveal_app_in_finder()
 }
 
+/// Ask macOS to add the CURRENT app to Accessibility (native AX prompt). Returns
+/// `true` when already trusted, else `false` after requesting the prompt; the
+/// Settings UI re-checks on focus.
+#[tauri::command]
+async fn request_accessibility_permission() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(ax::request_accessibility_permission)
+        .await
+        .unwrap_or_else(|_| Err("accessibility_prompt_failed".to_string()))
+}
+
+/// Clear this bundle's stale TCC records (Accessibility + AppleEvents) so the
+/// user can re-add the current copy. Explicit user action only; never automatic.
+#[tauri::command]
+async fn reset_app_permissions() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(jump::reset_app_permissions)
+        .await
+        .unwrap_or_else(|_| Err("permission_reset_failed".to_string()))
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     state.inner.lock().unwrap().settings.clone()
@@ -1658,6 +1677,51 @@ pub fn dump_ax_rows(pid: u32) {
 
 // ── Entry ───────────────────────────────────────────────────────
 
+/// Debug-only recovery aid: with `AGENT_MONITOR_REQUEST_AX_PROMPT=1`, ask macOS
+/// for the Accessibility prompt on behalf of THIS app shortly after startup. A
+/// prompt triggered from the CLI would be attributed to the terminal, not the
+/// packaged app, so it must run inside the app's own process. Never used by the
+/// normal UI.
+fn start_ax_prompt_request() {
+    if std::env::var_os("AGENT_MONITOR_REQUEST_AX_PROMPT").is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        // Let the app finish showing itself before the system prompt appears.
+        std::thread::sleep(Duration::from_millis(2_000));
+        match ax::request_accessibility_permission() {
+            Ok(trusted) => eprintln!("ax-prompt: accessibility granted={trusted}"),
+            Err(err) => eprintln!("ax-prompt: {err}"),
+        }
+    });
+}
+
+/// Debug/acceptance aid (never used by the normal UI): with
+/// `AGENT_MONITOR_DUMP_JUMP_DIAGNOSTICS=<path>` set, write the same JSON as the
+/// `get_jump_diagnostics` command to that path ~1.5 s after startup. This lets a
+/// packaged `.app`'s real TCC identity/trust state be inspected without opening
+/// Settings (debug-only; failures are logged and never affect the app).
+fn start_jump_diagnostics_dump() {
+    let Some(path) = std::env::var_os("AGENT_MONITOR_DUMP_JUMP_DIAGNOSTICS") else {
+        return;
+    };
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1_500));
+        let diagnostics = jump::collect_jump_diagnostics();
+        let result = match serde_json::to_string_pretty(&diagnostics) {
+            Ok(json) => std::fs::write(&path, json).map_err(|err| format!("write failed: {err}")),
+            Err(err) => Err(format!("serialise failed: {err}")),
+        };
+        match result {
+            Ok(()) => eprintln!(
+                "jump-diagnostics: wrote {}",
+                std::path::Path::new(&path).display()
+            ),
+            Err(err) => eprintln!("jump-diagnostics: {err}"),
+        }
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1684,6 +1748,8 @@ pub fn run() {
             open_permission_settings,
             get_jump_diagnostics,
             reveal_app_in_finder,
+            request_accessibility_permission,
+            reset_app_permissions,
             get_settings,
             set_settings,
             reset_settings,
@@ -1847,6 +1913,8 @@ pub fn run() {
             };
             start_watcher(tx);
             start_worker(handle.clone(), rx);
+            start_ax_prompt_request();
+            start_jump_diagnostics_dump();
             Ok(())
         })
         .run(tauri::generate_context!())

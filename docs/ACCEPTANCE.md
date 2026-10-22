@@ -444,6 +444,83 @@ correctly reports a readable error until a published release carries
 
 ---
 
+## Phase 9 — capsule polish + permission repair (0.7.1, 2026-10-22)
+
+### Automated gates
+
+| Gate | Command | Result |
+|---|---|---|
+| Rust unit tests | `cargo test --manifest-path src-tauri/Cargo.toml` | **155 passed, 0 failed** (151 baseline + AX prompt / tccutil safety tests) |
+| Pet UI (real DOM) | `scripts/ui-selftest.html` | **ALL PASS, 136 checks** (129 → 136: no collapsed count ring, macOS-style capsule, breathing/dots, layout) |
+| Settings UI (real DOM) | `scripts/ui-selftest-settings.html` | **ALL PASS, 101 checks** (81 → 101: collapsible guide, app location, stale-grant alert, request/reset, focus refresh) |
+| Release build | `cargo build --release` | 0 warnings / 0 errors |
+| Bundle | `bash scripts/bundle-mac.sh` | `dist/Agent Monitor.app` 0.7.1, ad-hoc |
+
+### Pet: ring removed, macOS-style status capsule
+
+* The collapsed green new-completion count ring is gone (element, CSS, JS and
+  aria text removed; zero `new-badge` references in `src/`). The expanded header
+  chip and per-row green “newly completed” markers remain, gated by `new_badge`.
+* The three semantic dots are now a small translucent traffic-light capsule
+  (hairline border, inset highlight, soft shadow, **no** `backdrop-filter`),
+  with 6 px glass-bead dots (radial gradient + inner highlight + darker rim).
+  Only the amber dot breathes (2.6 s, scale 1→1.06 + glow) while a question is
+  pending; `animations=off` / Reduce Motion keep it static. The 14 px edge/tray
+  tab shows a single 3 px highest-priority dot. Rect-based checks prove no
+  collisions with the top-right badge, glyph, bottom-right notice dot or edges at
+  collapsed_size 48/72/96 in light and dark.
+
+### Settings → Jump permission UX
+
+* First-run/ad-hoc guidance is now a collapsed native `<details>` (summary shows
+  “Permissions needed (N) / 需要授权（N 项）” when something is missing; status
+  rows stay visible). The pane also shows the running **App location**
+  (`get_jump_diagnostics.app_bundle_path`) and an amber stale-grant alert when
+  Accessibility is missing.
+* New repair actions: **Request permission** (`request_accessibility_permission`,
+  native `AXIsProcessTrustedWithOptions` prompt in the app's own process) and an
+  inline-confirmed **Reset this app's permissions…** (`reset_app_permissions`,
+  runs `tccutil reset Accessibility|AppleEvents com.agent.monitor` only). The
+  argv builder refuses any call without a bundle id (unit-tested).
+* Returning focus to the Settings window re-runs the self-check while the Jump
+  pane is selected (concurrent events collapse into one request, never during a
+  command), so toggling the System Settings switch updates the pills.
+* Debug aids added: `AGENT_MONITOR_DUMP_JUMP_DIAGNOSTICS=<path>` (writes the
+  diagnostics JSON from the real packaged app) and `AGENT_MONITOR_REQUEST_AX_PROMPT=1`
+  (in-process AX prompt at startup). Verified with `dist/Agent Monitor.app`:
+  `app_bundle_path` points at the real bundle, `automation.granted=true`,
+  `accessibility.granted=false` (see the incident below).
+
+### Incident: machine-wide Accessibility reset during testing
+
+While probing the `tccutil` output format for the new reset command, a shell test
+ran `/usr/bin/tccutil reset Accessibility` **without a bundle id**. On macOS this
+clears the Accessibility TCC records for **all applications**, not just this one.
+Automation/AppleEvents was not touched. Consequences and handling:
+
+* Accessibility grants cannot be restored programmatically; the user must
+  re-enable apps in System Settings → Privacy & Security → Accessibility
+  (terminal/harness, Agent Monitor, and any other AX tooling they rely on).
+* The real in-app diagnostics dump now correctly reports
+  `accessibility.granted=false`; before this incident the same host had it
+  granted. Window-level jump re-verification for this round therefore could not
+  be executed (earlier round-4 DSH/VSCode evidence still stands); Settings → Jump
+  can re-verify once the user re-grants.
+* Hardening: the shipped reset command is restricted to
+  `tccutil reset <service> com.agent.monitor` with a unit test asserting the
+  bundle id is always the last argv element and that blank service/bundle ids are
+  refused; both `docs/UPDATING.md`/`docs/JUMP.md`/`docs/SETTINGS.md` warn never to
+  run tccutil without a bundle id.
+
+### Deferred
+
+* Re-grant Accessibility after the incident, then use Settings → Jump → Request
+  permission / Check again to confirm the pills flip to “Granted”.
+* macOS first-run TCC prompts and Notification Center appearance still require a
+  graphical session.
+
+---
+
 ## Unexecuted items and reproduction steps
 
 1. **Second physical display / hot-plug**

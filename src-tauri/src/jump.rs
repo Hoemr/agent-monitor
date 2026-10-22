@@ -384,6 +384,167 @@ pub fn reveal_app_in_finder() -> Result<(), String> {
     }
 }
 
+// ── TCC permission repair (`reset_app_permissions`) ─────────────
+
+/// Outcome of one `tccutil reset` invocation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TccReset {
+    /// The record existed and was cleared (or tccutil reported success).
+    Reset,
+    /// No TCC record for this bundle id: nothing to clear (not a failure).
+    Skipped,
+    /// tccutil failed for another reason (message preserved for the UI).
+    Error(String),
+}
+
+/// Classify `tccutil reset <service> <bundle>` output (pure, unit tested).
+///
+/// A missing record is the normal case on a fresh/ad-hoc-signed copy: macOS
+/// prints `No such bundle identifier …` and exits non-zero. It is a *skip*, not
+/// an error; the user must re-add the app either way.
+pub fn classify_tccutil_result(success: bool, output: &str) -> TccReset {
+    let text = output.to_ascii_lowercase();
+    if text.contains("no such bundle identifier")
+        || text.contains("no such bundle")
+        || text.contains("not found")
+        || text.contains("does not exist")
+    {
+        return TccReset::Skipped;
+    }
+    if success {
+        return TccReset::Reset;
+    }
+    let detail = output.trim();
+    TccReset::Error(if detail.is_empty() {
+        "tccutil_failed".to_string()
+    } else {
+        detail.to_string()
+    })
+}
+
+/// Build the exact `tccutil reset` argv. The bundle id is MANDATORY and always
+/// the last argument: `tccutil reset <service>` without it clears that service
+/// for EVERY app on the machine (never do that). This builder is the only way
+/// the reset path constructs the command.
+fn tccutil_reset_argv(service: &str, bundle_id: &str) -> Result<Vec<String>, String> {
+    let service = service.trim();
+    let bundle_id = bundle_id.trim();
+    if service.is_empty() {
+        return Err("tccutil_service_required".to_string());
+    }
+    if bundle_id.is_empty() {
+        return Err("tccutil_bundle_id_required".to_string());
+    }
+    Ok(vec![
+        "/usr/bin/tccutil".to_string(),
+        "reset".to_string(),
+        service.to_string(),
+        bundle_id.to_string(),
+    ])
+}
+
+fn format_reset_message(reset: &[&str], skipped: &[&str], zh: bool) -> String {
+    let none = if zh { "无" } else { "none" };
+    let reset_list = if reset.is_empty() {
+        none.to_string()
+    } else {
+        reset.join(if zh { "、" } else { ", " })
+    };
+    let skipped_list = if skipped.is_empty() {
+        none.to_string()
+    } else {
+        skipped.join(if zh { "、" } else { ", " })
+    };
+    if zh {
+        format!(
+            "已重置：{reset_list}。无记录（无需重置）：{skipped_list}。\
+             仅清除了 {APP_BUNDLE_ID} 的记录，其它应用不受影响。\
+             请通过「设置 → 跳转 → 在访达中显示」把当前 Agent Monitor.app 重新加入\
+             「系统设置 → 隐私与安全性 → 辅助功能 / 自动化」，然后重启 Agent Monitor \
+             （旧进程在重启前可能仍无权限）。"
+        )
+    } else {
+        format!(
+            "Reset: {reset_list}. No record (nothing to reset): {skipped_list}. \
+             Only records for {APP_BUNDLE_ID} were cleared; other apps are untouched. \
+             Re-add the current Agent Monitor.app via Settings → Jump → Reveal App in Finder, \
+             then restart Agent Monitor (the running process may stay untrusted until relaunch)."
+        )
+    }
+}
+
+fn format_reset_errors(errors: &[String], zh: bool) -> String {
+    if zh {
+        format!("部分服务重置失败：{}。", errors.join("；"))
+    } else {
+        format!("Some services could not be reset: {}.", errors.join("; "))
+    }
+}
+
+fn run_tccutil_reset(service: &str, bundle_id: &str) -> TccReset {
+    let argv = match tccutil_reset_argv(service, bundle_id) {
+        Ok(argv) => argv,
+        // Never fall back to a bundle-less reset: it would clear every app.
+        Err(err) => return TccReset::Error(err),
+    };
+    match Command::new(&argv[0]).args(&argv[1..]).output() {
+        Ok(output) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            classify_tccutil_result(output.status.success(), &text)
+        }
+        Err(err) => TccReset::Error(format!("tccutil unavailable: {err}")),
+    }
+}
+
+fn system_is_chinese() -> bool {
+    static ZH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ZH.get_or_init(|| {
+        Command::new("defaults")
+            .args(["read", "-g", "AppleLocale"])
+            .output()
+            .map(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .to_ascii_lowercase()
+                    .starts_with("zh")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// `reset_app_permissions` command: clear this bundle's stale TCC records so the
+/// user can re-add the *current* copy. Never called automatically (the Settings
+/// UI asks for inline confirmation first); never requires sudo.
+///
+/// Returns a human-readable summary (reset/skipped services + re-add/restart
+/// instructions), or an error when a service could not be reset.
+pub fn reset_app_permissions() -> Result<String, String> {
+    let zh = system_is_chinese();
+    let services: [(&str, &str, &str); 2] = [
+        ("Accessibility", "Accessibility", "辅助功能"),
+        ("AppleEvents", "automation (AppleEvents)", "自动化（Apple 事件）"),
+    ];
+    let mut reset: Vec<&str> = Vec::new();
+    let mut skipped: Vec<&str> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for (service, english_label, chinese_label) in services {
+        let label = if zh { chinese_label } else { english_label };
+        match run_tccutil_reset(service, APP_BUNDLE_ID) {
+            TccReset::Reset => reset.push(label),
+            TccReset::Skipped => skipped.push(label),
+            TccReset::Error(detail) => errors.push(format!("{label}: {detail}")),
+        }
+    }
+    let message = format_reset_message(&reset, &skipped, zh);
+    if errors.is_empty() {
+        Ok(message)
+    } else {
+        Err(format!("{message} {}", format_reset_errors(&errors, zh)))
+    }
+}
+
 
 // ── Public entry ────────────────────────────────────────────────
 
@@ -2657,6 +2818,85 @@ mod tests {
                 }
             ),
             RetryPlan::GiveUp("session_click_unverified")
+        );
+    }
+
+    // ── Permission repair helpers ───────────────────────────────
+
+    #[test]
+    fn tccutil_output_classification_distinguishes_reset_skipped_and_error() {
+        // A successful reset (real output: "Successfully reset Accessibility").
+        assert_eq!(
+            classify_tccutil_result(true, "Successfully reset Accessibility\n"),
+            TccReset::Reset
+        );
+        assert_eq!(classify_tccutil_result(true, ""), TccReset::Reset);
+        // Real macOS output for a copy with no TCC record (exit 64).
+        assert_eq!(
+            classify_tccutil_result(
+                false,
+                "tccutil: No such bundle identifier \"com.agent.monitor\": \
+                 The operation couldn’t be completed. (OSStatus error -10814.)\n"
+            ),
+            TccReset::Skipped
+        );
+        // Any other non-zero exit is a real error and keeps its message.
+        match classify_tccutil_result(false, "operation not permitted") {
+            TccReset::Error(detail) => assert!(detail.contains("operation not permitted")),
+            other => panic!("expected an error, got {other:?}"),
+        }
+        match classify_tccutil_result(false, "") {
+            TccReset::Error(detail) => assert!(!detail.is_empty()),
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reset_message_lists_services_and_explains_recovery() {
+        let english = format_reset_message(&["Accessibility"], &["automation (AppleEvents)"], false);
+        assert!(english.contains("Reset: Accessibility"));
+        assert!(english.contains("automation (AppleEvents)"));
+        assert!(english.contains("Reveal App"));
+        assert!(english.contains("restart Agent Monitor"));
+        // Scope is explicit: only this bundle's records were cleared.
+        assert!(english.contains("Only records for com.agent.monitor were cleared"));
+
+        let chinese = format_reset_message(&["辅助功能"], &["自动化（Apple 事件）"], true);
+        assert!(chinese.contains("已重置：辅助功能"));
+        assert!(chinese.contains("在访达中显示"));
+        assert!(chinese.contains("重启 Agent Monitor"));
+        assert!(chinese.contains("仅清除了 com.agent.monitor 的记录"));
+
+        // Empty lists are explicit instead of producing a broken sentence.
+        let empty = format_reset_message(&[], &[], false);
+        assert!(empty.contains("Reset: none"));
+        assert!(empty.contains("No record (nothing to reset): none"));
+    }
+
+    #[test]
+    fn tccutil_argv_always_carries_the_bundle_id_last() {
+        for service in ["Accessibility", "AppleEvents"] {
+            let argv = tccutil_reset_argv(service, "com.agent.monitor").unwrap();
+            // Exact shape — the bundle id must always be the final argument.
+            assert_eq!(
+                argv,
+                vec![
+                    "/usr/bin/tccutil".to_string(),
+                    "reset".to_string(),
+                    service.to_string(),
+                    "com.agent.monitor".to_string(),
+                ]
+            );
+            assert_eq!(argv.last().map(String::as_str), Some("com.agent.monitor"));
+            assert_eq!(argv.len(), 4);
+        }
+        // Refused inputs can never produce a machine-wide `tccutil reset <service>`.
+        assert!(tccutil_reset_argv("Accessibility", "").is_err());
+        assert!(tccutil_reset_argv("Accessibility", "   ").is_err());
+        assert!(tccutil_reset_argv("", "com.agent.monitor").is_err());
+        assert_eq!(
+            tccutil_reset_argv("Accessibility", "").unwrap_err(),
+            "tccutil_bundle_id_required"
         );
     }
 

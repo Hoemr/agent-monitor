@@ -555,6 +555,67 @@ frame.addEventListener('load', async function () {
     check('window-access row names the missing Accessibility grant',
       /Grant Accessibility/i.test(q('#pane-body').textContent));
 
+    // 22c2. the setup guide is a collapsed native <details> with a CTA
+    var guideEl = q('details.guide[data-guide]');
+    var guideSummary = q('summary.guide-summary');
+    check('setup guide is a collapsed native <details> with a permission CTA',
+      !!guideEl && guideEl.tagName === 'DETAILS' && guideEl.open === false &&
+      !!guideSummary && /Permissions needed \(1\)/.test(guideSummary.textContent) &&
+      /3 steps/.test(guideSummary.textContent),
+      'open=' + (guideEl && guideEl.open) +
+      ' summary=' + (guideSummary ? guideSummary.textContent : 'missing'));
+
+    // 22c3. status rows stay visible while the guide is collapsed
+    check('permission status rows stay visible without expanding the guide',
+      !!q('[data-status-row="accessibility"]') &&
+      !!q('[data-status-row="automation"]') &&
+      !!q('[data-status-row="window_access"]') &&
+      q('[data-status-row="accessibility"]').getBoundingClientRect().height > 0 &&
+      q('details.guide[data-guide]').getBoundingClientRect().height > 0,
+      'guideHeight=' + Math.round(q('details.guide[data-guide]').getBoundingClientRect().height));
+
+    // 22c4. expanding shows the three steps and the re-grant notes
+    q('summary.guide-summary').click();
+    await sleep(90);
+    var guideOpenEl = q('details.guide[data-guide]');
+    check('summary click expands the guide with steps and re-grant notes',
+      !!guideOpenEl && guideOpenEl.open === true &&
+      qa('details.guide .steps .step').length === 3 &&
+      /ad-hoc/i.test(guideOpenEl.textContent) &&
+      /another copy|older build|另一个副本|旧版本/i.test(guideOpenEl.textContent) &&
+      /app bundle|App 位置|App bundle/i.test(guideOpenEl.textContent));
+
+    // 22c5. the open/collapsed state survives re-renders
+    T.render();
+    await sleep(90);
+    check('expanded guide state survives a re-render',
+      q('details.guide[data-guide]').open === true);
+    q('summary.guide-summary').click();
+    await sleep(90);
+    T.render();
+    await sleep(90);
+    check('collapsed guide state survives a re-render',
+      q('details.guide[data-guide]').open === false);
+
+    // 22c6. app location row shows the running bundle path
+    var appLoc = q('[data-row="jump-app-location"] .path-value');
+    check('App location row shows the running bundle path',
+      !!appLoc && appLoc.tagName === 'CODE' &&
+      appLoc.getAttribute('tabindex') === '0' &&
+      !!appLoc.getAttribute('aria-label') &&
+      /^~\/Documents\/AgentMonitor\/dist\/Agent Monitor\.app$/.test(appLoc.textContent.trim()),
+      appLoc ? appLoc.textContent : 'missing');
+
+    // 22c7. stale-grant alert only while Accessibility is missing
+    var staleAlert = q('[data-stale-alert]');
+    check('missing Accessibility shows the stale-grant alert with repair copy',
+      !!staleAlert &&
+      /older build|another copy|旧版本|另一个副本/i.test(staleAlert.textContent) &&
+      /ad-hoc/i.test(staleAlert.textContent) &&
+      /reset this app|重新授权|重置本应用/i.test(staleAlert.textContent) &&
+      /reveal app|显示 App/i.test(staleAlert.textContent),
+      staleAlert ? staleAlert.textContent.slice(0, 90) : 'missing');
+
     // 22d. three-step first-run guide + ad-hoc re-grant note
     check('first-run guide has three numbered steps and a re-grant note',
       qa('.steps .step').length === 3 &&
@@ -609,6 +670,142 @@ frame.addEventListener('load', async function () {
     check('Reveal App in Finder invokes reveal_app_in_finder',
       !!last('reveal_app_in_finder'));
 
+    // 22h2. Request permission: primary action, disables buttons, re-checks
+    var requestBtn = q('[data-action="request-accessibility"]');
+    check('Request permission is a primary action and starts enabled',
+      !!requestBtn && requestBtn.disabled === false &&
+      requestBtn.className.indexOf('primary') !== -1 &&
+      /Request permission|请求授权/.test(requestBtn.textContent));
+    var diagBeforeRequest = count('get_jump_diagnostics');
+    requestBtn.click();
+    await sleep(12);
+    check('permission buttons are disabled while the request runs',
+      T.jumpAction === 'request' &&
+      q('[data-action="request-accessibility"]').disabled === true &&
+      q('[data-action="jump-check"]').disabled === true &&
+      q('[data-action="reveal-app"]').disabled === true,
+      'action=' + T.jumpAction);
+    var requestDone = await waitFor(function () {
+      return T.jumpAction === null &&
+        count('request_accessibility_permission') === 1 &&
+        count('get_jump_diagnostics') === diagBeforeRequest + 1;
+    }, 120);
+    var requestHint = q('#save-status').textContent;
+    check('Request permission invokes the command, re-checks and shows a hint',
+      !!requestDone && /authorized|requested|已授权|已请求/.test(requestHint) &&
+      q('[data-action="request-accessibility"]').disabled === false,
+      'hint=' + requestHint);
+
+    // 22h2b. false = macOS prompt shown but the switch is still off
+    T.setPermissionCommandModes({ request: 'prompted' });
+    var diagBeforePrompt = count('get_jump_diagnostics');
+    q('[data-action="request-accessibility"]').click();
+    var prompted = await waitFor(function () {
+      return T.jumpAction === null &&
+        count('request_accessibility_permission') === 2 &&
+        count('get_jump_diagnostics') === diagBeforePrompt + 1 &&
+        /requested|已请求/.test(q('#save-status').textContent);
+    }, 120);
+    check('prompt-only request shows the “open System Settings” follow-up hint',
+      !!prompted, 'hint=' + q('#save-status').textContent);
+    T.setPermissionCommandModes({ request: 'granted' });
+
+    // 22h3. Reset requires inline confirmation, then invokes and re-checks
+    var resetBtn = q('[data-action="reset-permissions"]');
+    check('Reset permissions is offered as a destructive action',
+      !!resetBtn && resetBtn.className.indexOf('danger') !== -1 &&
+      /reset this app|重置本应用/i.test(resetBtn.getAttribute('aria-label') || ''),
+      resetBtn ? resetBtn.getAttribute('aria-label') : 'missing');
+    var resetCallsBefore = count('reset_app_permissions');
+    resetBtn.click();
+    await sleep(70);
+    var resetConfirmOpen = !!q('[data-focus="confirm-ok"]') &&
+      !q('[data-action="reset-permissions"]');
+    var resetNotYet = count('reset_app_permissions') === resetCallsBefore;
+    q('[data-focus="confirm-cancel"]').click();
+    await sleep(70);
+    var resetCancelled = !q('[data-focus="confirm-ok"]') &&
+      count('reset_app_permissions') === resetCallsBefore;
+    check('reset asks for an inline confirmation and cancelling sends nothing',
+      resetConfirmOpen && resetNotYet && resetCancelled,
+      'confirm=' + resetConfirmOpen + ' calls=' + count('reset_app_permissions'));
+
+    var diagBeforeReset = count('get_jump_diagnostics');
+    q('[data-action="reset-permissions"]').click();
+    await sleep(70);
+    q('[data-focus="confirm-ok"]').click();
+    var resetDone = await waitFor(function () {
+      return T.jumpAction === null &&
+        count('reset_app_permissions') === resetCallsBefore + 1 &&
+        count('get_jump_diagnostics') === diagBeforeReset + 1;
+    }, 120);
+    check('confirming reset invokes reset_app_permissions and re-checks',
+      !!resetDone && /reset|已重置/.test(q('#save-status').textContent),
+      'resetCalls=' + count('reset_app_permissions') +
+      ' hint=' + q('#save-status').textContent);
+
+    // 22h4. returning to the window refreshes the pills (no extra clicking)
+    T.selectGroup('jump');
+    await sleep(80);
+    var diagBeforeFocus = count('get_jump_diagnostics');
+    win.dispatchEvent(new win.Event('focus'));
+    var focusRefreshed = await waitFor(function () {
+      return count('get_jump_diagnostics') === diagBeforeFocus + 1;
+    }, 100);
+    check('window focus refreshes the permission pills on the Jump pane',
+      !!focusRefreshed, 'calls=' + count('get_jump_diagnostics'));
+
+    var diagBeforeVisibility = count('get_jump_diagnostics');
+    doc.dispatchEvent(new win.Event('visibilitychange'));
+    var visibilityRefreshed = await waitFor(function () {
+      return count('get_jump_diagnostics') === diagBeforeVisibility + 1;
+    }, 100);
+    check('visibilitychange refreshes the permission pills too',
+      !!visibilityRefreshed, 'calls=' + count('get_jump_diagnostics'));
+
+    var diagBeforeDouble = count('get_jump_diagnostics');
+    win.dispatchEvent(new win.Event('focus'));
+    win.dispatchEvent(new win.Event('focus'));
+    await sleep(160);
+    check('concurrent focus refreshes collapse into one diagnostics request',
+      count('get_jump_diagnostics') === diagBeforeDouble + 1,
+      'calls=' + (count('get_jump_diagnostics') - diagBeforeDouble));
+
+    T.selectGroup('general');
+    await sleep(70);
+    var diagIdle = count('get_jump_diagnostics');
+    win.dispatchEvent(new win.Event('focus'));
+    await sleep(170);
+    check('focus on another pane does not re-run diagnostics',
+      count('get_jump_diagnostics') === diagIdle,
+      'calls=' + (count('get_jump_diagnostics') - diagIdle));
+    T.selectGroup('jump');
+    await sleep(80);
+
+    // 22h5. command failures surface in the save bar and re-enable buttons
+    T.setPermissionCommandModes({ request: 'error' });
+    q('[data-action="request-accessibility"]').click();
+    var requestErrored = await waitFor(function () {
+      return q('#save-status').className === 'error' &&
+        /failed|mock/i.test(q('#save-status').textContent);
+    }, 120);
+    check('request errors surface in the save bar and re-enable the buttons',
+      !!requestErrored && T.jumpAction === null &&
+      q('[data-action="request-accessibility"]').disabled === false,
+      'status=' + q('#save-status').textContent);
+    T.setPermissionCommandModes({ request: 'granted' });
+
+    // 22h6. the new permission controls are labelled for assistive tech
+    var newControls = qa('[data-action="request-accessibility"], ' +
+      '[data-action="reset-permissions"], [data-row="jump-app-location"] [tabindex="0"]');
+    check('new permission controls have accessible names',
+      newControls.length === 3 && newControls.every(function (el) {
+        return ((el.getAttribute('aria-label') || '').trim() ||
+          (el.textContent || '').trim()).length > 0;
+      }) &&
+      !!q('summary.guide-summary').textContent.trim(),
+      'controls=' + newControls.length);
+
     // 22i. the dense pane (pills, steps, agent rows) fits both language widths
     var paneFits = function () {
       var sc = q('#pane-scroll');
@@ -620,6 +817,9 @@ frame.addEventListener('load', async function () {
     var zhJumpText = q('#pane-body').textContent;
     check('jump pane renders Chinese labels and fits without horizontal overflow',
       /辅助功能/.test(zhJumpText) && /已授权/.test(zhJumpText) && /未授权/.test(zhJumpText) &&
+      /请求授权/.test(zhJumpText) && /重置本应用授权/.test(zhJumpText) &&
+      /App 位置/.test(zhJumpText) &&
+      /需要授权（1 项）/.test(q('summary.guide-summary').textContent) &&
       paneFits() && count('get_jump_diagnostics') === callsBeforeLang,
       'scope=' + zhJumpText.slice(0, 60));
     T.setSettings(Object.assign({}, T.settings, { language: 'en' }));

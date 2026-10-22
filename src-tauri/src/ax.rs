@@ -75,6 +75,33 @@ pub fn is_trusted() -> bool {
     platform::is_trusted()
 }
 
+/// Ask macOS to add the CURRENT executable to Accessibility (native prompt).
+///
+/// Returns `true` when already trusted (no prompt is shown in that case), else
+/// `false` after the prompt was requested. Never blocks waiting for the user:
+/// the grant is made in System Settings and read back by the next check.
+#[cfg(target_os = "macos")]
+pub fn request_accessibility_permission() -> Result<bool, String> {
+    let trusted_before = platform::is_trusted();
+    if trusted_before {
+        return Ok(true);
+    }
+    let prompt_result = platform::prompt_accessibility_permission()?;
+    Ok(resolve_prompt_result(trusted_before, prompt_result))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_accessibility_permission() -> Result<bool, String> {
+    Err("accessibility_prompt_unsupported".to_string())
+}
+
+/// The prompt call returns the trust state at call time; combine it with the
+/// pre-check so an already-trusted app can never regress to `false`.
+#[cfg(target_os = "macos")]
+fn resolve_prompt_result(trusted_before: bool, prompt_result: bool) -> bool {
+    trusted_before || prompt_result
+}
+
 #[cfg(target_os = "macos")]
 pub fn focused_window_title(pid: u32) -> Option<String> {
     platform::focused_window_title(pid)
@@ -171,6 +198,9 @@ mod platform {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrusted() -> u8;
+        /// Shows the macOS "add this app to Accessibility" prompt when the
+        /// options dictionary contains `AXTrustedCheckOptionPrompt = true`.
+        fn AXIsProcessTrustedWithOptions(options: CfType) -> u8;
         fn AXUIElementCreateApplication(pid: i32) -> AxElement;
         fn AXUIElementCopyAttributeValue(
             element: AxElement,
@@ -203,6 +233,26 @@ mod platform {
         ) -> u8;
         fn CFArrayGetCount(array: CfArray) -> isize;
         fn CFArrayGetValueAtIndex(array: CfArray, index: isize) -> *const c_void;
+        /// Key/value callbacks with CFString equality + CFRetain/CFRelease
+        /// semantics; required for AXIsProcessTrustedWithOptions to find its key.
+        static kCFTypeDictionaryKeyCallBacks: CFDictionaryCallBacks;
+        static kCFTypeDictionaryValueCallBacks: CFDictionaryCallBacks;
+        static kCFBooleanTrue: *const c_void;
+        fn CFDictionaryCreate(
+            alloc: CfAllocator,
+            keys: *const CfType,
+            values: *const CfType,
+            num_values: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> CfType;
+    }
+
+    /// Opaque `CFDictionaryKeyCallBacks`/`CFDictionaryValueCallBacks` storage;
+    /// only passed by pointer to `CFDictionaryCreate`.
+    #[repr(C)]
+    struct CFDictionaryCallBacks {
+        _private: [u8; 0],
     }
 
     #[link(name = "CoreGraphics", kind = "framework")]
@@ -488,6 +538,35 @@ mod platform {
         unsafe { AXIsProcessTrusted() != 0 }
     }
 
+    /// Show the native Accessibility prompt for the CURRENT executable and
+    /// return whether the process is trusted at that moment (usually still
+    /// `false`: the grant happens later in System Settings).
+    pub fn prompt_accessibility_permission() -> Result<bool, String> {
+        let key = cf_string("AXTrustedCheckOptionPrompt")
+            .ok_or_else(|| "cf_string_failed".to_string())?;
+        // Safety: kCFBooleanTrue is a constant CFBoolean; the dictionary retains
+        // it via kCFTypeDictionaryValueCallBacks. Keys/values arrays live for the
+        // whole call.
+        let keys: [CfType; 1] = [key.as_ptr()];
+        let values: [CfType; 1] = [unsafe { kCFBooleanTrue }];
+        let dictionary = unsafe {
+            CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                &kCFTypeDictionaryKeyCallBacks as *const CFDictionaryCallBacks as *const c_void,
+                &kCFTypeDictionaryValueCallBacks as *const CFDictionaryCallBacks as *const c_void,
+            )
+        };
+        let Some(dictionary) = Cf::new(dictionary) else {
+            return Err("cf_dictionary_failed".to_string());
+        };
+        // Safety: valid CFDictionary; returns a Boolean (unsigned char).
+        let trusted = unsafe { AXIsProcessTrustedWithOptions(dictionary.as_ptr()) != 0 };
+        Ok(trusted)
+    }
+
     pub fn focused_window_title(pid: u32) -> Option<String> {
         let app = app_element(pid)?;
         if let Some(window) = copy_attribute(app.as_ptr(), "AXFocusedWindow") {
@@ -637,6 +716,18 @@ mod tests {
             frame: None,
         };
         assert_eq!(row.text_strings(), vec!["进行中", "多窗口询问提醒与跳转"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn permission_prompt_result_never_regresses_a_trusted_process() {
+        // Already trusted: no prompt is shown and the result stays true.
+        assert!(resolve_prompt_result(true, false));
+        assert!(resolve_prompt_result(true, true));
+        // Freshly trusted via the prompt.
+        assert!(resolve_prompt_result(false, true));
+        // Prompt shown but the grant has not happened yet.
+        assert!(!resolve_prompt_result(false, false));
     }
 
     #[test]

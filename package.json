@@ -1,6 +1,6 @@
 {
   "name": "agent-monitor",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "scripts": {
     "build": "cargo build --release --manifest-path src-tauri/Cargo.toml",
     "run": "cargo run --manifest-path src-tauri/Cargo.toml",

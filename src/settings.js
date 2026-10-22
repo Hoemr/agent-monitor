@@ -26,7 +26,8 @@ var mockState = {
   iconMeta: {},
   dismissed: 3,
   closed: false,
-  updateCheckMode: 'available'   // 'available' | 'uptodate' | 'error'
+  updateCheckMode: 'available',   // 'available' | 'uptodate' | 'error'
+  permissionModes: { request: 'granted', reset: 'ok' }  // 'granted'|'denied'|'error', 'ok'|'error'
 };
 
 function clone(value) {
@@ -343,6 +344,9 @@ var I18N = {
         desc: 'When a jump target no longer exists, remove the task and show a toast with Undo.'
       },
       setup: 'Permissions & setup',
+      appLocation: 'App location',
+      appLocationDesc: 'The bundle this window is running from — the copy System Settings must contain.',
+      staleGrant: 'Checked in System Settings but still “Not granted”? The grant is usually bound to an older build or another copy (ad-hoc signatures change on every rebuild). Press “Reset this app’s permissions…” to clear the old record, add this build with “Reveal App”, and quit and reopen Agent Monitor if needed.',
       status: {
         accessibility: 'Accessibility',
         automation: 'Automation',
@@ -374,15 +378,29 @@ var I18N = {
         checkLabel: 'Self-check',
         checkDesc: 'Re-read the permission states and each agent’s capabilities.',
         checkButton: 'Check again',
+        requestLabel: 'Request permission',
+        requestDesc: 'Ask macOS to add this build to Accessibility so it shows up in the list.',
+        requestButton: 'Request permission',
+        requestHint: 'Permission requested. Turn the switch on in System Settings, then press “Check again”.',
+        requestTrusted: 'Accessibility is already authorized. The status refreshes automatically.',
         revealLabel: 'Reveal the app in Finder',
         revealDesc: 'Show Agent Monitor.app in Finder so it can be dragged into the Accessibility list.',
         revealButton: 'Reveal App',
+        resetLabel: 'Reset this app’s permissions…',
+        resetDesc: 'Clear this build’s Accessibility and Automation records, then add the current build again.',
+        resetButton: 'Reset…',
+        resetConfirm: 'Clear this app’s Accessibility and Automation records? You will need to grant them again.',
+        resetConfirmOk: 'Clear records',
+        resetHint: 'Permission records reset. Add this build again with “Reveal App”, then press “Check again”.',
         open: 'Open',
         openAccessibility: 'Open Accessibility settings',
         openAutomation: 'Open Automation settings'
       },
       guide: {
         heading: 'First run',
+        summary: 'Setup guide',
+        summaryMissing: 'Permissions needed ({count})',
+        summaryHint: '3 steps',
         intro: 'Three steps make window-level jumps work:',
         step1: 'Open System Settings → Privacy & Security → Accessibility, then add Agent Monitor.app with + — or drag it in from Finder after “Reveal App”.',
         step2: 'Come back here and press “Check again” until Accessibility and Window access read “Granted”.',
@@ -599,6 +617,9 @@ var I18N = {
         desc: '跳转目标失效时自动移除任务，并弹出带“撤销”的提示。'
       },
       setup: '权限与配置',
+      appLocation: 'App 位置',
+      appLocationDesc: '当前窗口正在运行的 App 副本——也就是系统设置里需要包含的那一份。',
+      staleGrant: '系统设置里勾选了但仍显示未授权？通常是授权绑定到了旧版本或另一个副本（ad-hoc 签名每次重建都会变）。点“重新授权”清除旧记录，并用“显示 App”把当前版本加进辅助功能列表；必要时退出并重开 Agent Monitor。',
       status: {
         accessibility: '辅助功能',
         automation: '自动化',
@@ -630,15 +651,29 @@ var I18N = {
         checkLabel: '自检',
         checkDesc: '重新读取三项权限状态与各 Agent 的跳转能力。',
         checkButton: '重新检查',
+        requestLabel: '请求授权',
+        requestDesc: '请 macOS 把当前版本加入辅助功能列表，使其出现在系统设置中。',
+        requestButton: '请求授权',
+        requestHint: '已请求授权，请在系统设置中打开开关后点“重新检查”。',
+        requestTrusted: '辅助功能已授权，状态会自动刷新。',
         revealLabel: '在访达中显示 App',
         revealDesc: '在访达中显示 Agent Monitor.app，便于拖入辅助功能列表。',
         revealButton: '显示 App',
+        resetLabel: '重置本应用授权…',
+        resetDesc: '清除本版本的辅助功能与自动化授权记录，然后重新添加当前版本。',
+        resetButton: '重置…',
+        resetConfirm: '清除本应用的辅助功能与自动化授权记录？之后需要重新授权。',
+        resetConfirmOk: '清除记录',
+        resetHint: '已重置本应用的授权记录，请用“显示 App”重新添加当前版本并点“重新检查”。',
         open: '打开',
         openAccessibility: '打开辅助功能设置',
         openAutomation: '打开自动化设置'
       },
       guide: {
         heading: '首次配置',
+        summary: '配置向导',
+        summaryMissing: '需要授权（{count} 项）',
+        summaryHint: '3 步',
         intro: '三步让窗口级跳转生效：',
         step1: '打开“系统设置”→“隐私与安全性”→“辅助功能”，点“+”加入 Agent Monitor.app；或先点“显示 App”再从访达拖入。',
         step2: '回到这里点“重新检查”，直到“辅助功能”和“窗口读取”都显示“已授权”。',
@@ -848,6 +883,8 @@ var state = {
   diagnosticsLoading: false,
   diagnosticsRequested: false, // lazy: the jump pane was opened at least once
   diagnosticsError: null,
+  guideOpen: false,           // collapsible setup guide (remembered across renders)
+  jumpAction: null,           // 'request' | 'reset' while a permission command runs
   update: {
     phase: 'idle',            // idle|checking|uptodate|available|installing|installed|error
     result: null,             // { current_version, available, version, notes, pub_date }
@@ -968,6 +1005,8 @@ function cancelConfirm() {
     state.focusAfterRender = confirm.scope === 'all' ? 'reset-all' : 'reset:' + confirm.scope;
   } else if (confirm && confirm.kind === 'clear-dismissed') {
     state.focusAfterRender = 'clear-dismissed';
+  } else if (confirm && confirm.kind === 'reset-permissions') {
+    state.focusAfterRender = 'reset-permissions';
   }
   renderAll();
 }
@@ -1425,9 +1464,13 @@ function buildIconSection() {
 
 // ── Jump diagnostics (get_jump_diagnostics) ────────────────────
 //
-// The Jump pane is a setup wizard: it reads the three macOS permission states
-// and the per-agent capability table once, the first time the pane is opened,
-// and only again when the user presses "Check again". It is never polled.
+// The Jump pane reads the three macOS permission states and the per-agent
+// capability table once, the first time it is opened, then refreshes:
+//   • on “Check again”,
+//   • whenever the Settings window regains focus/visibility while the pane is
+//     selected (so a System Settings toggle is reflected without extra clicks),
+//   • and after request/reset permission commands finish.
+// It is never polled.
 
 function pick(raw, snake, camel, fallback) {
   if (raw && raw[snake] !== undefined) return raw[snake];
@@ -1497,6 +1540,129 @@ var UNVERIFIED_DETAILS = {
 function diagnosticDetail(code) {
   var key = DIAGNOSTIC_DETAIL_KEYS[code];
   return key ? i('jump.status.detail.' + key) : i('jump.status.detail.other');
+}
+
+function jumpErrorText(err) {
+  return String(err && err.message ? err.message : err);
+}
+
+/* A permission command is running: every permission button is disabled. */
+function jumpActionBusy() {
+  return !!state.jumpAction;
+}
+
+function jumpCheckDisabled() {
+  return state.jumpAction !== null || state.diagnosticsLoading;
+}
+
+/* Accessibility + Automation grants that are missing (window access is a
+ * read test, not a grant). Drives the collapsed guide's call-to-action. */
+function missingPermissionCount() {
+  var diag = state.diagnostics;
+  if (!diag) return 0;
+  var count = 0;
+  if (!(diag.accessibility && diag.accessibility.granted)) count += 1;
+  if (!(diag.automation && diag.automation.granted)) count += 1;
+  return count;
+}
+
+/* One-line “granted but still not authorised” explanation, only while
+ * Accessibility is missing. */
+function staleGrantAlert() {
+  var diag = state.diagnostics;
+  if (!diag || state.diagnosticsLoading) return null;
+  if (diag.accessibility && diag.accessibility.granted) return null;
+  return h('p', {
+    class: 'stale-alert',
+    'data-stale-alert': '',
+    role: 'note',
+    text: i('jump.staleGrant')
+  });
+}
+
+function shortPath(path) {
+  var text = String(path || '');
+  return text ? text.replace(/^\/Users\/[^/]+/, '~') : '—';
+}
+
+/* Read-only “App location” row: the running bundle, so the user can verify the
+ * copy listed in System Settings is exactly this build. */
+function appLocationRow() {
+  var path = state.diagnostics && state.diagnostics.app_bundle_path;
+  return h('div', { class: 'row row-stacked', 'data-row': 'jump-app-location' }, [
+    h('span', { class: 'row-text' }, [
+      h('span', { class: 'row-title', text: i('jump.appLocation') }),
+      h('span', { class: 'row-desc', text: i('jump.appLocationDesc') })
+    ]),
+    h('code', {
+      class: 'path-value',
+      tabindex: '0',
+      'aria-label': i('jump.appLocation'),
+      title: path || '',
+      text: shortPath(path)
+    })
+  ]);
+}
+
+/* macOS prompt: add this build to the Accessibility list. Never resets TCC. */
+function requestAccessibilityPermission() {
+  if (state.jumpAction) return;
+  state.jumpAction = 'request';
+  renderAll();
+  invoke('request_accessibility_permission').then(function (granted) {
+    state.jumpAction = null;
+    renderAll();
+    flashStatus('info',
+      i(granted ? 'jump.actions.requestTrusted' : 'jump.actions.requestHint'),
+      granted ? 3600 : 5200);
+    loadJumpDiagnostics(true);
+  }).catch(function (err) {
+    state.jumpAction = null;
+    renderAll();
+    flashStatus('error', jumpErrorText(err), 5000);
+  });
+}
+
+function openResetPermissionsConfirm() {
+  if (state.jumpAction) return;
+  state.confirm = { kind: 'reset-permissions', scope: null };
+  state.focusAfterRender = 'confirm-cancel';
+  renderAll();
+}
+
+/* tccutil-based reset of this bundle's grants (only after inline confirmation). */
+function resetThisAppPermissions() {
+  state.confirm = null;
+  if (state.jumpAction) return;
+  state.jumpAction = 'reset';
+  state.focusAfterRender = 'reset-permissions';
+  renderAll();
+  invoke('reset_app_permissions').then(function () {
+    state.jumpAction = null;
+    renderAll();
+    flashStatus('info', i('jump.actions.resetHint'), 6000);
+    loadJumpDiagnostics(true);
+  }).catch(function (err) {
+    state.jumpAction = null;
+    renderAll();
+    flashStatus('error', jumpErrorText(err), 5000);
+  });
+}
+
+/* Coming back from System Settings should refresh the pills immediately. */
+function refreshJumpOnReturn() {
+  if (document.hidden) return;
+  if (state.group !== 'jump') return;
+  if (state.jumpAction) return;               // the command re-checks on finish
+  if (!state.diagnosticsRequested) return;    // the lazy first load owns this
+  loadJumpDiagnostics(true);
+}
+
+/* A re-render can race the native <details> toggle task; read the live DOM
+ * state first so the guide never collapses under the user. */
+function syncGuideState() {
+  var guide = document.querySelector('details.guide[data-guide]');
+  if (guide) state.guideOpen = guide.open;
 }
 
 /* Only the first open triggers a read; "Check again" passes force=true. */
@@ -1583,9 +1749,10 @@ function diagnosticRow(row) {
         focus: 'open-permission:' + kind,
         ariaLabel: i(kind === 'accessibility' ? 'jump.actions.openAccessibility' : 'jump.actions.openAutomation'),
         title: i(kind === 'accessibility' ? 'jump.actions.openAccessibility' : 'jump.actions.openAutomation'),
+        disabled: jumpActionBusy(),
         onclick: function () {
           invoke('open_permission_settings', { kind: kind }).catch(function (err) {
-            flashStatus('error', String(err && err.message ? err.message : err), 5000);
+            flashStatus('error', jumpErrorText(err), 5000);
           });
         }
       }));
@@ -1600,56 +1767,131 @@ var DIAGNOSTIC_ROWS = [
   { key: 'window_access', titleKey: 'jump.status.windowAccess', descKey: 'jump.status.windowAccessDesc', permission: null }
 ];
 
+function buildJumpActions() {
+  var busy = jumpActionBusy();
+  var rows = [];
+
+  rows.push(actionRow('jump.actions.checkLabel', 'jump.actions.checkDesc', [
+    button('', i('jump.actions.checkButton'), {
+      action: 'jump-check',
+      focus: 'jump-check',
+      disabled: jumpCheckDisabled(),
+      onclick: function () { loadJumpDiagnostics(true); }
+    })
+  ]));
+
+  rows.push(actionRow('jump.actions.requestLabel', 'jump.actions.requestDesc', [
+    button('primary', i('jump.actions.requestButton'), {
+      action: 'request-accessibility',
+      focus: 'request-accessibility',
+      disabled: jumpCheckDisabled(),
+      onclick: requestAccessibilityPermission
+    })
+  ]));
+
+  rows.push(actionRow('jump.actions.revealLabel', 'jump.actions.revealDesc', [
+    button('', i('jump.actions.revealButton'), {
+      action: 'reveal-app',
+      focus: 'reveal-app',
+      disabled: busy,
+      onclick: function () {
+        invoke('reveal_app_in_finder').catch(function (err) {
+          flashStatus('error', jumpErrorText(err), 5000);
+        });
+      }
+    })
+  ]));
+
+  if (state.confirm && state.confirm.kind === 'reset-permissions') {
+    rows.push(confirmRow({
+      prompt: i('jump.actions.resetConfirm'),
+      okLabel: i('jump.actions.resetConfirmOk'),
+      onOk: resetThisAppPermissions
+    }));
+  } else {
+    rows.push(actionRow('jump.actions.resetLabel', 'jump.actions.resetDesc', [
+      button('danger', i('jump.actions.resetButton'), {
+        action: 'reset-permissions',
+        focus: 'reset-permissions',
+        ariaLabel: i('jump.actions.resetLabel'),
+        title: i('jump.actions.resetLabel'),
+        disabled: jumpCheckDisabled(),
+        onclick: openResetPermissionsConfirm
+      })
+    ]));
+  }
+
+  return card(rows);
+}
+
 function buildJumpSetup() {
   var frag = document.createDocumentFragment();
-  var statusCard = card(DIAGNOSTIC_ROWS.map(function (row) { return diagnosticRow(row); }));
+  var stack = [];
 
-  var actionsCard = card([
-    actionRow('jump.actions.checkLabel', 'jump.actions.checkDesc', [
-      button('', i('jump.actions.checkButton'), {
-        action: 'jump-check',
-        focus: 'jump-check',
-        onclick: function () { loadJumpDiagnostics(true); }
-      })
-    ]),
-    actionRow('jump.actions.revealLabel', 'jump.actions.revealDesc', [
-      button('', i('jump.actions.revealButton'), {
-        action: 'reveal-app',
-        focus: 'reveal-app',
-        onclick: function () {
-          invoke('reveal_app_in_finder').catch(function (err) {
-            flashStatus('error', String(err && err.message ? err.message : err), 5000);
-          });
-        }
-      })
-    ])
-  ]);
+  stack.push(card(DIAGNOSTIC_ROWS.map(function (row) { return diagnosticRow(row); })));
+
+  // “Checked in System Settings but still not granted”: read it right after the
+  // pill it explains. Disappears as soon as the grant is seen.
+  var alert = staleGrantAlert();
+  if (alert) stack.push(alert);
+
+  stack.push(card([appLocationRow()]));
+  stack.push(buildJumpActions());
 
   var notes = [];
   if (state.diagnosticsError) {
     notes.push(i('jump.status.failed', { message: state.diagnosticsError }));
   }
-  notes.push(i('jump.guide.adhoc'));
-  if (state.diagnostics && state.diagnostics.app_bundle_path) {
-    notes.push(i('jump.guide.appPath', { path: state.diagnostics.app_bundle_path }));
-  }
-
-  frag.appendChild(section('jump.setup', h('div', { class: 'card-stack' }, [statusCard, actionsCard]), notes));
+  frag.appendChild(section('jump.setup', h('div', { class: 'card-stack' }, stack), notes.length ? notes : null));
   return frag;
 }
 
+/* Collapsible setup guide: a native <details> so it stays keyboard accessible
+ * and takes no vertical space until the user opens it. The open state is kept
+ * across re-renders (diagnostics refresh, language switch). */
 function buildJumpGuide() {
+  var missing = missingPermissionCount();
+  var summaryText = missing > 0
+    ? i('jump.guide.summaryMissing', { count: missing })
+    : i('jump.guide.summary');
   var stepKeys = ['jump.guide.step1', 'jump.guide.step2', 'jump.guide.step3'];
   var steps = h('ol', { class: 'steps' }, stepKeys.map(function (key, index) {
     return h('li', { class: 'step', 'data-step': String(index + 1) }, [
       h('span', { class: 'step-text', text: i(key) })
     ]);
   }));
-  // The intro belongs above the numbered steps, not in the section note slot.
-  return section('jump.guide.heading', card([
+  var path = state.diagnostics && state.diagnostics.app_bundle_path;
+
+  var body = h('div', { class: 'guide-body' }, [
     h('p', { class: 'guide-intro', text: i('jump.guide.intro') }),
-    steps
-  ]));
+    steps,
+    h('p', { class: 'guide-note', text: i('jump.guide.adhoc') }),
+    h('p', { class: 'guide-note guide-note-warn', text: i('jump.staleGrant') }),
+    path ? h('p', { class: 'guide-note guide-path', text: i('jump.guide.appPath', { path: shortPath(path) }) }) : null
+  ]);
+
+  var details = h('details', {
+    class: 'guide',
+    'data-guide': '',
+    open: state.guideOpen ? true : null
+  }, [
+    h('summary', { class: 'guide-summary', 'data-guide-summary': '' }, [
+      h('span', { class: 'guide-chevron', 'aria-hidden': 'true' }),
+      h('span', {
+        class: 'guide-summary-text',
+        'data-guide-title': '',
+        'data-guide-missing': missing > 0 ? 'true' : 'false',
+        text: summaryText
+      }),
+      h('span', { class: 'guide-summary-hint', text: i('jump.guide.summaryHint') })
+    ]),
+    body
+  ]);
+  details.addEventListener('toggle', function () {
+    state.guideOpen = details.open;
+  });
+
+  return section('jump.guide.heading', details);
 }
 
 function agentRow(agent) {
@@ -2383,6 +2625,7 @@ function renderPane() {
 
 function renderAll() {
   LANG = effectiveLang();
+  syncGuideState();
   document.documentElement.lang = LANG;
   document.documentElement.setAttribute('lang', LANG);
   document.documentElement.setAttribute('data-lang', LANG);
@@ -2572,6 +2815,32 @@ function mockInvoke(cmd, args) {
       }
       return null;
     }
+    case 'request_accessibility_permission': {
+      var requestMode = (mockState.permissionModes && mockState.permissionModes.request) || 'granted';
+      return new Promise(function (resolve, reject) {
+        setTimeout(function () {
+          if (requestMode === 'error') {
+            reject(new Error('accessibility prompt failed (mock)'));
+            return;
+          }
+          // 'granted' = already trusted (true); 'prompted' = prompt shown but the
+          // switch is still off (false, the common first-run case).
+          resolve(requestMode !== 'prompted' && requestMode !== 'denied');
+        }, 40);
+      });
+    }
+    case 'reset_app_permissions': {
+      var resetMode = (mockState.permissionModes && mockState.permissionModes.reset) || 'ok';
+      return new Promise(function (resolve, reject) {
+        setTimeout(function () {
+          if (resetMode === 'error') {
+            reject(new Error('tccutil reset failed (mock)'));
+            return;
+          }
+          resolve('Accessibility, Automation');
+        }, 40);
+      });
+    }
     case 'check_for_update': {
       var mode = mockState.updateCheckMode || 'available';
       var current = (mockState.meta && mockState.meta.app_version) || '0.7.0';
@@ -2662,6 +2931,13 @@ if (MOCK) {
     get diagnosticsLoaded() { return state.diagnosticsLoaded; },
     get diagnosticsRequested() { return state.diagnosticsRequested; },
     get diagnosticsError() { return state.diagnosticsError; },
+    get jumpAction() { return state.jumpAction; },
+    get guideOpen() { return state.guideOpen; },
+    setPermissionCommandModes: function (modes) {
+      modes = modes || {};
+      if (modes.request) mockState.permissionModes.request = modes.request;
+      if (modes.reset) mockState.permissionModes.reset = modes.reset;
+    },
     get update() {
       return clone({
         phase: state.update.phase,
@@ -2798,6 +3074,12 @@ function boot() {
     window.addEventListener('focus', refresh);
     document.addEventListener('visibilitychange', refresh);
   }
+
+  // Permissions can be toggled in System Settings while this window is in the
+  // background: refresh the Jump pills when it comes back, but only while the
+  // Jump pane is selected. Active in the mock too so the selftest can drive it.
+  window.addEventListener('focus', refreshJumpOnReturn);
+  document.addEventListener('visibilitychange', refreshJumpOnReturn);
 }
 
 boot();
