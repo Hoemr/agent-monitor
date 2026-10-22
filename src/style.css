@@ -48,6 +48,9 @@
 
   --badge-bg: light-dark(#007aff, #0a84ff);
   --badge-fg: #ffffff;
+
+  /* Inner-side rounding of the tiny edge-hidden tab (hidden_sliver square). */
+  --tab-radius: min(6px, 40%);
 }
 
 html, body {
@@ -82,9 +85,10 @@ body {
 
 #pet {
   position: relative;
-  width: 72px;
-  height: 72px;
-  border-radius: 16px;
+  /* Collapsed/snapped size comes from Settings (`collapsed_size`, 48–96 px). */
+  width: var(--collapsed-size, 72px);
+  height: var(--collapsed-size, 72px);
+  border-radius: calc(var(--collapsed-size, 72px) * 0.2222);
   background: var(--material);
   border: 1px solid var(--hairline);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset,
@@ -125,6 +129,8 @@ body {
 .pet-glyph i:nth-child(1) { width: 100%; }
 .pet-glyph i:nth-child(2) { width: 66%; }
 .pet-glyph i:nth-child(3) { width: 84%; }
+/* Author `display:flex` would otherwise beat the UA `[hidden]` rule. */
+.pet-glyph[hidden] { display: none; }
 
 .no-tasks #pet { opacity: 0.62; }
 .no-tasks #pet:hover { opacity: 0.9; }
@@ -148,6 +154,66 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 #badge[hidden] { display: none; }
+
+/* Custom icon (`icon_style: custom`): replaces the glyph. The inset keeps the
+ * artwork inside the squircle without touching the hairline border. */
+.pet-icon {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  padding: 5%;
+  object-fit: contain;
+  border-radius: inherit;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.pet-icon[hidden] { display: none; }
+
+/* New-completion badge: a quiet, unfilled green ring (16 px) in the bottom-left
+ * corner, so it reads as a secondary signal next to the solid blue attention
+ * badge (18 px, top-right). It appears after the panel has been closed while
+ * tasks completed (see `seenAtSecs` in main.js). */
+.new-badge {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 2px;
+  border-radius: 8px;
+  background: rgba(48, 209, 88, 0.08);
+  border: 1px solid var(--status-running);
+  color: var(--status-running);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.new-badge[hidden] { display: none; }
+
+/* Jump-feedback notice while the panel is closed: a text-free dot in the last
+ * free corner (top-left). It stays until the notice expires or is acted on. */
+.notice-dot {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--notice-color, var(--accent));
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+}
+.notice-dot[hidden] { display: none; }
+.notice-dot.info { --notice-color: var(--accent); }
+.notice-dot.warn { --notice-color: var(--status-waiting); }
+.notice-dot.error { --notice-color: var(--status-failed); }
 
 .pet-grip { display: none; }
 
@@ -197,6 +263,17 @@ body {
   white-space: nowrap;
 }
 .header-meta[hidden] { display: none; }
+
+/* "N new" chip: what appeared since the last time the panel was open. */
+.header-new {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--status-running);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.header-new[hidden] { display: none; }
+#header-meta[hidden] + .header-new { margin-left: auto; }
 
 .icon-btn {
   margin-left: 4px;
@@ -452,49 +529,118 @@ body {
 .link-btn:hover { background: var(--fill-hover); }
 .link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* ── Edge-hidden sliver ────────────────────────────────────── */
+/* Footer gear: the only in-window entry point to Settings (Cmd+, also works). */
+.gear-btn {
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
+  border-radius: 5px;
+}
+.gear-btn svg { display: block; pointer-events: none; }
+.gear-btn:hover { background: var(--fill-hover); color: var(--text-primary); }
+
+/* ── Edge-hidden tab (hidden_sliver × hidden_sliver nub) ───── *
+ * Rust parks the window as a small square tab attached to a screen edge, so
+ * only the inner side looks rounded; the screen-edge side is flush and has no
+ * border. Badges shrink to textless dots and the grip becomes a 2×8 px handle.
+ */
 
 #app.mode-edge_hidden #pet {
   width: 100%;
   height: 100%;
+  border: 0;
   border-radius: 0;
-  border-top-right-radius: 16px;
-  border-bottom-right-radius: 16px;
-  border-left: 0;
+  background: var(--material);
   box-shadow: none;
+  overflow: hidden;
 }
-#app.mode-edge_hidden .pet-glyph,
-#app.mode-edge_hidden #badge { display: none; }
+#app.mode-edge_hidden[data-edge="left"] #pet {
+  border-top-right-radius: var(--tab-radius);
+  border-bottom-right-radius: var(--tab-radius);
+  border-right: 1px solid var(--hairline);
+}
+#app.mode-edge_hidden[data-edge="right"] #pet {
+  border-top-left-radius: var(--tab-radius);
+  border-bottom-left-radius: var(--tab-radius);
+  border-left: 1px solid var(--hairline);
+}
+#app.mode-edge_hidden[data-edge="top"] #pet {
+  border-bottom-left-radius: var(--tab-radius);
+  border-bottom-right-radius: var(--tab-radius);
+  border-bottom: 1px solid var(--hairline);
+}
+#app.mode-edge_hidden[data-edge="bottom"] #pet {
+  border-top-left-radius: var(--tab-radius);
+  border-top-right-radius: var(--tab-radius);
+  border-top: 1px solid var(--hairline);
+}
+#app.mode-edge_hidden[data-edge="none"] #pet {
+  border-radius: var(--tab-radius);
+}
+
+#app.mode-edge_hidden .pet-glyph { display: none; }
+
+#app.mode-edge_hidden .pet-icon {
+  left: 1px;
+  top: 1px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  padding: 0;
+}
+
 #app.mode-edge_hidden .pet-grip {
   display: block;
   position: absolute;
-  inset: 0;
-  background: repeating-linear-gradient(
-      180deg,
-      var(--text-tertiary) 0 2.5px,
-      transparent 2.5px 7px
-    ) center / 2.5px calc(100% - 26px) no-repeat;
+  top: 50%;
+  left: 50%;
+  z-index: 0;
+  width: 2px;
+  height: 8px;
+  margin: -4px 0 0 -1px;
+  border-radius: 1px;
+  background: var(--text-tertiary);
   opacity: 0.9;
 }
-#app.mode-edge_hidden[data-edge="left"] #pet {
-  border-radius: 0;
-  border-top-right-radius: 16px;
-  border-bottom-right-radius: 16px;
-  border-left: 0;
-  border-right: 1px solid var(--hairline);
-}
-#app.mode-edge_hidden[data-edge="left"] .pet-grip {
-  background-position: right 5px center;
-}
-#app.mode-edge_hidden[data-edge="top"] #pet,
-#app.mode-edge_hidden[data-edge="bottom"] #pet { border-radius: 16px; }
 #app.mode-edge_hidden[data-edge="top"] .pet-grip,
 #app.mode-edge_hidden[data-edge="bottom"] .pet-grip {
-  background: repeating-linear-gradient(
-      90deg,
-      var(--text-tertiary) 0 2.5px,
-      transparent 2.5px 7px
-    ) center / calc(100% - 26px) 2.5px no-repeat;
+  width: 8px;
+  height: 2px;
+  margin: -1px 0 0 -4px;
+}
+/* A custom icon already fills the tab; no grip line on top of it. */
+#app.mode-edge_hidden #pet.custom-icon .pet-grip { display: none; }
+
+/* Badges on a 14 px tab: 6 px dots without text. */
+#app.mode-edge_hidden #badge,
+#app.mode-edge_hidden #new-badge {
+  min-width: 6px;
+  width: 6px;
+  height: 6px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 0;
+  line-height: 0;
+  color: transparent;
+  box-shadow: none;
+}
+#app.mode-edge_hidden #badge { top: 2px; right: 2px; z-index: 1; }
+/* The ring collapses to a filled dot so it stays legible at 6 px. */
+#app.mode-edge_hidden #new-badge {
+  bottom: 2px;
+  left: 2px;
+  z-index: 1;
+  border: 0;
+  background: var(--status-running);
+}
+#app.mode-edge_hidden .notice-dot,
+#app.mode-tray_hidden .notice-dot {
+  top: 1px;
+  left: 1px;
+  width: 4px;
+  height: 4px;
+  z-index: 1;
+  box-shadow: none;
 }
 
 /* ── Toast ─────────────────────────────────────────────────── */
@@ -518,14 +664,46 @@ body {
   z-index: 10;
 }
 #toast[hidden] { display: none; }
+/* The toast must never be squeezed inside the collapsed/edge-hidden/tray-hidden
+ * window; the notice is shown as a dot there instead (main.js `syncNotice`). */
+#app.mode-collapsed #toast,
+#app.mode-edge_hidden #toast,
+#app.mode-tray_hidden #toast { display: none; }
 #toast.warn { border-color: color-mix(in srgb, var(--status-waiting) 55%, transparent); }
 #toast.error { border-color: color-mix(in srgb, var(--status-failed) 55%, transparent); }
 #toast-text { flex: 1; }
 
-/* ── Motion preferences ────────────────────────────────────── */
+/* ── Motion preferences ────────────────────────────────────── *
+ * `settings.animations` is applied as data-animations on <html>:
+ *   system (default) → respect the OS reduced-motion preference,
+ *   off              → never animate,
+ *   always           → animate even when the OS asks for reduced motion.
+ * The `always` rules must win over the media query, so they carry an extra
+ * attribute selector.
+ */
 
 @media (prefers-reduced-motion: reduce) {
   #pet, .task, .dismiss, .icon-btn, .link-btn { transition: none; }
+}
+
+html[data-animations="off"] #pet,
+html[data-animations="off"] .task,
+html[data-animations="off"] .dismiss,
+html[data-animations="off"] .icon-btn,
+html[data-animations="off"] .link-btn {
+  transition: none !important;
+  animation: none !important;
+}
+
+html[data-animations="always"] #pet {
+  transition: box-shadow 150ms ease, border-color 150ms ease, opacity 150ms ease;
+}
+html[data-animations="always"] .task,
+html[data-animations="always"] .dismiss,
+html[data-animations="always"] .icon-btn,
+html[data-animations="always"] .link-btn {
+  transition: background 110ms ease, opacity 110ms ease, color 110ms ease,
+    border-color 110ms ease;
 }
 
 
@@ -551,5 +729,10 @@ html.mock-desktop[style*="light"] body {
     linear-gradient(135deg, #dfe7f5 0%, #f0e6f2 50%, #e2efe9 100%);
 }
 html.mock-desktop #app { flex: 0 0 auto; width: 360px; height: 390px; }
-html.mock-desktop.mode-collapsed #app { width: 72px; height: 72px; }
+html.mock-desktop #app.mode-collapsed,
+html.mock-desktop #app.mode-edge_hidden,
+html.mock-desktop #app.mode-tray_hidden {
+  width: var(--collapsed-size, 72px);
+  height: var(--collapsed-size, 72px);
+}
 html.mock-desktop #toast { bottom: -46px; }

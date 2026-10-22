@@ -10,7 +10,7 @@
 //! mappings are implemented but marked 待验证 in docs/CAPABILITIES.md until a
 //! live record is observed.
 
-use super::{truncate_chars, ScanCtx, Source};
+use super::{retention_keeps, truncate_chars, ScanCtx, Source};
 use crate::model::*;
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
@@ -18,8 +18,6 @@ use std::path::{Path, PathBuf};
 const APP_NAME: &str = "ZCode";
 const BUNDLE_ID: &str = "dev.zcode.app";
 const PROCESS_NEEDLE: &str = "ZCode.app/Contents/MacOS/ZCode";
-const RECENT_SECS: u64 = 24 * 3600;
-const FALLBACK_TASKS: usize = 3;
 
 struct TaskRow {
     workspace_path: String,
@@ -127,6 +125,19 @@ fn map_status(s: &str) -> (TaskStatus, String) {
     }
 }
 
+/// Retention decision for one indexed task: active rows (running/waiting) are
+/// exempt through the shared helper, everything ended follows the user-configured
+/// window. There is deliberately no "keep the newest N rows" fallback: that
+/// showed sessions weeks older than the configured retention forever.
+fn keeps_row(
+    status: TaskStatus,
+    updated_secs: u64,
+    now_secs: u64,
+    retention_secs: u64,
+) -> bool {
+    retention_keeps(status, updated_secs, now_secs, retention_secs)
+}
+
 fn percent_encode(input: &str) -> String {
     let mut out = String::new();
     for b in input.as_bytes() {
@@ -167,14 +178,12 @@ impl Source for ZCodeSource {
         }
         let app_alive = ctx.processes.any(PROCESS_NEEDLE) || ctx.processes.any(APP_NAME);
         let mut out = Vec::new();
-        for (index, row) in self.rows.iter().enumerate() {
+        for row in self.rows.iter() {
             let updated = row.updated_at / 1000;
-            let within_window = updated >= ctx.now_secs.saturating_sub(RECENT_SECS);
-            // ZCode may be idle for days; keep the newest few real tasks so the
-            // agent stays represented without unbounded history.
-            let fallback = index < FALLBACK_TASKS;
             let (status, reason) = map_status(&row.task_status);
-            if !within_window && !fallback && status != TaskStatus::Running {
+            // Active rows are exempt inside `keeps_row`; ended ones must be
+            // inside the configured retention window.
+            if !keeps_row(status, updated, ctx.now_secs, ctx.retention_secs) {
                 continue;
             }
             let workspace = Path::new(&row.workspace_path);
@@ -280,5 +289,41 @@ mod tests {
         let id = format!("zcode:{}", "sess_abc");
         assert_eq!(id, "zcode:sess_abc");
         assert_ne!(id, "zcode:Some title");
+    }
+
+    #[test]
+    fn retention_governs_ended_rows_including_the_newest_and_keeps_active_rows() {
+        let now = 2_000_000;
+        let window = 72 * 3_600;
+        // Regression: there is no unconditional "newest 3 rows" fallback any
+        // more. An ended row is dropped as soon as its `updated_at` is outside
+        // the configured window, whatever its position in the index order.
+        let fifteen_days_ago = now - 15 * 86_400;
+        assert!(!keeps_row(
+            TaskStatus::Completed,
+            fifteen_days_ago,
+            now,
+            window
+        ));
+        assert!(!keeps_row(TaskStatus::Failed, fifteen_days_ago, now, window));
+        // The inclusive boundary is kept.
+        assert!(keeps_row(TaskStatus::Completed, now - window, now, window));
+        // Active rows are never aged out.
+        for status in [
+            TaskStatus::Running,
+            TaskStatus::WaitingInput,
+            TaskStatus::WaitingApproval,
+        ] {
+            assert!(keeps_row(status, 0, now, window), "{status:?} must stay");
+        }
+        // Retention is injected, not the old hard-coded 24 h ZCode constant.
+        let two_days_ago = now - 48 * 3_600;
+        assert!(keeps_row(TaskStatus::Completed, two_days_ago, now, window));
+        assert!(!keeps_row(
+            TaskStatus::Completed,
+            two_days_ago,
+            now,
+            24 * 3_600
+        ));
     }
 }

@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Headless UI acceptance: renders src/index.html?mock=1 in an iframe and drives
-# real DOM events (click/drag/hover/escape/20 sessions). Requires Google Chrome.
-set -euo pipefail
+# Headless UI acceptance for BOTH windows. Each suite renders the shipped page
+# with ?mock=1 inside an iframe and drives real DOM events (click/drag/hover/
+# keyboard/settings events), then requires the first result line to be ALL PASS.
+#
+# Requires Google Chrome (set CHROME=/path/to/chrome to override).
+set -uo pipefail
 cd "$(dirname "$0")/.."
 CHROME="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 [ -x "$CHROME" ] || { echo "Chrome not found; set CHROME=/path/to/chrome"; exit 1; }
+
+status=0
+
+echo "== desktop pet (src/index.html) =="
 OUT=$("$CHROME" --headless=new --disable-gpu --allow-file-access-from-files \
   --virtual-time-budget=12000 --dump-dom "file://$PWD/scripts/ui-selftest.html" 2>/dev/null)
 python3 - "$OUT" <<'PY'
@@ -17,3 +24,18 @@ text = html.unescape(m.group(1))
 print(text)
 sys.exit(0 if text.startswith("ALL PASS") else 1)
 PY
+[ $? -eq 0 ] || status=1
+
+echo
+echo "== settings window (src/settings.html) =="
+if ! bash scripts/ui-test-settings.sh; then
+  status=1
+fi
+
+echo
+if [ "$status" -eq 0 ]; then
+  echo "UI ACCEPTANCE: ALL SUITES PASS"
+else
+  echo "UI ACCEPTANCE: FAILURES (see above)"
+fi
+exit "$status"

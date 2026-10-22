@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/tauri-schema/refs/heads/main/capabilities/v2/default.json",
   "identifier": "default",
-  "description": "Desktop pet capabilities: render events and drag the window.",
-  "windows": ["main"],
+  "description": "Desktop pet + settings window capabilities: render events, drag the pet, read/write settings through app commands.",
+  "windows": ["main", "settings"],
   "permissions": [
     "core:default",
     "core:event:default",

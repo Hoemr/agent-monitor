@@ -17,6 +17,10 @@ pub fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// A failed turn only demands attention while it is recent: an interrupted or
+/// long-finished failure must not keep the badge/tray alert alive forever.
+pub const FAILED_ATTENTION_WINDOW_SECS: u64 = 30 * 60;
+
 pub fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -65,11 +69,38 @@ impl TaskStatus {
         }
     }
 
+    /// Status-level class used for ordering/highlighting. For the badge and
+    /// tray alert use [`TaskRecord::needs_attention_at`], which also applies the
+    /// failure freshness/acknowledgement rules.
     pub fn needs_attention(self) -> bool {
         matches!(
             self,
             TaskStatus::WaitingApproval | TaskStatus::WaitingInput | TaskStatus::Failed
         )
+    }
+
+    /// Whether this status should count as "needs the user" at `now_secs`.
+    ///
+    /// * `waiting_input` / `waiting_approval` always count: the agent is blocked.
+    /// * `failed` counts only when it is recent and was not a deliberate
+    ///   interruption/cancellation (`interrupted`, `aborted`, `cancelled`):
+    ///   the user already decided to stop those turns.
+    pub fn needs_attention_at(
+        self,
+        status_reason: &str,
+        last_activity_secs: u64,
+        now_secs: u64,
+    ) -> bool {
+        match self {
+            TaskStatus::WaitingApproval | TaskStatus::WaitingInput => true,
+            TaskStatus::Failed => {
+                if is_cancelled_reason(status_reason) {
+                    return false;
+                }
+                now_secs.saturating_sub(last_activity_secs) <= FAILED_ATTENTION_WINDOW_SECS
+            }
+            _ => false,
+        }
     }
 }
 
@@ -256,9 +287,24 @@ pub struct TaskRecord {
     pub pinned: bool,
 }
 
+/// Reasons that represent a deliberate stop rather than an error the user must
+/// act on. Adapters report e.g. `thread_turns.status = interrupted` (Codex) and
+/// `turn aborted` (DSH).
+fn is_cancelled_reason(status_reason: &str) -> bool {
+    let reason = status_reason.to_ascii_lowercase();
+    reason.contains("interrupt") || reason.contains("abort") || reason.contains("cancel")
+}
+
 impl TaskRecord {
+    /// Status-class helper (see [`TaskStatus::needs_attention`]).
     pub fn needs_attention(&self) -> bool {
         self.status.needs_attention()
+    }
+
+    /// Aggregation used by the badge, header count and tray alert.
+    pub fn needs_attention_at(&self, now_secs: u64) -> bool {
+        self.status
+            .needs_attention_at(&self.status_reason, self.last_activity_secs, now_secs)
     }
 
     /// Recompute the advertised jump level from capability + target validity.
@@ -303,6 +349,17 @@ pub enum PetMode {
     Expanded,
     Dragging,
     EdgeHidden,
+    /// User asked to hide while `edge_hide_enabled` is off: the window is
+    /// ordered out (no off-screen geometry) and recalled from the tray.
+    TrayHidden,
+}
+
+impl PetMode {
+    /// True when the window is deliberately not on screen (either parked at the
+    /// edge or fully hidden). Used for the worker's 30 s slow path.
+    pub fn is_offscreen(self) -> bool {
+        matches!(self, PetMode::EdgeHidden | PetMode::TrayHidden)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -345,25 +402,17 @@ impl Default for PetPosition {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Persisted pet placement/hidden flag (`pet.json`).
+///
+/// Behavioural preferences (hover/collapse timing, row count, snap distance,
+/// sliver width) moved to [`crate::settings::Settings`] so there is exactly one
+/// user-facing settings source. Older `pet.json` files that still carry those
+/// keys parse fine: serde ignores unknown fields, and missing fields default.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PetPrefs {
     pub hidden: bool,
     pub position: PetPosition,
-    pub hover_expand_ms: u64,
-    pub collapse_delay_ms: u64,
-    pub max_visible_rows: u32,
-}
-
-impl Default for PetPrefs {
-    fn default() -> Self {
-        Self {
-            hidden: false,
-            position: PetPosition::default(),
-            hover_expand_ms: 150,
-            collapse_delay_ms: 800,
-            max_visible_rows: 5,
-        }
-    }
 }
 
 // ── Snapshot sent to the UI ─────────────────────────────────────
@@ -379,10 +428,11 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn new(tasks: Vec<TaskRecord>, agents: Vec<AgentDescriptor>) -> Self {
-        let attention_count = tasks.iter().filter(|t| t.needs_attention()).count();
+        let now = now_secs();
+        let attention_count = tasks.iter().filter(|t| t.needs_attention_at(now)).count();
         Self {
             tasks,
-            collected_at_secs: now_secs(),
+            collected_at_secs: now,
             attention_count,
             agents,
         }
@@ -435,6 +485,54 @@ mod tests {
             level: JumpLevel::L1,
             pinned: false,
         }
+    }
+
+    #[test]
+    fn attention_ignores_old_and_cancelled_failures() {
+        let now = 1_000_000;
+        // A deliberately interrupted turn is never "pending", even if just now.
+        assert!(!TaskStatus::Failed.needs_attention_at(
+            "thread_turns.status = interrupted",
+            now - 5,
+            now
+        ));
+        assert!(!TaskStatus::Failed.needs_attention_at("turn aborted", now - 5, now));
+        assert!(!TaskStatus::Failed.needs_attention_at("cancelled by user", now - 5, now));
+        // A real failure counts while recent...
+        assert!(TaskStatus::Failed.needs_attention_at("panic", now - 60, now));
+        // ...but stops demanding attention once stale.
+        assert!(TaskStatus::Failed.needs_attention_at(
+            "panic",
+            now - FAILED_ATTENTION_WINDOW_SECS,
+            now
+        ));
+        assert!(!TaskStatus::Failed.needs_attention_at(
+            "panic",
+            now - FAILED_ATTENTION_WINDOW_SECS - 1,
+            now
+        ));
+        // Waiting states block the agent and always count, regardless of age.
+        for status in [TaskStatus::WaitingInput, TaskStatus::WaitingApproval] {
+            assert!(status.needs_attention_at("", 0, now));
+        }
+        assert!(!TaskStatus::Completed.needs_attention_at("", now, now));
+    }
+
+    #[test]
+    fn snapshot_attention_count_uses_freshness_rules() {
+        let now = now_secs();
+        let mut old_failed = task("old-failed", TaskStatus::Failed, "old");
+        old_failed.last_activity_secs = now.saturating_sub(FAILED_ATTENTION_WINDOW_SECS + 10);
+        old_failed.status_reason = "panic".into();
+        let mut cancelled = task("cancelled", TaskStatus::Failed, "stopped");
+        cancelled.last_activity_secs = now;
+        cancelled.status_reason = "thread_turns.status = interrupted".into();
+        let mut waiting = task("waiting", TaskStatus::WaitingInput, "waiting");
+        waiting.last_activity_secs = now.saturating_sub(24 * 3600);
+        let mut recent_failed = task("recent", TaskStatus::Failed, "recent");
+        recent_failed.last_activity_secs = now;
+        let snapshot = Snapshot::new(vec![old_failed, cancelled, waiting, recent_failed], vec![]);
+        assert_eq!(snapshot.attention_count, 2, "only waiting + recent failure");
     }
 
     #[test]

@@ -5,13 +5,16 @@
 //!   * `monitor`   — collects adapters into one deduplicated snapshot
 //!   * `jump`      — graded, verified jump execution (L3→L0)
 //!   * `pet`       — pure geometry + placement persistence
+//!   * `settings`  — user configuration: defaults, validation, atomic storage
 //!   * this file   — Tauri window/tray/command plumbing only
 
 pub mod agents;
+pub mod icons;
 pub mod jump;
 pub mod model;
 pub mod monitor;
 pub mod pet;
+pub mod settings;
 
 use model::{
     now_millis, AgentDescriptor, Edge, JumpLevel, JumpOutcome, PermissionKind, PetMode, PetPrefs,
@@ -19,13 +22,15 @@ use model::{
 };
 use monitor::Monitor;
 use pet::{
-    anchored_resize, constrain, expanded_height_logical, finish_drag_with, hide_rect, nearest_edge,
+    anchored_resize, constrain, expanded_height_logical, finish_drag_with, hide_tab_rect,
+    nearest_edge,
     pick_screen, position_from_rect, restore_rect, state_view, unhide_rect, PetStore, Rect,
-    ScreenRect, COLLAPSED_SIZE, EXPANDED_WIDTH, HIDDEN_SLIVER, SNAP_DISTANCE,
+    ScreenRect, EXPANDED_WIDTH,
 };
+use settings::{Appearance, Language, Settings, SettingsGroup, SettingsStore};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow};
@@ -46,6 +51,11 @@ struct Runtime {
     monitor: Monitor,
     prefs: PetPrefs,
     store: PetStore,
+    settings: Settings,
+    settings_store: SettingsStore,
+    icons: icons::IconStore,
+    /// Path of the corrupt settings file kept aside on load (diagnostics only).
+    settings_corrupt_backup: Option<PathBuf>,
     state: PetState,
     /// Window moves caused by us must not be mistaken for user drags.
     suppress_until_ms: u64,
@@ -53,31 +63,75 @@ struct Runtime {
     /// Authoritative window rectangle: macOS applies set_position
     /// asynchronously, so reading it back immediately after a move is stale.
     last_rect: Option<Rect>,
+    /// Wakes the scheduler immediately (file watcher events + settings changes).
+    wake_tx: Sender<()>,
 }
 
 pub struct AppState {
     inner: Mutex<Runtime>,
+    /// Taken exactly once by the scheduler thread in `run`.
+    wake_rx: Mutex<Option<Receiver<()>>>,
 }
 
 impl AppState {
     fn new() -> Self {
-        let store = PetStore::new(PetStore::default_path());
+        let settings_store = SettingsStore::default_store();
+        let load = settings_store.load();
+        let settings = load.settings.clone();
+        if load.recovered_from_corrupt {
+            eprintln!(
+                "settings: corrupt settings.json replaced by defaults (backup: {:?})",
+                load.backup
+            );
+        }
+        let store = PetStore::new(settings::pet_path());
         let prefs = store.load();
+        let icon_store = icons::IconStore::default_store();
+        let mut monitor = Monitor::new(&settings.enabled_agents);
+        monitor.restore_dismissed(settings::dismissed_path());
+        let state = PetState {
+            hidden: prefs.hidden,
+            ..Default::default()
+        };
+        let (wake_tx, wake_rx) = channel();
         Self {
             inner: Mutex::new(Runtime {
-                monitor: Monitor::new(),
-                state: PetState {
-                    hidden: prefs.hidden,
-                    ..Default::default()
-                },
+                monitor,
                 prefs,
                 store,
+                settings,
+                settings_store,
+                icons: icon_store,
+                settings_corrupt_backup: load.backup,
+                state,
                 suppress_until_ms: 0,
                 mode_before_drag: PetMode::Collapsed,
                 last_rect: None,
+                wake_tx,
             }),
+            wake_rx: Mutex::new(Some(wake_rx)),
         }
     }
+}
+
+fn settings_snapshot(app: &AppHandle) -> Settings {
+    app.state::<AppState>().inner.lock().unwrap().settings.clone()
+}
+
+/// `language: system` is resolved once per call against `AppleLocale`.
+fn resolved_language(settings: &Settings) -> Language {
+    settings.language.resolve(system_is_chinese())
+}
+
+fn is_zh(settings: &Settings) -> bool {
+    resolved_language(settings) == Language::Zh
+}
+
+/// Wake the scheduler so settings changes take effect immediately.
+fn wake(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let tx = state.inner.lock().unwrap().wake_tx.clone();
+    let _ = tx.send(());
 }
 
 // ── Screen + window helpers ─────────────────────────────────────
@@ -154,20 +208,34 @@ fn remember_rect(app: &AppHandle, rect: Rect) {
     rt.last_rect = Some(rect);
 }
 
-fn target_size(mode: PetMode, rows: usize, scale: f64, current: Rect) -> (f64, f64) {
+fn target_size(
+    mode: PetMode,
+    rows: usize,
+    collapsed_size: f64,
+    sliver: f64,
+    scale: f64,
+    current: Rect,
+) -> (f64, f64) {
     match mode {
         PetMode::Expanded => (
             EXPANDED_WIDTH * scale,
             expanded_height_logical(rows) * scale,
         ),
-        PetMode::Collapsed | PetMode::EdgeHidden => {
-            (COLLAPSED_SIZE * scale, COLLAPSED_SIZE * scale)
+        // Edge-hidden is a small square tab (`hidden_sliver` per side), not the
+        // full collapsed square: only that nub stays visible.
+        PetMode::EdgeHidden => (sliver, sliver),
+        PetMode::Collapsed | PetMode::TrayHidden => {
+            (collapsed_size * scale, collapsed_size * scale)
         }
         PetMode::Dragging => (current.w, current.h),
     }
 }
 
-fn animate(win: &WebviewWindow, from: Rect, to: Rect) {
+fn animate(win: &WebviewWindow, from: Rect, to: Rect, enabled: bool) {
+    if !enabled {
+        set_rect(win, to);
+        return;
+    }
     let generation = ANIMATION_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if (from.x - to.x).abs() < 1.0
         && (from.y - to.y).abs() < 1.0
@@ -208,9 +276,9 @@ fn persist(app: &AppHandle, rect: Rect, edge: Edge, mode: PetMode) {
     let (screens, idx) = screen_for(&win, &rect);
     let mut rt = state.inner.lock().unwrap();
     rt.prefs.position = position_from_rect(&rect, &screens[idx], edge);
-    rt.prefs.hidden = mode == PetMode::EdgeHidden;
+    rt.prefs.hidden = mode.is_offscreen();
     rt.state.edge = edge;
-    rt.state.hidden = mode == PetMode::EdgeHidden;
+    rt.state.hidden = mode.is_offscreen();
     rt.store.save(&rt.prefs);
 }
 
@@ -224,32 +292,37 @@ fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
     let scale = screens[idx].scale;
     let visible = screens[idx].visible;
     let state = app.state::<AppState>();
-    let (rows, edge, was_mode) = {
+    let (rows, edge, was_mode, settings) = {
         let rt = state.inner.lock().unwrap();
         (
-            rt.monitor.snapshot().tasks.len(),
+            rt.settings.visible_rows(rt.monitor.snapshot().tasks.len()),
             rt.state.edge,
             rt.state.mode,
+            rt.settings.clone(),
         )
     };
+    let collapsed_size = f64::from(settings.collapsed_size);
     let edge = if edge == Edge::None {
         nearest_edge(&current, &visible)
     } else {
         edge
     };
-    let (tw, th) = target_size(mode, rows, scale, current);
+    let sliver = f64::from(settings.hidden_sliver) * scale;
+    let (tw, th) = target_size(mode, rows, collapsed_size, sliver, scale, current);
     let base = Rect::new(current.x, current.y, tw, th);
     let target = match mode {
-        PetMode::EdgeHidden => hide_rect(constrain(base, &visible), edge, HIDDEN_SLIVER * scale),
+        // The tab keeps the pet's position along the edge, so expanding again
+        // grows from where the user left it.
+        PetMode::EdgeHidden => hide_tab_rect(current, &visible, edge, sliver),
         PetMode::Expanded => {
-            if was_mode == PetMode::EdgeHidden {
+            if was_mode.is_offscreen() {
                 unhide_rect(current, edge, (tw, th), &visible)
             } else {
                 anchored_resize(base, edge, (tw, th), &visible)
             }
         }
         PetMode::Collapsed => {
-            let base = if was_mode == PetMode::EdgeHidden {
+            let base = if was_mode.is_offscreen() {
                 unhide_rect(current, edge, (tw, th), &visible)
             } else {
                 current
@@ -257,18 +330,21 @@ fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
             anchored_resize(base, edge, (tw, th), &visible)
         }
         PetMode::Dragging => current,
+        // Tray-hidden windows keep their last on-screen rect; placing them again
+        // would move a hidden window for no reason.
+        PetMode::TrayHidden => current,
     };
 
     {
         let mut rt = state.inner.lock().unwrap();
         rt.state.mode = mode;
         rt.state.edge = edge;
-        rt.state.hidden = mode == PetMode::EdgeHidden;
+        rt.state.hidden = mode.is_offscreen();
         rt.suppress_until_ms = now_millis() + 420;
         let (screens, idx) = screen_for(&win, &target);
         rt.prefs.position = position_from_rect(&target, &screens[idx], edge);
         rt.prefs.hidden = rt.state.hidden;
-        let view = state_view(&rt.state, &rt.prefs);
+        let view = state_view(&rt.state, &rt.settings);
         rt.store.save(&rt.prefs);
         drop(rt);
         let _ = app.emit("pet-state", view);
@@ -277,12 +353,23 @@ fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
     remember_rect(app, target);
     if std::env::var("AGENT_MONITOR_DEBUG_GEOMETRY").is_ok() {
         eprintln!(
-            "geometry: mode={:?} current={:?} target={:?} scale={}",
-            mode, current, target, scale
+            "geometry: mode={:?} current={:?} target={:?} rows={} scale={} sliver={}",
+            mode, current, target, rows, scale, settings.hidden_sliver
         );
     }
-    if animated {
-        animate(&win, current, target);
+    if mode == PetMode::TrayHidden {
+        let _ = win.hide();
+        return;
+    }
+    let animate_window = match settings.animations {
+        settings::Animations::Off => false,
+        settings::Animations::Always => true,
+        // `system` is the historical behaviour; WebKit's prefers-reduced-motion
+        // is still honoured for CSS transitions in the page.
+        settings::Animations::System => true,
+    };
+    if animated && animate_window {
+        animate(&win, current, target, animate_window);
     } else {
         set_rect(&win, target);
     }
@@ -300,20 +387,20 @@ fn reconcile_screens(app: &AppHandle) {
         return;
     }
     let visible = screens[idx].visible;
-    let (mode, edge) = {
+    let (mode, edge, sliver) = {
         let state = app.state::<AppState>();
         let rt = state.inner.lock().unwrap();
-        (rt.state.mode, rt.state.edge)
+        (
+            rt.state.mode,
+            rt.state.edge,
+            f64::from(rt.settings.hidden_sliver),
+        )
     };
-    if mode == PetMode::Dragging {
+    if mode == PetMode::Dragging || mode == PetMode::TrayHidden {
         return;
     }
     let target = if mode == PetMode::EdgeHidden && edge != Edge::None {
-        hide_rect(
-            constrain(current, &visible),
-            edge,
-            HIDDEN_SLIVER * screens[idx].scale,
-        )
+        hide_tab_rect(current, &visible, edge, sliver * screens[idx].scale)
     } else {
         constrain(current, &visible)
     };
@@ -331,13 +418,9 @@ fn reconcile_screens(app: &AppHandle) {
 
 fn show_pet(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
+        let mode = { app.state::<AppState>().inner.lock().unwrap().state.mode };
         let _ = win.show();
-        let state = app.state::<AppState>();
-        let suppress = {
-            let rt = state.inner.lock().unwrap();
-            (rt.state.mode, now_millis() < rt.suppress_until_ms)
-        };
-        if suppress.0 == PetMode::EdgeHidden || suppress.0 == PetMode::Collapsed {
+        if mode.is_offscreen() || mode == PetMode::Collapsed {
             enter_mode(app, PetMode::Collapsed, false);
         }
     }
@@ -347,6 +430,34 @@ fn hide_pet_to_edge(app: &AppHandle) {
     enter_mode(app, PetMode::EdgeHidden, true);
 }
 
+/// `edge_hide_enabled=false`: hiding orders the window out (no off-screen
+/// geometry); the tray menu / second launch bring it back.
+fn hide_pet_to_tray(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    {
+        let state = app.state::<AppState>();
+        let mut rt = state.inner.lock().unwrap();
+        rt.state.mode = PetMode::TrayHidden;
+        rt.state.hidden = true;
+        rt.prefs.hidden = true;
+        rt.store.save(&rt.prefs);
+        let view = state_view(&rt.state, &rt.settings);
+        drop(rt);
+        let _ = app.emit("pet-state", view);
+    }
+    let _ = win.hide();
+}
+
+fn hide_pet_now(app: &AppHandle) {
+    if settings_snapshot(app).edge_hide_enabled {
+        hide_pet_to_edge(app);
+    } else {
+        hide_pet_to_tray(app);
+    }
+}
+
 fn reset_pet_position(app: &AppHandle) {
     let Some(win) = app.get_webview_window("main") else {
         return;
@@ -354,7 +465,12 @@ fn reset_pet_position(app: &AppHandle) {
     let screens = build_screens(&win);
     let idx = pick_screen(&screens, 0.0, 0.0);
     let s = &screens[idx];
-    let size = COLLAPSED_SIZE * s.scale;
+    let collapsed = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        f64::from(rt.settings.collapsed_size)
+    };
+    let size = collapsed * s.scale;
     let rect = constrain(
         Rect::new(
             s.visible.right() - size - 24.0 * s.scale,
@@ -380,6 +496,198 @@ fn reset_pet_position(app: &AppHandle) {
     persist(app, rect, Edge::Right, PetMode::Collapsed);
 }
 
+// ── Settings application ────────────────────────────────────────
+
+fn settings_window_title(settings: &Settings) -> String {
+    if is_zh(settings) {
+        "设置".into()
+    } else {
+        "Settings".into()
+    }
+}
+
+/// `set_theme(Some(Light|Dark))` / `None` (follows the system). On macOS the
+/// theme is app-wide, so applying it to the pet window is enough; the settings
+/// window is included for clarity and future platforms.
+fn apply_theme(app: &AppHandle, appearance: Appearance) {
+    let theme = match appearance {
+        Appearance::System => None,
+        Appearance::Light => Some(tauri::Theme::Light),
+        Appearance::Dark => Some(tauri::Theme::Dark),
+    };
+    for label in ["main", "settings"] {
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.set_theme(theme);
+        }
+    }
+}
+
+/// Apply a settings change to the running app. Never restarts anything: the
+/// scheduler is woken, the registry rebuilt only when the agent switches change,
+/// and both webviews receive one event with the new values.
+fn apply_settings(app: &AppHandle, previous: &Settings) {
+    let (current, mode) = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        (rt.settings.clone(), rt.state.mode)
+    };
+
+    apply_theme(app, current.appearance);
+
+    if previous.enabled_agents != current.enabled_agents {
+        let changed = {
+            let state = app.state::<AppState>();
+            let mut rt = state.inner.lock().unwrap();
+            rt.monitor.set_enabled_agents(&current.enabled_agents)
+        };
+        if changed {
+            let snapshot = {
+                let state = app.state::<AppState>();
+                let mut rt = state.inner.lock().unwrap();
+                let retention = rt.settings.retention_secs();
+                rt.monitor.scan(true, retention);
+                rt.monitor.snapshot().clone()
+            };
+            let _ = app.emit("tasks-updated", &snapshot);
+        }
+    }
+
+    if previous.language != current.language || previous.edge_hide_enabled != current.edge_hide_enabled
+    {
+        update_tray_menu(app);
+        if let Some(win) = app.get_webview_window("settings") {
+            let _ = win.set_title(&settings_window_title(&current));
+        }
+    }
+
+    if mode == PetMode::EdgeHidden && previous.edge_hide_enabled && !current.edge_hide_enabled {
+        // The feature that parked the window off-screen was removed: keep the
+        // window reachable (tray-hidden) instead of leaving an unreachable sliver.
+        hide_pet_to_tray(app);
+    } else if mode == PetMode::Expanded || mode == PetMode::EdgeHidden {
+        let geometry_changed = previous.max_visible_rows != current.max_visible_rows
+            || previous.hidden_sliver != current.hidden_sliver
+            || previous.edge_hide_enabled != current.edge_hide_enabled;
+        if geometry_changed && !(mode == PetMode::EdgeHidden && !current.edge_hide_enabled) {
+            enter_mode(app, mode, false);
+        }
+    }
+
+    wake(app);
+    let _ = app.emit("settings-changed", &current);
+    let view = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        state_view(&rt.state, &rt.settings)
+    };
+    let _ = app.emit("pet-state", view);
+    let snapshot = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        rt.monitor.snapshot().clone()
+    };
+    update_tray_tooltip(app, &snapshot);
+}
+
+/// Normalise, persist, then apply. Returns the normalized settings so the
+/// caller (settings window) can render exactly what was stored.
+fn commit_settings(app: &AppHandle, next: Settings) -> Settings {
+    let (normalized, previous, saved) = {
+        let state = app.state::<AppState>();
+        let mut rt = state.inner.lock().unwrap();
+        let previous = rt.settings.clone();
+        let mut normalized = next;
+        normalized.normalize();
+        rt.settings = normalized.clone();
+        let saved = rt.settings_store.save(&normalized);
+        (normalized, previous, saved)
+    };
+    if !saved {
+        eprintln!("settings: failed to persist settings.json");
+    }
+    apply_settings(app, &previous);
+    normalized
+}
+
+// ── Settings window ─────────────────────────────────────────────
+
+/// Create the settings window on first use (lazy). Keeping it out of the launch
+/// path means a user who never opens Settings pays no extra webview/RSS at idle;
+/// the first open absorbs webview startup like a normal macOS Preferences pane.
+fn ensure_settings_window(app: &AppHandle, settings: &Settings) -> Option<tauri::WebviewWindow> {
+    if let Some(win) = app.get_webview_window("settings") {
+        return Some(win);
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        app,
+        "settings",
+        tauri::WebviewUrl::App("settings.html".into()),
+    )
+    .title(settings_window_title(settings))
+    .inner_size(620.0, 560.0)
+    .min_inner_size(560.0, 440.0)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(true)
+    .decorations(true)
+    .visible(false)
+    .center()
+    .build()
+    .ok()?;
+
+    let theme = match settings.appearance {
+        Appearance::System => None,
+        Appearance::Light => Some(tauri::Theme::Light),
+        Appearance::Dark => Some(tauri::Theme::Dark),
+    };
+    let _ = win.set_theme(theme);
+
+    // macOS Settings behaviour: closing hides the window (state and scroll
+    // position are preserved); the app keeps running in the menu bar.
+    let handle = app.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            if let Some(win) = handle.get_webview_window("settings") {
+                let _ = win.hide();
+            }
+            #[cfg(target_os = "macos")]
+            let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        }
+    });
+    Some(win)
+}
+
+/// Show/focus the single settings window. Opening Settings is an explicit user
+/// action, so focusing it is correct; the app stays accessory (no Dock icon).
+fn show_settings_window(app: &AppHandle) {
+    let settings = settings_snapshot(app);
+    let Some(win) = ensure_settings_window(app, &settings) else {
+        return;
+    };
+    {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        #[cfg(target_os = "macos")]
+        {
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                for delay in [90u64, 420] {
+                    std::thread::sleep(Duration::from_millis(delay));
+                    let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
+            });
+        }
+    }
+}
+
+fn hide_settings_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.hide();
+    }
+}
+
 // ── Commands ────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -401,10 +709,12 @@ fn get_agents(state: State<'_, AppState>) -> Vec<AgentDescriptor> {
 fn refresh(app: AppHandle, state: State<'_, AppState>) -> Snapshot {
     let snapshot = {
         let mut rt = state.inner.lock().unwrap();
-        rt.monitor.scan(true);
+        let retention = rt.settings.retention_secs();
+        rt.monitor.scan(true, retention);
         rt.monitor.snapshot().clone()
     };
     let _ = app.emit("tasks-updated", &snapshot);
+    update_tray_tooltip(&app, &snapshot);
     snapshot
 }
 
@@ -417,15 +727,43 @@ fn dismiss_task(app: AppHandle, state: State<'_, AppState>, task_id: String) -> 
     if ok {
         let snapshot = state.inner.lock().unwrap().monitor.snapshot().clone();
         let _ = app.emit("tasks-updated", &snapshot);
+        update_tray_tooltip(&app, &snapshot);
     }
     ok
 }
 
 #[tauri::command]
-async fn jump_to_task(
-    app: AppHandle,
-    task_id: String,
-) -> Result<JumpOutcome, String> {
+fn restore_dismissed_task(app: AppHandle, state: State<'_, AppState>, task_id: String) -> bool {
+    let ok = { state.inner.lock().unwrap().monitor.undismiss(&task_id) };
+    if ok {
+        let snapshot = {
+            let mut rt = state.inner.lock().unwrap();
+            let retention = rt.settings.retention_secs();
+            rt.monitor.scan(true, retention);
+            rt.monitor.snapshot().clone()
+        };
+        let _ = app.emit("tasks-updated", &snapshot);
+        update_tray_tooltip(&app, &snapshot);
+    }
+    ok
+}
+
+#[tauri::command]
+fn clear_dismissed(app: AppHandle, state: State<'_, AppState>) -> usize {
+    let (removed, snapshot) = {
+        let mut rt = state.inner.lock().unwrap();
+        let removed = rt.monitor.clear_dismissed();
+        let retention = rt.settings.retention_secs();
+        rt.monitor.scan(true, retention);
+        (removed, rt.monitor.snapshot().clone())
+    };
+    let _ = app.emit("tasks-updated", &snapshot);
+    update_tray_tooltip(&app, &snapshot);
+    removed
+}
+
+#[tauri::command]
+async fn jump_to_task(app: AppHandle, task_id: String) -> Result<JumpOutcome, String> {
     let task = {
         let state = app.state::<AppState>();
         let rt = state.inner.lock().unwrap();
@@ -442,35 +780,53 @@ async fn jump_to_task(
 #[tauri::command]
 fn get_pet_state(state: State<'_, AppState>) -> pet::PetStateView {
     let rt = state.inner.lock().unwrap();
-    state_view(&rt.state, &rt.prefs)
+    state_view(&rt.state, &rt.settings)
 }
 
+/// Expand/collapse the pet. `focus` is only set for explicit clicks (never for
+/// hover/automatic expansion) so the popover can lose key focus — and therefore
+/// collapse — when the user clicks elsewhere, without stealing focus on hover.
 #[tauri::command]
-fn set_expanded(app: AppHandle, state: State<'_, AppState>, expanded: bool) {
+fn set_expanded(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    expanded: bool,
+    focus: Option<bool>,
+) {
     let mode = { state.inner.lock().unwrap().state.mode };
     if expanded {
         if mode != PetMode::Expanded {
             enter_mode(&app, PetMode::Expanded, true);
+            if focus == Some(true) {
+                if let Some(win) = app.get_webview_window("main") {
+                    // Making the window key is what lets macOS deliver the
+                    // outside-click blur that dismisses the popover.
+                    let _ = win.set_focus();
+                }
+            }
         }
     } else if mode == PetMode::Expanded {
         enter_mode(&app, PetMode::Collapsed, true);
     }
 }
 
+/// Collapse the expanded popover. `force` bypasses the post-resize suppression
+/// window and is used for explicit dismissals (click outside / Escape / blur);
+/// the 800 ms mouse-leave path keeps respecting it to avoid self-collapse.
 #[tauri::command]
-fn request_collapse(app: AppHandle, state: State<'_, AppState>) {
+fn request_collapse(app: AppHandle, state: State<'_, AppState>, force: Option<bool>) {
     let (mode, suppressed) = {
         let rt = state.inner.lock().unwrap();
         (rt.state.mode, now_millis() < rt.suppress_until_ms)
     };
-    if mode == PetMode::Expanded && !suppressed {
+    if mode == PetMode::Expanded && (force == Some(true) || !suppressed) {
         enter_mode(&app, PetMode::Collapsed, true);
     }
 }
 
 #[tauri::command]
 fn hide_pet(app: AppHandle) {
-    hide_pet_to_edge(&app);
+    hide_pet_now(&app);
 }
 
 #[tauri::command]
@@ -491,6 +847,152 @@ fn open_permission_settings(kind: String) {
         PermissionKind::Accessibility
     };
     jump::open_permission_settings(kind);
+}
+
+#[tauri::command]
+fn get_settings(state: State<'_, AppState>) -> Settings {
+    state.inner.lock().unwrap().settings.clone()
+}
+
+#[tauri::command]
+fn set_settings(app: AppHandle, settings: Settings) -> Settings {
+    commit_settings(&app, settings)
+}
+
+#[tauri::command]
+fn reset_settings(app: AppHandle, scope: String) -> Result<Settings, String> {
+    let group = SettingsGroup::parse(&scope).ok_or_else(|| format!("unknown scope: {scope}"))?;
+    let mut next = settings_snapshot(&app);
+    next.reset_group(group);
+    Ok(commit_settings(&app, next))
+}
+
+#[derive(serde::Serialize)]
+struct SettingsMeta {
+    data_dir: String,
+    settings_path: String,
+    pet_path: String,
+    dismissed_path: String,
+    version: u32,
+    app_version: String,
+    system_language: String,
+    legacy_imported: bool,
+    corrupt_backup: Option<String>,
+}
+
+#[tauri::command]
+fn get_settings_meta(state: State<'_, AppState>) -> SettingsMeta {
+    let rt = state.inner.lock().unwrap();
+    SettingsMeta {
+        data_dir: settings::data_dir().display().to_string(),
+        settings_path: settings::settings_path().display().to_string(),
+        pet_path: settings::pet_path().display().to_string(),
+        dismissed_path: settings::dismissed_path().display().to_string(),
+        version: rt.settings.version,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        system_language: if system_is_chinese() { "zh" } else { "en" }.into(),
+        legacy_imported: rt.settings.legacy_imported,
+        corrupt_backup: rt
+            .settings_corrupt_backup
+            .as_ref()
+            .map(|p| p.display().to_string()),
+    }
+}
+
+/// One-shot migration of the v0.3.x frontend `localStorage` values (`am-lang`,
+/// `am-s.pollMs`). Other legacy fields are intentionally not migrated.
+#[tauri::command]
+fn import_legacy_settings(
+    app: AppHandle,
+    lang: Option<String>,
+    poll_ms: Option<u64>,
+) -> Option<Settings> {
+    let already = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        rt.settings.legacy_imported
+    };
+    if already {
+        return None;
+    }
+    let mut next = settings_snapshot(&app);
+    if let Some(lang) = lang {
+        next.language = match lang.as_str() {
+            "zh" => Language::Zh,
+            "en" => Language::En,
+            _ => next.language,
+        };
+    }
+    if let Some(ms) = poll_ms {
+        next.refresh_interval = match ms {
+            3000 => settings::RefreshInterval::Sec3,
+            5000 => settings::RefreshInterval::Sec5,
+            10_000 => settings::RefreshInterval::Sec10,
+            _ => next.refresh_interval,
+        };
+    }
+    next.legacy_imported = true;
+    Some(commit_settings(&app, next))
+}
+
+#[tauri::command]
+fn get_custom_icons(state: State<'_, AppState>) -> icons::CustomIcons {
+    state.inner.lock().unwrap().icons.load_all()
+}
+
+/// Store one icon slot (`collapsed` / `hidden`). The payload is validated in
+/// Rust (magic bytes + 2 MB cap) before anything touches the disk.
+#[tauri::command]
+fn save_custom_icon(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    slot: String,
+    data_url: String,
+) -> Result<icons::IconMeta, String> {
+    let meta = {
+        let rt = state.inner.lock().unwrap();
+        rt.icons.save_data_url(&slot, &data_url)?
+    };
+    broadcast_icons(&app);
+    Ok(meta)
+}
+
+#[tauri::command]
+fn clear_custom_icon(app: AppHandle, state: State<'_, AppState>, slot: String) -> Result<(), String> {
+    {
+        let rt = state.inner.lock().unwrap();
+        rt.icons.clear(&slot)?;
+    }
+    broadcast_icons(&app);
+    Ok(())
+}
+
+fn broadcast_icons(app: &AppHandle) {
+    let payload = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        rt.icons.load_all()
+    };
+    let _ = app.emit("icons-changed", payload);
+}
+
+#[tauri::command]
+fn open_settings(app: AppHandle) {
+    show_settings_window(&app);
+}
+
+#[tauri::command]
+fn close_settings(app: AppHandle) {
+    hide_settings_window(&app);
+}
+
+#[tauri::command]
+fn open_data_dir() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(settings::data_dir())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to open data directory: {e}"))
 }
 
 // ── Watcher + scheduler ─────────────────────────────────────────
@@ -549,16 +1051,22 @@ fn start_watcher(tx: Sender<()>) {
     });
 }
 
-fn start_worker(app: AppHandle) {
-    let (tx, rx) = channel::<()>();
-    start_watcher(tx);
+fn start_worker(app: AppHandle, rx: Receiver<()>) {
     std::thread::spawn(move || loop {
         let (interval, hidden, empty) = {
             let state = app.state::<AppState>();
             let rt = state.inner.lock().unwrap();
-            let hidden = rt.state.mode == PetMode::EdgeHidden || rt.state.hidden;
+            let hidden = rt.state.mode.is_offscreen() || rt.state.hidden;
             let empty = rt.monitor.snapshot().tasks.is_empty();
-            (if hidden || empty { 30 } else { 5 }, hidden, empty)
+            let configured = rt.settings.active_refresh_secs();
+            // Hidden or empty work stays on the 30 s floor regardless of the
+            // configured active interval (battery/CPU contract).
+            let interval = if hidden || empty {
+                30
+            } else {
+                configured.unwrap_or(5)
+            };
+            (interval, hidden, empty)
         };
         let _ = rx.recv_timeout(Duration::from_secs(interval));
         while rx.try_recv().is_ok() {}
@@ -566,7 +1074,8 @@ fn start_worker(app: AppHandle) {
         let changed = {
             let state = app.state::<AppState>();
             let mut rt = state.inner.lock().unwrap();
-            rt.monitor.scan(false)
+            let retention = rt.settings.retention_secs();
+            rt.monitor.scan(false, retention)
         };
         if changed {
             let snapshot = {
@@ -574,9 +1083,10 @@ fn start_worker(app: AppHandle) {
                 let rt = state.inner.lock().unwrap();
                 rt.monitor.snapshot().clone()
             };
-            if !hidden {
-                let _ = app.emit("tasks-updated", &snapshot);
-            }
+            // Emitted even while hidden: the collapsed pet / edge tab shows the
+            // "new completions" indicator without expanding the panel. The UI
+            // only re-renders the badge when collapsed, so this stays cheap.
+            let _ = app.emit("tasks-updated", &snapshot);
             update_tray_tooltip(&app, &snapshot);
         }
         if !(hidden && empty) {
@@ -603,9 +1113,12 @@ fn system_is_chinese() -> bool {
 }
 
 fn update_tray_tooltip(app: &AppHandle, snapshot: &Snapshot) {
-    let waiting = snapshot.tasks.iter().filter(|t| t.needs_attention()).count();
+    // Single source of truth: the snapshot already applies the failure
+    // freshness/cancellation rules (old or user-interrupted failures must not
+    // keep the menu-bar alert dot alive).
+    let waiting = snapshot.attention_count;
     let total = snapshot.tasks.len();
-    let zh = system_is_chinese();
+    let zh = is_zh(&settings_snapshot(app));
     let label = if total == 0 {
         if zh {
             "Agent Monitor — 暂无会话".to_string()
@@ -641,22 +1154,37 @@ fn update_tray_tooltip(app: &AppHandle, snapshot: &Snapshot) {
 
 // ── Tray ────────────────────────────────────────────────────────
 
-fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+fn tray_menu(
+    app: &AppHandle,
+    settings: &Settings,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
-    use tauri::tray::TrayIconEvent;
-
-    let zh = system_is_chinese();
+    let zh = is_zh(settings);
+    let settings_item =
+        MenuItemBuilder::with_id("settings", if zh { "设置…" } else { "Settings…" }).build(app)?;
     let show_item = MenuItemBuilder::with_id("show", if zh { "显示桌宠" } else { "Show Pet" })
         .build(app)?;
-    let hide_item = MenuItemBuilder::with_id("hide", if zh { "隐藏到边缘" } else { "Hide to Edge" })
-        .build(app)?;
+    let hide_label = if settings.edge_hide_enabled {
+        if zh {
+            "隐藏到边缘"
+        } else {
+            "Hide to Edge"
+        }
+    } else if zh {
+        "收起到托盘"
+    } else {
+        "Hide to Tray"
+    };
+    let hide_item = MenuItemBuilder::with_id("hide", hide_label).build(app)?;
     let reset_item =
         MenuItemBuilder::with_id("reset", if zh { "重置位置" } else { "Reset Position" })
             .build(app)?;
     let refresh_item =
         MenuItemBuilder::with_id("refresh", if zh { "刷新" } else { "Refresh" }).build(app)?;
     let quit_item = MenuItemBuilder::with_id("quit", if zh { "退出" } else { "Quit" }).build(app)?;
-    let menu = MenuBuilder::new(app)
+    MenuBuilder::new(app)
+        .item(&settings_item)
+        .separator()
         .item(&show_item)
         .item(&hide_item)
         .item(&reset_item)
@@ -664,12 +1192,27 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .item(&refresh_item)
         .separator()
         .item(&quit_item)
-        .build()?;
+        .build()
+}
+
+/// Rebuild the tray menu after a language / hide-mode change.
+fn update_tray_menu(app: &AppHandle) {
+    let settings = settings_snapshot(app);
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        if let Ok(menu) = tray_menu(app, &settings) {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
+fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::tray::TrayIconEvent;
 
     let tray = app
         .tray_by_id("main-tray")
         .ok_or("tray icon missing; check tauri.conf.json")?;
-    tray.set_menu(Some(menu))?;
+    let settings = settings_snapshot(app);
+    tray.set_menu(Some(tray_menu(app, &settings)?))?;
     tray.set_tooltip(Some("Agent Monitor"))?;
     // Left click belongs to the pet (show/collapse); the menu opens on right click.
     let _ = tray.set_show_menu_on_left_click(false);
@@ -693,14 +1236,16 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     tray.on_menu_event(move |app, event| match event.id().as_ref() {
+        "settings" => show_settings_window(app),
         "show" => show_pet(app),
-        "hide" => hide_pet_to_edge(app),
+        "hide" => hide_pet_now(app),
         "reset" => reset_pet_position(app),
         "refresh" => {
             let snapshot = {
                 let state = app.state::<AppState>();
                 let mut rt = state.inner.lock().unwrap();
-                rt.monitor.scan(true);
+                let retention = rt.settings.retention_secs();
+                rt.monitor.scan(true, retention);
                 rt.monitor.snapshot().clone()
             };
             let _ = app.emit("tasks-updated", &snapshot);
@@ -711,6 +1256,7 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 let state = app.state::<AppState>();
                 let rt = state.inner.lock().unwrap();
                 rt.store.save(&rt.prefs);
+                let _ = rt.settings_store.save(&rt.settings);
             }
             app.exit(0);
         }
@@ -752,17 +1298,27 @@ fn handle_window_moved(app: AppHandle) {
         let (screens, idx) = screen_for(&win, &current);
         let visible = screens[idx].visible;
         let scale = screens[idx].scale;
-        let (snapped, edge) = finish_drag_with(current, &visible, SNAP_DISTANCE * scale);
-        let (mode_before, rows) = {
+        let (snap_distance, mode_before, collapsed_size, sliver) = {
             let state = app.state::<AppState>();
             let rt = state.inner.lock().unwrap();
-            (rt.mode_before_drag, rt.monitor.snapshot().tasks.len())
+            (
+                f64::from(rt.settings.snap_distance),
+                rt.mode_before_drag,
+                f64::from(rt.settings.collapsed_size),
+                f64::from(rt.settings.hidden_sliver) * scale,
+            )
         };
-        let mode = match mode_before {
-            PetMode::Expanded => PetMode::Expanded,
-            _ => PetMode::Collapsed,
+        let (snapped, edge) = finish_drag_with(current, &visible, snap_distance * scale);
+        let (mode, rows) = {
+            let state = app.state::<AppState>();
+            let rt = state.inner.lock().unwrap();
+            let mode = match mode_before {
+                PetMode::Expanded => PetMode::Expanded,
+                _ => PetMode::Collapsed,
+            };
+            (mode, rt.settings.visible_rows(rt.monitor.snapshot().tasks.len()))
         };
-        let (tw, th) = target_size(mode, rows, scale, snapped);
+        let (tw, th) = target_size(mode, rows, collapsed_size, sliver, scale, snapped);
         let target = anchored_resize(
             Rect::new(snapped.x, snapped.y, tw, th),
             edge,
@@ -776,7 +1332,7 @@ fn handle_window_moved(app: AppHandle) {
             rt.state.edge = edge;
             rt.state.hidden = false;
             rt.suppress_until_ms = now_millis() + 350;
-            let view = state_view(&rt.state, &rt.prefs);
+            let view = state_view(&rt.state, &rt.settings);
             drop(rt);
             let _ = app.emit("pet-state", view);
         }
@@ -789,12 +1345,24 @@ fn handle_window_moved(app: AppHandle) {
 // ── Headless verification entry ─────────────────────────────────
 
 /// `agent-monitor --dump-tasks`: print the real snapshot as JSON without
-/// starting the GUI. Used by the acceptance checklist and docs evidence.
+/// starting the GUI. Honours `settings.json` (enabled agents + retention) so the
+/// acceptance checklist can compare before/after exactly.
 pub fn dump_tasks() {
-    let mut monitor = Monitor::new();
-    monitor.scan(true);
+    let settings = SettingsStore::default_store().load().settings;
+    eprintln!(
+        "settings: language={:?} retention={}h rows={} enabled=[codex={} dsh={} zcode={} claude_code={}]",
+        settings.language,
+        settings.retention_hours,
+        settings.max_visible_rows,
+        settings.enabled_agents.codex,
+        settings.enabled_agents.dsh,
+        settings.enabled_agents.zcode,
+        settings.enabled_agents.claude_code
+    );
+    let mut monitor = Monitor::new(&settings.enabled_agents);
+    monitor.scan(true, settings.retention_secs());
     let first: Vec<String> = monitor.snapshot().tasks.iter().map(|t| t.id.clone()).collect();
-    monitor.scan(true);
+    monitor.scan(true, settings.retention_secs());
     let second: Vec<String> = monitor.snapshot().tasks.iter().map(|t| t.id.clone()).collect();
     eprintln!(
         "dedupe: first={} second={} stable={}",
@@ -812,8 +1380,9 @@ pub fn dump_tasks() {
 /// `agent-monitor --jump <task-id>`: run the real graded jump for one task and
 /// print the outcome. Used by the Phase 2 acceptance evidence.
 pub fn jump_task(task_id: &str) {
-    let mut monitor = Monitor::new();
-    monitor.scan(true);
+    let settings = SettingsStore::default_store().load().settings;
+    let mut monitor = Monitor::new(&settings.enabled_agents);
+    monitor.scan(true, settings.retention_secs());
     match monitor.task(task_id) {
         Some(task) => match serde_json::to_string_pretty(&jump::jump(task)) {
             Ok(json) => println!("{json}"),
@@ -825,7 +1394,8 @@ pub fn jump_task(task_id: &str) {
 
 /// `agent-monitor --dump-agents`: print adapter descriptors/capability matrix.
 pub fn dump_agents() {
-    let monitor = Monitor::new();
+    let settings = SettingsStore::default_store().load().settings;
+    let monitor = Monitor::new(&settings.enabled_agents);
     match serde_json::to_string_pretty(&monitor.descriptors()) {
         Ok(json) => println!("{json}"),
         Err(e) => eprintln!("failed to serialise agents: {e}"),
@@ -847,6 +1417,8 @@ pub fn run() {
             get_agents,
             refresh,
             dismiss_task,
+            restore_dismissed_task,
+            clear_dismissed,
             jump_to_task,
             get_pet_state,
             set_expanded,
@@ -855,6 +1427,17 @@ pub fn run() {
             show_pet_command,
             reset_pet_position_command,
             open_permission_settings,
+            get_settings,
+            set_settings,
+            reset_settings,
+            get_settings_meta,
+            get_custom_icons,
+            save_custom_icon,
+            clear_custom_icon,
+            import_legacy_settings,
+            open_settings,
+            close_settings,
+            open_data_dir,
         ])
         .setup(|app| {
             // Menu-bar/tray-only app: no Dock icon, no app switcher entry.
@@ -867,6 +1450,17 @@ pub fn run() {
             let handle = app.handle().clone();
             let win = app.get_webview_window("main").ok_or("main window missing")?;
 
+            let (initial_settings, corrupt_backup) = {
+                let state = app.state::<AppState>();
+                let rt = state.inner.lock().unwrap();
+                (rt.settings.clone(), rt.settings_corrupt_backup.clone())
+            };
+            if let Some(path) = corrupt_backup {
+                eprintln!("settings: kept corrupt settings backup at {}", path.display());
+            }
+
+            apply_theme(&handle, initial_settings.appearance);
+
             // Initial position from persisted prefs, constrained to a live screen.
             let (screens, idx, prefs, hidden) = {
                 let state = app.state::<AppState>();
@@ -876,7 +1470,7 @@ pub fn run() {
                 (screens, idx, rt.prefs.clone(), rt.prefs.hidden)
             };
             let scale = screens[idx].scale;
-            let size = COLLAPSED_SIZE * scale;
+            let size = f64::from(initial_settings.collapsed_size) * scale;
             let rect = restore_rect(&prefs.position, (size, size), &screens);
             // macOS ignores set_position until the window has been mapped, so
             // map first, then place it, and only afterwards build the real mode.
@@ -899,7 +1493,21 @@ pub fn run() {
             }
             let _ = win.set_visible_on_all_workspaces(true);
             if hidden {
-                enter_mode(&handle, PetMode::EdgeHidden, false);
+                if initial_settings.edge_hide_enabled {
+                    enter_mode(&handle, PetMode::EdgeHidden, false);
+                } else {
+                    let view = {
+                        let state = app.state::<AppState>();
+                        let mut rt = state.inner.lock().unwrap();
+                        rt.state.mode = PetMode::TrayHidden;
+                        rt.state.hidden = true;
+                        rt.prefs.hidden = true;
+                        rt.store.save(&rt.prefs);
+                        state_view(&rt.state, &rt.settings)
+                    };
+                    let _ = handle.emit("pet-state", view);
+                    let _ = win.hide();
+                }
             }
 
             setup_tray(&handle)?;
@@ -918,7 +1526,8 @@ pub fn run() {
             {
                 let state = app.state::<AppState>();
                 let mut rt = state.inner.lock().unwrap();
-                rt.monitor.scan(true);
+                let retention = rt.settings.retention_secs();
+                rt.monitor.scan(true, retention);
             }
             let initial = {
                 let state = app.state::<AppState>();
@@ -941,10 +1550,37 @@ pub fn run() {
             match std::env::var("AGENT_MONITOR_START_MODE").as_deref() {
                 Ok("expanded") => enter_mode(&handle, PetMode::Expanded, false),
                 Ok("edge_hidden") => enter_mode(&handle, PetMode::EdgeHidden, false),
+                Ok("tray_hidden") => hide_pet_to_tray(&handle),
                 Ok("collapsed") => enter_mode(&handle, PetMode::Collapsed, false),
                 _ => {}
             }
-            start_worker(handle.clone());
+
+            // Debug/acceptance aid: open the settings window on launch so the
+            // window list / activation policy can be probed without synthetic
+            // clicks. Not used by normal launches.
+            if std::env::var("AGENT_MONITOR_OPEN_SETTINGS").as_deref() == Ok("1") {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(700));
+                    show_settings_window(&h);
+                });
+            }
+
+            // Scheduler: file events + settings changes share one wake channel.
+            let rx = app
+                .state::<AppState>()
+                .wake_rx
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or("scheduler wake channel already consumed")?;
+            let tx = {
+                let state = app.state::<AppState>();
+                let rt = state.inner.lock().unwrap();
+                rt.wake_tx.clone()
+            };
+            start_watcher(tx);
+            start_worker(handle.clone(), rx);
             Ok(())
         })
         .run(tauri::generate_context!())

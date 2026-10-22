@@ -35,7 +35,7 @@ never opens System Settings by itself and never resets TCC.
 | 2 | Codex / ChatGPT app (before verification fix) | same deep link | App came forward but verification could not prove the session because the UI title is AI-generated and differs from the stored title | **degraded / L1** — the code was then fixed to verify by title change (see #1) |
 | 3 | DSH / DeepSeek Harness | `dsh://open/<session-id>` attempt | Window title unchanged (`Training-free DRE literature positioning audit`); main-process source shows only `dsh://open` / `dsh://open/` → `focusPrimaryWindow()` | **degraded / L1** (`activated_app_only`) — no session route exists |
 | 4 | DSH / DeepSeek Harness | `open -b com.deepseek.dsh` | Frontmost = DeepSeek Harness | **L1 works**, declared max = L1 |
-| 5 | Claude Code / VSCode | L2 raise window for `/Users/wei/Paper/DropDPO-Confidence` | Window 1 `arr_submission.tex — DropDPO-Confidence` → `results.md — DropDPO-Confidence`; frontmost = Code | **success / L2** (`opened_window`) |
+| 5 | Claude Code / VSCode | L2 raise window for `~/Paper/DropDPO-Confidence` | Window 1 `arr_submission.tex — DropDPO-Confidence` → `results.md — DropDPO-Confidence`; frontmost = Code | **success / L2** (`opened_window`) |
 | 6 | ZCode | `open -b dev.zcode.app`, `open -a ZCode`, direct binary | `open` exits 0, no process, no window, no crash report; Electron 41 | **blocked** — cannot verify any level on this host |
 | 7 | Claude Code CLI / Terminal | L3 tab selection by tty | No `claude` CLI installed; project scope now treats Claude Code as VSCode-hosted, so this path is retained but unused | **未执行 / not routed** |
 

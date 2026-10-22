@@ -37,8 +37,44 @@ Interpretation:
   the native material does not add measurable CPU in the hidden, idle or expanded
   steady state.
 * RSS is flat or decreasing; no continuous memory growth was observed.
-* Hidden state performs no UI updates and no animation; its fallback tick is 30 s
-  and adapter scans are mtime-gated.
+* Hidden state performs no animation and no list rendering; its fallback tick is
+  30 s and adapter scans are mtime-gated. Since 0.4.1 it does receive
+  `tasks-updated` when the snapshot changes, purely so the collapsed
+  “new completions” badge can update (a badge repaint, not a list render).
+
+
+## Re-measurement — 0.4.1 settings build (final, lazy Settings window)
+
+Measured after adding the Settings window + configurability, on the same host
+(macOS 27.0.1, arm64, 1920×1080). Method unchanged (`scripts/perf.sh`, release
+build, 8 s warm-up, 5 s samples, 300 s per state, validated runs). The Settings
+window is **created lazily on first open**, so these runs (which never open it)
+measure the same idle footprint as before the feature.
+
+| State | Tasks in snapshot | CPU mean | CPU p95 | CPU max | RSS start → end | RSS growth |
+|---|---|---|---|---|---|---|
+| Edge-hidden (14 px sliver) | 42 real | **0.063 %** | 0.20 % | 0.20 % | 107.0 → 103.2 MB | **−3.8 MB** |
+| Idle, no tasks (collapsed) | 0 (empty mode) | **0.033 %** | 0.20 % | 0.20 % | 102.6 → 98.9 MB | **−3.7 MB** |
+| Expanded, 42 tasks (5 visible, scrollable) | 42 real | **0.21 %** | 0.80 % | 2.60 % | 107.7 → 97.7 MB | **−10.0 MB** |
+
+* Every state stays far below the **< 1 % mean CPU** budget; hidden/idle are
+  identical to the pre-settings numbers (0.083 % / 0.033 %).
+* Expanded mode showed run-to-run variance on this host (0.14 %–0.31 % mean,
+  p95 0.2–0.8 %), so a same-host A/B was run against the pre-settings commit:
+
+| Expanded, 120 s A/B (same machine, same real data) | CPU mean | CPU p95 | CPU max | RSS start → end |
+|---|---|---|---|---|
+| Baseline `ce5b89b` (before settings) | 0.241 % | 0.40 % | 1.00 % | 106.3 → 104.9 MB |
+| This build (settings) | **0.141 %** | **0.20 %** | 0.20 % | 106.5 → 102.9 MB |
+
+  → no measurable regression; the earlier higher numbers were host noise (the
+  baseline shows the same variance). Raw series: `docs/perf/hidden.json`,
+  `idle-empty.json`, `expanded.json`, `expanded-quiet.json`,
+  `cur-expanded.json`, `baseline-expanded-120s.json`.
+* RSS is flat/decreasing in every run; no growth trend.
+* Settings I/O is event-driven: no settings polling, no timer. A settings write
+  wakes the scheduler once; the Settings window is a separate hidden-on-close
+  window that is only created when first opened.
 
 ## Longer idle run (600 s, 120 samples, build 0.4.0)
 
@@ -73,7 +109,9 @@ the trend direction is downward.
 ## What the app does when hidden / idle (by design)
 
 * File changes arrive via `notify` (FSEvents) with a 700 ms debounce; the periodic
-  fallback is **5 s** while visible with tasks and **30 s** while hidden or empty.
+  fallback is configurable (`refresh_interval`, default auto = **5 s** while
+  visible with tasks; 3 s / 5 s / 10 s options) and always **30 s** while hidden
+  or empty. A settings change wakes the scheduler immediately.
 * Every adapter checks its source’s mtime (or byte offset) before parsing; an
   unchanged source costs a stat + a string comparison, no JSON/SQLite read.
 * The UI re-renders only when the snapshot’s render hash changes; relative times

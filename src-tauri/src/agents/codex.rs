@@ -10,7 +10,7 @@
 //! No API is assumed: everything is read-only from local files. A thread is
 //! never merged with another; the stable id is `codex:<thread id>`.
 
-use super::{truncate_chars, ScanCtx, Source};
+use super::{retention_keeps, truncate_chars, ScanCtx, Source};
 use crate::model::*;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
@@ -21,7 +21,6 @@ const APP_NAME: &str = "ChatGPT";
 const BUNDLE_ID: &str = "com.openai.codex";
 const PROCESS_NEEDLE: &str = "ChatGPT.app/Contents/MacOS/ChatGPT";
 const ROLLOUT_TAIL_BYTES: u64 = 256 * 1024;
-const RECENT_SECS: u64 = 6 * 3600;
 const RUNNING_STALE_SECS: u64 = 30 * 60;
 
 #[derive(Clone)]
@@ -78,7 +77,7 @@ impl CodexSource {
         .ok()
     }
 
-    fn reload_threads(&mut self, now: u64) {
+    fn reload_threads(&mut self, now: u64, retention_secs: u64) {
         let Some(path) = Self::state_db() else {
             return;
         };
@@ -86,7 +85,9 @@ impl CodexSource {
             return;
         };
         let mut out = Vec::new();
-        let cutoff = now.saturating_sub(RECENT_SECS) as i64;
+        // The SQL window is the same user-configured retention as the final
+        // filter; the row limit still bounds the read for large histories.
+        let cutoff = now.saturating_sub(retention_secs) as i64;
         if let Ok(mut stmt) = conn.prepare(
             "select id, title, rollout_path, cwd, updated_at, source
              from threads where updated_at >= ?1 order by updated_at desc limit 120",
@@ -257,7 +258,7 @@ impl Source for CodexSource {
         };
         let db_mtime = super::file_mtime_secs(&db);
         if db_mtime != self.db_mtime {
-            self.reload_threads(ctx.now_secs);
+            self.reload_threads(ctx.now_secs, ctx.retention_secs);
             self.db_mtime = db_mtime;
         }
         if let Some(h) = Self::history_db() {
@@ -279,9 +280,6 @@ impl Source for CodexSource {
                 .map(|t| t.activity_secs)
                 .filter(|s| *s > 0)
                 .unwrap_or(thread.updated_at);
-            if activity < ctx.now_secs.saturating_sub(RECENT_SECS) {
-                continue;
-            }
             let last_event = tail.as_ref().map(|t| t.last_event.as_str()).unwrap_or("");
             let last_turn = self.last_turn.get(&thread.id).cloned().unwrap_or_default();
             let silence = ctx.now_secs.saturating_sub(activity);
@@ -320,6 +318,12 @@ impl Source for CodexSource {
             } else {
                 (TaskStatus::Unknown, "no usable state event".to_string())
             };
+
+            // Retention is applied after the status is known so running /
+            // waiting rows are never aged out (the helper exempts them).
+            if !retention_keeps(status, activity, ctx.now_secs, ctx.retention_secs) {
+                continue;
+            }
 
             let title = if thread.title.trim().is_empty() {
                 let base = Path::new(&thread.cwd)

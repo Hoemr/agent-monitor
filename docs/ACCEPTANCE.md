@@ -163,6 +163,86 @@ separators, no uppercase labels, no middle-dot meta strings, light/dark support.
 
 ---
 
+## Phase 5 — Settings window + configurability (0.4.1)
+
+Commands below were executed on this host (macOS 27.0.1, arm64, 1920×1080 scale 1)
+against the release build. UI interaction without Screen Recording/Accessibility
+is verified with headless Chrome against the shipped pages (`?mock=1`) plus the
+real window list / activation policy; those limitations are stated explicitly.
+
+| Requirement | Result |
+|---|---|
+| Rust test suite | **Pass** — `cargo test --release` → **88 passed / 0 failed** (47 baseline tests preserved; +41 new: settings 14, adapters/monitor/retention 19, pet 4, attention freshness 2, icons 4 — overlapping counts differ slightly because some tests were replaced) |
+| Headless UI | **Pass** — `bash scripts/ui-test.sh` → pet **69/69** (24 original + 15 settings integration + 3 pet settings + 4 dismiss-on-outside + 14 badge/icon/tab + 9 ring-badge/notice-dot) and settings **45/45** (37 + 8 icon/new_badge), first line `ALL PASS`, exit 0 |
+| Single settings source | **Pass** — `Settings` in Rust, one JSON file, both windows + tray render from it; no localStorage language/polling after migration |
+| Instant apply, no restart | **Pass (contract + headless)** — `settings-changed` drives both windows; scheduler woken through the wake channel. Real clicks not executed (see §Unexecuted 6) |
+| Persistence across restart | **Pass** — `max_visible_rows` 3/5/8 written to `settings.json` and each fresh launch produced the matching window height; pet hidden state restored (edge-hidden 14 px sliver after relaunch; tray-hidden stayed hidden) |
+| `language` affects pet + settings + tray | **Pass (headless + code path)** — pet switches en↔zh live from `settings-changed`; settings window 133 en/133 zh keys and re-renders; tray menu/tooltip rebuilt via `update_tray_menu` on language change. Real menu not clicked (no AX) |
+| `appearance` | **Pass** — `Window::set_theme` available in tauri 2.11.2 and applied to both windows; explicit light/dark previews below; explicit override also sets page `color-scheme` |
+| `refresh_interval` bounds | **Pass** — explicit 3/5/10 s validated client- and server-side (`MIN_REFRESH_SECS=2`), hidden/empty stays at the 30 s floor (unit tested via `Settings::active_refresh_secs` + worker logic) |
+| `retention_hours` + active exemption | **Pass** — see the `--dump-tasks` comparison below: with 1 h retention all 5 running tasks stayed; finished rows older than 1 h disappeared. Unit tests cover Running/WaitingInput/WaitingApproval exemption and the inclusive boundary |
+| `enabled_agents` stops collection | **Pass** — same comparison: disabling Codex + ZCode removed every codex/zcode row from the snapshot (collector registry rebuilt, not post-filtered) |
+| `max_visible_rows` geometry | **Pass** — real `CGWindowList` bounds: rows 3 → `360×262`, rows 5 → `360×390`, rows 8 → `360×582`, right-anchored (`x=1560`), all inside the 1920×1080 visible frame; formula `44 + rows×64 + 26` exact |
+| `collapsed_size` (48–96 px) | **Pass** — real `CGWindowList` bounds with `settings.json`: 48 → `48×48`, 72 → `72×72`, 96 → `96×96`, all right-anchored (`x=1848/1872/1824`) inside the visible frame; CSS variable keeps the mock identical (`--collapsed-size`) |
+| `auto_hide_after_s` (hide after snapping) | **Pass (headless + command)** — with 1 s configured the pet hides exactly once after going idle on an edge (`hide_pet` called once); with `0` (default) it never hides; the underlying `hide_pet` path is the same one verified for edge-sliver/tray hiding above. Hover/drag/expand cancel the one-shot timer |
+| Retention actually applies (bug fix) | **Pass** — with `retention_hours=72` the real snapshot went from **123 tasks / 8 terminal rows older than 72 h** (dsh 5, zcode 3) to **115 / 0**. Root causes: DSH kept rows because its projection cache files were rewritten on app start (fresh mtime) while the real `lastMessageTime` was 3.5–17 days old; ZCode kept the newest 3 unconditionally. DSH now uses real activity when known and falls back to mtime only when activity is unknown; ZCode's fallback was removed. Consequence (documented): ZCode contributes 0 rows until a task is younger than the configured window |
+| Edge-hidden small tab | **Pass** — real `CGWindowList`: hidden window is **14×14 at x=1906** on a 1920-wide screen (flush right edge; snapped side invisible, perpendicular sides expose only 14 px), tab centre keeps the pet's along-edge position (`y=464` for a pet centre at 471); second launch recalls a 72×72 pet at `1848,435`, i.e. expanding grows from the tab. `hidden_sliver` 8–24 drives the square size |
+| New-completion indicator | **Pass (headless + Rust)** — `tasks-updated` is now emitted while hidden so the badge can update; the collapsed badge is an unfilled green ring (16 px, 8 % tint, 1 px border) so it does not compete with the solid blue attention badge; checks cover count/clear-on-expand/`new_badge=false`/ring style |
+| Jump notice never inside the small pet | **Pass** — the toast is state-driven and only painted while expanded/dragging; collapsing hides it and shows a text-free dot (amber/red/blue by kind, top-left), keeps the notice alive for ~30 s and announces it via `aria-label`/`title`; expanding restores the full toast with its action button. Headless checks cover hide-on-collapse, dot colours, restore-on-expand, lifetime and expiry |
+| Custom icon framework | **Pass (unit + headless)** — `icons.rs` unit tests: PNG roundtrip, non-image rejected, >2 MB rejected, unknown slot rejected, PNG/JPEG/WebP sniffing only; settings-page checks cover upload/preview/remove/oversize rejection/`icons-changed`. Spec: `docs/ICONS.md` |
+| Click outside collapses | **Pass (headless + code)** — explicit click expands with `focus=true`, hover expansion with `focus=false`; a window `blur` (click on another app/desktop/tray menu) calls `request_collapse(force=true)` and collapses immediately; mouse-leave always schedules collapse (the old suppression window can no longer drop it). Real pointer click needs AX/screen permission (§Unexecuted 6) |
+| Stale “pending” clears | **Pass** — real data had a 59 h old Codex `interrupted` turn counted as failed/attention; after the fix `--dump-tasks` reports `attention_count: 0` while the row stays visible. Unit tests cover: interrupted/aborted/cancelled never count, failures only <30 min, waiting states always count |
+| `edge_hide_enabled=false` | **Pass** — “Hide” orders the window out (`windows=none-visible`), restart preserves that state, second launch restores the pet; tray “Show Pet” uses the same `show_pet` path |
+| Settings window | **Pass** — created lazily on first open (idle RSS stays at the pre-settings baseline until used); real probe while open: separate native window `620×560` at layer 0 next to the pet; app still `activationPolicy=accessory`, `backgroundOnly=true`; LSUIElement=true in the bundle |
+| No Dock icon / accessory | **Pass** — bundled `.app`: `activationPolicy=accessory backgroundOnly=true name=Agent Monitor bundle=com.agent.monitor`, pet 72×72 at the right edge |
+| Corrupt `settings.json` | **Pass** — `{broken json!!` → app starts, prints `corrupt file backed up …settings.json.bak`, defaults used (`--dump-tasks` still returned 42 real tasks), broken file preserved verbatim in `.bak` |
+| Screenshots | Settings dark/light/zh + icon section + refreshed pet dark/light + collapsed new-badge + edge tab: `screenshots/settings-{dark,light}.png`, `settings-zh.png`, `settings-icons-dark.png`, `pet-expanded-{dark,light}.png`, `pet-collapsed-new-badge-ring-dark.png`, `pet-collapsed-notice-dot-dark.png`, `pet-edge-tab-dark.png` |
+| Legacy localStorage migration | **Pass (observed end-to-end)** — launching the bundled app on this profile (which still had v0.3.x webview storage) imported `am-lang=zh`: the real `~/Library/Application Support/agent-monitor/settings.json` now contains `"language":"zh"` and `"legacy_imported":true` (no legacy `pollMs` was stored, so `refresh_interval` stayed `auto`). `--dump-tasks` then reported `language=Zh`, proving the migrated value is live. Legacy keys are removed after import |
+| Performance | See `docs/PERF.md` “0.4.1 settings re-check” (hidden / idle / expanded) |
+
+### `--dump-tasks` before/after (real data, isolated data dir)
+
+```
+# defaults
+settings: retention=6h rows=5 enabled=[codex=true dsh=true zcode=true claude_code=true]
+total 42   agents {dsh:26, claude-code:8, codex:5, zcode:3}   statuses {completed:36, running:5, idle:1}
+
+# settings.json: enabled_agents.codex=false, enabled_agents.zcode=false, retention_hours=1
+settings: retention=1h rows=8 enabled=[codex=false dsh=true zcode=false claude_code=true]
+total 12   agents {dsh:11, claude-code:1}   statuses {completed:7, running:5}
+```
+
+Both scans reported `stable=true` (no duplicate rows). The 5 running tasks survived
+the 1 h retention window; disabled agents contributed zero records.
+
+### Real window probes
+
+`swift scripts/wins-probe.swift <pid>` (CGWindowList + NSRunningApplication):
+
+```
+# rows=3, expanded            semantics: 44 + 3×64 + 26 = 262
+window#1 layer=5 x=1560 y=656 w=360 h=262
+# rows=5, expanded            44 + 5×64 + 26 = 390
+window#1 layer=5 x=1560 y=435 w=360 h=390
+# rows=8, expanded            44 + 8×64 + 26 = 582 (inside 1080 pt frame)
+window#1 layer=5 x=1560 y=420 w=360 h=582
+# edge-hidden, sliver=14      visible width 1920-1906 = 14
+window#1 layer=5 x=1906 y=930 w=72 h=72
+# edge_hide_enabled=false, hidden
+windows=none-visible
+# settings window open (620×560) beside the pet (360×390)
+window#1 layer=5 x=1560 y=435 w=360 h=390
+window#2 layer=0 x=650  y=236 w=620 h=560
+activationPolicy=accessory backgroundOnly=true
+```
+
+### Deferred / not executed in this phase
+
+The two remaining GUI-interaction items are listed as **§Unexecuted 6–7** below
+with exact reproduction steps; everything else in this table was executed.
+
+---
+
 ## Unexecuted items and reproduction steps
 
 1. **Second physical display / hot-plug**
@@ -183,3 +263,23 @@ separators, no uppercase labels, no middle-dot meta strings, light/dark support.
 5. **ZCode jump**
    Launch `ZCode.app` successfully (it currently exits immediately), then retest
    `zcode://workspace/open?path=`.
+
+6. **Settings UI pointer interaction, Cmd+, and tray menu**
+   No Accessibility permission for the probe shell. Covered instead by headless
+   DOM event tests (gear/Cmd+, → exactly one `open_settings`; control edits emit a
+   full `set_settings` payload; reset double-confirm; Escape → `close_settings`),
+   the real window/activation probes, and code review.
+   Repro: grant Accessibility to Terminal, focus the pet, press Cmd+, edit a
+   control, quit and relaunch; click tray → Settings… and footer gear.
+7. **Settings window close button** (traffic-light) hiding instead of quitting.
+   Code path `CloseRequested → prevent_close + hide` is compiled and the window
+   is created lazily/single-instance; the actual click needs a GUI session.
+   Repro: open Settings, click the red close button; app must stay in the menu
+   bar and `activationPolicy` must remain `accessory`; reopen Settings.
+
+8. **Custom-icon upload and click-outside dismissal with a real pointer**
+   Both need Accessibility (or a GUI session) to drive; covered headlessly (file
+   input → `save_custom_icon`, blur → collapse) plus Rust-side validation unit
+   tests. Repro: open Settings → Desktop Pet → Icon, choose a 144×144 PNG, set
+   Icon style = Custom, verify the pet changes immediately; then click another
+   app and verify the expanded panel collapses.

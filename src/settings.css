@@ -1,0 +1,746 @@
+/* Agent Monitor — Settings window.
+ *
+ * A native macOS Settings pane: solid, readable background (no vibrancy, no
+ * backdrop-filter), a source-list sidebar on the left and grouped cards on the
+ * right. The window title bar is provided by Rust, so this sheet never draws a
+ * fake one.
+ *
+ * Appearances: `color-scheme: light dark` + `light-dark()` tokens follow the
+ * system; `html[data-appearance="light|dark"]` is the explicit user override
+ * from Settings → Appearance. The first declaration of every token is a dark
+ * fallback for older WebKit; light-dark() wins where it is supported.
+ */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  color-scheme: light dark;
+
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    sans-serif;
+
+  /* System palette */
+  --accent: #0a84ff;
+  --accent: light-dark(#007aff, #0a84ff);
+  --danger: #ff453a;
+  --danger: light-dark(#d70015, #ff453a);
+  --focus-ring: rgba(10, 132, 255, 0.85);
+  --focus-ring: light-dark(rgba(0, 122, 255, 0.9), rgba(64, 156, 255, 0.95));
+
+  /* Surfaces */
+  --bg-sidebar: #232325;
+  --bg-sidebar: light-dark(#e9e9ec, #232325);
+  --bg-content: #1b1b1d;
+  --bg-content: light-dark(#f3f3f5, #1b1b1d);
+  --card: #2b2b2e;
+  --card: light-dark(#ffffff, #2b2b2e);
+  --card-border: rgba(255, 255, 255, 0.085);
+  --card-border: light-dark(rgba(0, 0, 0, 0.07), rgba(255, 255, 255, 0.085));
+  --hairline: rgba(255, 255, 255, 0.10);
+  --hairline: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.10));
+  --row-sep: rgba(255, 255, 255, 0.09);
+  --row-sep: light-dark(rgba(60, 60, 67, 0.10), rgba(255, 255, 255, 0.09));
+
+  /* Text */
+  --text: #f5f5f7;
+  --text: light-dark(#1d1d1f, #f5f5f7);
+  --text-secondary: rgba(235, 235, 245, 0.62);
+  --text-secondary: light-dark(rgba(60, 60, 67, 0.62), rgba(235, 235, 245, 0.62));
+  --text-tertiary: rgba(235, 235, 245, 0.38);
+  --text-tertiary: light-dark(rgba(60, 60, 67, 0.42), rgba(235, 235, 245, 0.38));
+
+  /* Controls */
+  --fill-hover: rgba(255, 255, 255, 0.07);
+  --fill-hover: light-dark(rgba(0, 0, 0, 0.045), rgba(255, 255, 255, 0.07));
+  --fill-active: rgba(255, 255, 255, 0.12);
+  --fill-active: light-dark(rgba(0, 0, 0, 0.09), rgba(255, 255, 255, 0.12));
+  --switch-off: rgba(120, 120, 128, 0.42);
+  --switch-off: light-dark(rgba(120, 120, 128, 0.30), rgba(120, 120, 128, 0.42));
+  --seg-bg: rgba(118, 118, 128, 0.24);
+  --seg-bg: light-dark(rgba(118, 118, 128, 0.15), rgba(118, 118, 128, 0.26));
+  --icon-well: rgba(118, 118, 128, 0.20);
+  --icon-well: light-dark(rgba(118, 118, 128, 0.14), rgba(255, 255, 255, 0.07));
+  --seg-selected: #636366;
+  --seg-selected: light-dark(#ffffff, #636366);
+  --track: rgba(120, 120, 128, 0.42);
+  --track: light-dark(rgba(120, 120, 128, 0.28), rgba(120, 120, 128, 0.42));
+  --btn-bg: rgba(255, 255, 255, 0.08);
+  --btn-bg: light-dark(#ffffff, rgba(255, 255, 255, 0.08));
+  --btn-border: rgba(255, 255, 255, 0.14);
+  --btn-border: light-dark(rgba(0, 0, 0, 0.14), rgba(255, 255, 255, 0.14));
+}
+
+/* Explicit appearance override from Settings → Appearance. */
+html[data-appearance="light"] { color-scheme: light; }
+html[data-appearance="dark"] { color-scheme: dark; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: var(--bg-content);
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+#app {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-content);
+}
+
+/* ── Source-list sidebar ──────────────────────────────────────── */
+
+#sidebar {
+  flex: 0 0 180px;
+  width: 180px;
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--hairline);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 30px;
+  flex: 0 0 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  letter-spacing: -0.005em;
+  text-align: left;
+  cursor: default;
+  outline: none;
+  transition: background 100ms ease;
+}
+.nav-item:hover { background: var(--fill-hover); }
+.nav-item:active { background: var(--fill-active); }
+.nav-item[aria-selected="true"],
+.nav-item[aria-selected="true"]:hover {
+  background: var(--accent);
+  color: #ffffff;
+}
+.nav-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.nav-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  display: block;
+  opacity: 0.92;
+}
+.nav-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ── Content pane ─────────────────────────────────────────────── */
+
+#content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-content);
+  outline: none;
+}
+
+#pane-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 20px 20px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-tertiary) transparent;
+}
+#pane-scroll::-webkit-scrollbar { width: 11px; }
+#pane-scroll::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  border-radius: 11px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+  opacity: 0.6;
+}
+#pane-scroll::-webkit-scrollbar-track { background: transparent; }
+
+.pane-title {
+  margin: 0 2px 10px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+
+/* ── Grouped cards ────────────────────────────────────────────── */
+
+.section + .section { margin-top: 14px; }
+
+.section-caption {
+  margin: 0 4px 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  letter-spacing: 0.005em;
+}
+
+.card {
+  background: var(--card);
+  border-radius: 10px;
+  box-shadow: 0 0 0 0.5px var(--card-border), 0 1px 2px rgba(0, 0, 0, 0.035);
+  overflow: hidden;
+}
+
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 40px;
+  padding: 7px 14px;
+}
+.row + .row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 14px;
+  right: 0;
+  height: 1px;
+  background: var(--row-sep);
+}
+.row-switch { cursor: default; }
+
+.row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.row-title {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text);
+  line-height: 1.27;
+}
+.row-desc {
+  font-size: 11px;
+  line-height: 1.34;
+  color: var(--text-secondary);
+}
+.control {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.row-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+.path-value {
+  display: block;
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  letter-spacing: -0.01em;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  word-break: normal;
+  user-select: text;
+  -webkit-user-select: text;
+  border-radius: 4px;
+  outline: none;
+}
+.path-value:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.note {
+  margin: 6px 4px 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+.note.warn { color: var(--danger); }
+
+/* ── Custom icon slots (Desktop Pet → Icon) ───────────────────── */
+
+.card-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.icon-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 11px 14px;
+}
+.icon-row + .icon-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 14px;
+  right: 0;
+  height: 1px;
+  background: var(--row-sep);
+}
+
+.icon-preview {
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  background: var(--icon-well);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.icon-preview-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.icon-glyph {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  width: 16px;
+}
+.icon-glyph i {
+  display: block;
+  height: 1.5px;
+  border-radius: 2px;
+  background: var(--text-secondary);
+}
+.icon-glyph i:nth-child(1) { width: 100%; }
+.icon-glyph i:nth-child(2) { width: 66%; }
+.icon-glyph i:nth-child(3) { width: 84%; }
+
+.icon-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.icon-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.icon-head .row-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.icon-desc {
+  font-size: 11px;
+  line-height: 1.36;
+  color: var(--text-secondary);
+}
+.icon-size {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.icon-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 7px;
+}
+
+/* The file input stays focusable (keyboard access) but is visually hidden; the
+ * adjacent label acts as the macOS-style button and shows the focus ring. */
+.icon-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.icon-choose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  cursor: default;
+}
+.icon-file:focus-visible + .icon-choose {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ── Switch ───────────────────────────────────────────────────── */
+
+.switch {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 22px;
+  margin: 0;
+  border: 0;
+  border-radius: 11px;
+  background: var(--switch-off);
+  cursor: default;
+  outline: none;
+  transition: background 160ms ease;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2.5px rgba(0, 0, 0, 0.30), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  transition: transform 160ms cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+.switch:checked { background: var(--accent); }
+.switch:checked::after { transform: translateX(16px); }
+.switch:active::after { width: 20px; }
+.switch:checked:active::after { transform: translateX(14px); }
+.switch:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ── Segmented control ────────────────────────────────────────── */
+
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--seg-bg);
+}
+
+.seg {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  cursor: default;
+}
+.seg input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: default;
+  z-index: 1;
+}
+.seg-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+.seg input:checked + .seg-label {
+  background: var(--seg-selected);
+  color: var(--text);
+  box-shadow: 0 0.5px 2.5px rgba(0, 0, 0, 0.22), 0 0 0.5px rgba(0, 0, 0, 0.04);
+}
+.seg input:checked:active + .seg-label { background: var(--seg-selected); }
+.seg input:focus-visible + .seg-label {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* ── Slider ───────────────────────────────────────────────────── */
+
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 140px;
+  height: 20px;
+  margin: 0;
+  background: transparent;
+  outline: none;
+  cursor: default;
+}
+.slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0 var(--pct, 50%),
+    var(--track) var(--pct, 50%) 100%
+  );
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2.5px rgba(0, 0, 0, 0.32), 0 0 0 0.5px rgba(0, 0, 0, 0.10);
+}
+.slider:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+.slider-value {
+  min-width: 56px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* ── Stepper ──────────────────────────────────────────────────── */
+
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--btn-bg);
+  box-shadow: 0 0 0 0.5px var(--btn-border);
+  overflow: hidden;
+}
+.stepper-btn {
+  width: 24px;
+  height: 22px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  outline: none;
+}
+.stepper-btn:hover { background: var(--fill-hover); }
+.stepper-btn:active { background: var(--fill-active); }
+.stepper-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+.stepper-value {
+  min-width: 50px;
+  height: 22px;
+  padding: 0 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  border-left: 0.5px solid var(--btn-border);
+  border-right: 0.5px solid var(--btn-border);
+  white-space: nowrap;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────── */
+
+.btn {
+  height: 24px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--btn-bg);
+  box-shadow: 0 0 0 0.5px var(--btn-border), 0 0.5px 1px rgba(0, 0, 0, 0.05);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: default;
+  outline: none;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--fill-hover); }
+.btn:active { background: var(--fill-active); }
+.btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.btn.danger { color: var(--danger); }
+.btn.plain {
+  background: transparent;
+  box-shadow: none;
+  padding: 0 6px;
+}
+.btn.plain:hover { background: var(--fill-hover); }
+.btn.plain:active { background: var(--fill-active); }
+.btn.plain.danger { color: var(--danger); }
+
+.pane-actions { margin-top: 14px; padding: 0 4px; }
+
+/* ── Inline confirmation (no window.confirm, never modal) ─────── */
+
+.confirm-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: var(--card);
+  box-shadow: 0 0 0 0.5px var(--card-border), 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.confirm-q {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text);
+}
+.confirm-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.row-confirm { background: transparent; }
+.row-confirm .confirm-q { font-size: 13px; }
+
+/* ── Save bar (instant save, no OK/Cancel) ────────────────────── */
+
+#save-bar {
+  flex: 0 0 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 0 20px;
+  border-top: 1px solid var(--hairline);
+  background: var(--bg-content);
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+#save-hint {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+#save-status {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  opacity: 1;
+  transition: opacity 220ms ease;
+}
+#save-status[hidden] { display: none; }
+#save-status.saved::before {
+  content: "✓";
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+}
+#save-status.error { color: var(--danger); }
+#save-status.info { color: var(--accent); }
+
+/* ── Boot / error states ──────────────────────────────────────── */
+
+.loading {
+  padding: 26px 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+#app.boot-failed #sidebar { display: none; }
+#app.boot-failed #save-bar { display: none; }
+
+.error-state {
+  max-width: 300px;
+  margin: 48px auto 0;
+  text-align: center;
+}
+.error-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.error-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* ── Motion / reduced motion ──────────────────────────────────── */
+
+/* User setting: Animations = off turns every transition off; "always" overrides
+ * Reduce Motion; "system" (default) follows the macOS Reduce Motion switch. */
+html[data-animations="off"] *,
+html[data-animations="off"] *::before,
+html[data-animations="off"] *::after { transition: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-animations="always"]) *,
+  html:not([data-animations="always"]) *::before,
+  html:not([data-animations="always"]) *::after { transition: none !important; }
+}

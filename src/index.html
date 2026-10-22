@@ -11,8 +11,11 @@
     <!-- Collapsed pet -->
     <div id="pet" role="button" tabindex="0"
          aria-label="Agent Monitor, no active sessions, click to expand">
+      <img id="pet-icon" class="pet-icon" hidden alt="">
       <span class="pet-glyph" aria-hidden="true"><i></i><i></i><i></i></span>
       <span id="badge" class="badge" hidden aria-hidden="true">0</span>
+      <span id="new-badge" class="new-badge" hidden aria-hidden="true">0</span>
+      <span id="notice-dot" class="notice-dot" hidden aria-hidden="true"></span>
       <span class="pet-grip" aria-hidden="true"></span>
     </div>
 
@@ -21,6 +24,7 @@
       <header id="dragbar">
         <h1 class="panel-title" id="panel-title">Sessions</h1>
         <span id="header-meta" class="header-meta" hidden></span>
+        <span id="header-new" class="header-new" hidden></span>
         <button id="collapse-btn" class="icon-btn" aria-label="Collapse" title="Collapse">
           <span class="chevron" aria-hidden="true"></span>
         </button>
@@ -29,7 +33,14 @@
       <footer id="footer">
         <span id="footer-count"></span>
         <span id="footer-hint" class="dim"></span>
-        <button id="lang-btn" class="link-btn" aria-label="Switch language">中</button>
+        <button id="settings-btn" class="icon-btn gear-btn" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
       </footer>
     </section>
 

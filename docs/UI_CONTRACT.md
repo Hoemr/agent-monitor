@@ -40,7 +40,7 @@ renders whatever the snapshot contains.
     "pinned": false
   }],
   "collected_at_secs": 1792580000,
-  "attention_count": 1,
+  "attention_count": 1,            // waiting_* always; failed only if recent (<30 min) and not interrupted/aborted/cancelled
   "agents": [{ "key": "codex", "name": "Codex", "source": "…", "origin": "index", "max_level": "L2", "notes": "…" }]
 }
 ```
@@ -53,10 +53,22 @@ renders whatever the snapshot contains.
 | `refresh` | — | Snapshot | explicit user refresh |
 | `jump_to_task` | `task_id: string` | `Result<JumpOutcome, String>` | **exactly one** jump per click; rejection only on transport failure |
 | `dismiss_task` | `task_id: string` | `boolean` | remove stale/invalid record |
-| `get_pet_state` | — | PetStateView | mode/edge/hidden/prefs |
-| `set_expanded` | `expanded: boolean` | — | ask Rust to resize the window |
-| `request_collapse` | — | — | after leave delay |
+| `get_pet_state` | — | PetStateView | mode/edge/hidden/settings |
+| `set_expanded` | `expanded: boolean, focus?: boolean` | — | resize; `focus=true` only for explicit clicks (hover expansion never focuses) |
+| `request_collapse` | `force?: boolean` | — | `force=true` for explicit dismissal (outside click/blur/Escape), bypasses the post-resize suppression window |
 | `open_permission_settings` | `kind: "accessibility"\|"automation"` | — | system pane |
+| `get_settings` | — | Settings | single source of truth (see `docs/SETTINGS.md`) |
+| `set_settings` | `settings: Settings` | Settings (normalized) | instant save + broadcast `settings-changed` |
+| `reset_settings` | `scope: "all"\|"general"\|"monitor"\|"pet"\|"jump"` | Settings | group defaults |
+| `get_settings_meta` | — | SettingsMeta | data paths / version / system language |
+| `import_legacy_settings` | `lang?`, `pollMs?` | Settings \| null | one-shot v0.3.x migration |
+| `clear_dismissed` | — | number | clear ignored tasks (persisted) |
+| `restore_dismissed_task` | `taskId` | boolean | undo auto-dismiss |
+| `open_settings` / `close_settings` | — | — | single settings window |
+| `open_data_dir` | — | Result | reveal data folder in Finder |
+| `get_custom_icons` | — | `{collapsed, hidden}` | custom icon data URLs (see `docs/ICONS.md`) |
+| `save_custom_icon` | `slot, dataUrl` | IconMeta \| error | validated (magic bytes, ≤2 MB) + atomic write |
+| `clear_custom_icon` | `slot` | Result | remove a slot |
 | `begin_drag` | — | — | JS calls `getCurrentWindow().startDragging()` |
 
 JumpOutcome:
@@ -77,16 +89,55 @@ JumpOutcome:
 PetStateView:
 
 ```jsonc
-{ "mode": "collapsed|expanded|dragging|edge_hidden", "edge": "left|right|top|bottom|none",
-  "hidden": false, "max_visible_rows": 5, "hover_expand_ms": 150, "collapse_delay_ms": 800 }
+{
+  "mode": "collapsed|expanded|dragging|edge_hidden|tray_hidden",
+  "edge": "left|right|top|bottom|none",
+  "hidden": false,
+  "hidden_to_tray": false,           // ordered out instead of parked at the edge
+  "settings": { /* full Settings object, see docs/SETTINGS.md */ }
+}
 ```
 
-Events: `tasks-updated` (Snapshot), `pet-state` (PetStateView), `jump-feedback`
-(JumpOutcome, used for tray or keyboard initiated jumps).
+Settings (abridged; authoritative list in `docs/SETTINGS.md`):
 
-Dev-only: with `?mock=1` (or `?mock=collapsed`) the page renders a fixture and
-exposes `window.__AM_TEST__` for `scripts/ui-selftest.html`. The packaged app never
-loads the mock path.
+```jsonc
+{
+  "version": 1,
+  "language": "system|en|zh",
+  "appearance": "system|light|dark",
+  "show_summary": true,
+  "show_jump_level": true,
+  "new_badge": true,
+  "refresh_interval": "auto|3s|5s|10s",
+  "retention_hours": 6,
+  "enabled_agents": { "codex": true, "dsh": true, "zcode": true, "claude_code": true },
+  "max_visible_rows": 5,
+  "hover_expand_ms": 150,
+  "collapse_delay_ms": 800,
+  "snap_distance": 16,
+  "hidden_sliver": 14,
+  "collapsed_size": 72,
+  "auto_hide_after_s": 0,
+  "edge_hide_enabled": true,
+  "icon_style": "builtin|custom",
+  "animations": "system|always|off",
+  "toast_on_degraded": true,
+  "auto_dismiss_invalid": false,
+  "legacy_imported": false
+}
+```
+
+Events: `tasks-updated` (Snapshot; emitted even while hidden so the collapsed
+“new completions” indicator updates), `pet-state` (PetStateView), `jump-feedback`
+(JumpOutcome, used for tray or keyboard initiated jumps), `settings-changed`
+(Settings; broadcast to both windows, never polled), `icons-changed`
+(`{collapsed, hidden}` data URLs).
+
+Dev-only: with `?mock=1` (or `?mock=collapsed`) the pet page renders a fixture and
+exposes `window.__AM_TEST__` for `scripts/ui-selftest.html`. The settings page uses
+`settings.html?mock=1&appearance=light|dark&lang=en|zh&group=general|monitor|pet|jump|data`
+and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html`.
+`bash scripts/ui-test.sh` runs both suites. The packaged app never loads the mock path.
 
 ## Presentation rules (current)
 
@@ -109,21 +160,80 @@ loads the mock path.
 
 ## Interaction rules implemented by the frontend
 
-* Collapsed: 72×72 translucent squircle with a three-bar glyph and a blue count
-  badge; click expands. The 72 px shape matches the native effect's 16 px radius.
-* Expanded: fixed max height (5 rows visible, scroll for more) with one row per
-  task showing agent name, title (ellipsis + `title` tooltip), status text **and**
-  icon (not colour alone), relative last-activity time, and jump-level hint.
+* Collapsed: translucent squircle with a three-bar glyph and a blue count badge;
+  click expands. The edge length is `collapsed_size` (48–96 px, default 72) and
+  the corner radius scales with it; the native effect radius stays 16 px.
+* Expanded: fixed max height (`max_visible_rows` visible, scroll for more) with
+  one row per task showing agent name, title (ellipsis + `title` tooltip), status
+  text **and** icon (not colour alone), relative last-activity time, and
+  jump-level hint.
+* Collapsed/hidden “new completions”: `seenAtSecs` is set at boot and refreshed
+  whenever the panel is expanded; the collapsed pet shows an **unfilled green
+  ring** (16 px, 1 px green border, 8 % tint, green tabular number) with the count
+  of `completed` tasks whose activity is newer than that, and the expanded header
+  shows the same count as a chip. `new_badge=false` hides both. The edge-hidden
+  tab shows a filled 6 px dot instead of a number.
+* Jump notices never render inside the small pet window: the toast is painted only
+  while the panel is expanded/dragging. While collapsed/edge-hidden/tray-hidden a
+  text-free notice dot (top-left; amber = degraded, red = failed, blue = info) is
+  shown instead, the notice lifetime is extended (~30 s), and expanding restores
+  the full toast with its action button. The pending notice is included in the
+  collapsed pet's `aria-label`/`title`.
+* Edge-hidden geometry: the window becomes a `hidden_sliver × hidden_sliver`
+  square (8–24 pt) flush with the snapped screen edge — the snapped side is
+  invisible and the two perpendicular sides only expose that small square. The
+  tab keeps its position along the edge, so expanding again grows from there.
+* Custom artwork: with `icon_style=custom` and an uploaded image, the collapsed
+  pet (and the hidden tab, preferring the `hidden` slot) renders the image
+  instead of the built-in glyph; badges stay on top. See `docs/ICONS.md`.
 * Clicking a row calls `jump_to_task` once. Dragging inside the list must scroll,
   not jump, and never trigger a drag of the window.
 * A dedicated drag handle (top bar) starts window dragging; a movement threshold
   (>4 px) distinguishes drag from click.
-* Hover the collapsed/edge-hidden pet → `set_expanded(true)` after 150 ms.
-  Leaving the window → `request_collapse` after 800 ms; pointer re-entering
-  cancels it.
+* Hover the collapsed/edge-hidden pet → `set_expanded(true, focus=false)` after
+  150 ms. Leaving the window always schedules `request_collapse` after the
+  configured delay (pointer re-entering cancels it; the post-expand suppression
+  window can delay but never drop the collapse).
+* Clicking the pet expands it **and makes the window key** (`focus=true`). Any
+  click elsewhere (other app / desktop / tray menu) then produces a window
+  `blur`, which calls `request_collapse(force=true)` immediately — the popover
+  behaves like a native menu-bar panel. Hover expansion deliberately never
+  focuses the window, preserving the “never steal focus” rule.
+* Optional “hide after snapping” (`auto_hide_after_s > 0`): once the pet rests
+  collapsed on an edge it hides itself after that many idle seconds by calling
+  the normal `hide_pet` command (edge sliver or tray). Hover/drag/expand cancel
+  the one-shot timer; a free-floating pet never auto-hides.
 * No `focus()`, no `setInterval` faster than 30 s; relative times are updated by
   one shared 30 s timer that only rewrites time labels.
 * Reduced motion: respect `prefers-reduced-motion`.
-* Bilingual labels (en/zh) via a small dictionary; persisted in localStorage.
+* Bilingual labels (en/zh) via a small dictionary. The language comes from the
+  Settings model (`system` resolves against the OS language), never from
+  localStorage after the one-shot legacy import.
 * Accessibility: rows are `<button>`-like with `aria-label="Codex, Fix the parser,
   running, jump L2, click to open"`.
+* Settings entry points: tray menu “Settings…” (top item), a gear button in the
+  expanded footer, and Cmd+, while either app window is focused. The footer no
+  longer contains a language toggle (it moved into Settings).
+* `max_visible_rows` drives both the Rust window height (44 + rows×64 + 26) and
+  the list's CSS max-height; `show_summary` / `show_jump_level` hide the
+  corresponding row elements; `animations=off` disables window geometry
+  animation and CSS transitions.
+* Settings changes arrive through `settings-changed` on both pages; identical
+  snapshots are still de-duplicated by render hash. No settings polling.
+
+## Settings window (`settings.html`)
+
+* Separate native window, label `settings`, 620×560 fixed, system title bar,
+  standard close button. **Created lazily on first open** (so users who never
+  open Settings pay no extra webview/RSS at idle), single instance; closing
+  hides it (state preserved); the app keeps running in the menu bar and remains
+  **accessory** (no Dock icon).
+* Left group navigation (General / Monitoring / Desktop Pet / Jump / Data) and a
+  scrollable content pane; the selected group is remembered in the settings
+  window's own localStorage, not in `settings.json`.
+* macOS Preferences behaviour: no OK/Cancel, every change is saved immediately;
+  a subtle “Saved” indicator confirms writes. Reset-per-group and reset-all use
+  inline double confirmation.
+* Readability first: solid background (no vibrancy layer), system font stack,
+  semantic colours, `light-dark()` tokens, explicit `appearance` override.
+* All controls are native-focusable with visible focus rings and `aria-label`s.

@@ -5,6 +5,7 @@
 //! `lib.rs`; this module never talks to Tauri.
 
 use crate::model::{Edge, PetMode, PetPosition, PetPrefs, PetState};
+use crate::settings::Settings;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -15,7 +16,7 @@ pub const EXPANDED_WIDTH: f64 = 360.0;
 pub const HEADER_HEIGHT: f64 = 44.0;
 pub const ROW_HEIGHT: f64 = 64.0;
 pub const FOOTER_HEIGHT: f64 = 26.0;
-pub const MAX_VISIBLE_ROWS: usize = 5;
+pub const MAX_VISIBLE_ROWS: usize = 8;
 pub const SNAP_DISTANCE: f64 = 16.0;
 pub const HIDDEN_SLIVER: f64 = 14.0;
 pub const SCREEN_MARGIN: f64 = 8.0;
@@ -63,6 +64,9 @@ pub struct ScreenRect {
     pub scale: f64,
 }
 
+/// Expanded window height for `rows` visible rows. The caller passes the row
+/// count already capped by the user setting (`Settings::visible_rows`); this is
+/// the last line of defence and supports the full 1..=8 range.
 pub fn expanded_height_logical(rows: usize) -> f64 {
     let rows = rows.clamp(1, MAX_VISIBLE_ROWS);
     HEADER_HEIGHT + ROW_HEIGHT * rows as f64 + FOOTER_HEIGHT
@@ -208,29 +212,37 @@ pub fn finish_drag_with(rect: Rect, visible: &Rect, distance: f64) -> (Rect, Edg
     }
 }
 
-/// Move the window mostly off-screen, leaving a discoverable sliver.
-pub fn hide_rect(rect: Rect, edge: Edge, sliver: f64) -> Rect {
-    let mut r = rect;
+/// Hide the pet as a small square tab attached to `edge`.
+///
+/// The tab is `sliver × sliver` points: the snapped side sits flush with the
+/// screen edge (so it reads as invisible), and the two perpendicular sides only
+/// show that small length. The tab keeps the pet's position along the edge so
+/// expanding again grows from where the user left it.
+pub fn hide_tab_rect(rect: Rect, visible: &Rect, edge: Edge, sliver: f64) -> Rect {
+    let size = sliver.max(1.0);
+    let (cx, cy) = rect.center();
+    let along_y = (cy - size / 2.0).clamp(visible.y, (visible.bottom() - size).max(visible.y));
+    let along_x = (cx - size / 2.0).clamp(visible.x, (visible.right() - size).max(visible.x));
     match edge {
-        Edge::Left => r.x = rect.x - rect.w + sliver,
-        Edge::Right => r.x = rect.right() - sliver,
-        Edge::Top => r.y = rect.y - rect.h + sliver,
-        Edge::Bottom => r.y = rect.bottom() - sliver,
-        Edge::None => {}
+        Edge::Left => Rect::new(visible.x, along_y, size, size),
+        Edge::Right => Rect::new(visible.right() - size, along_y, size, size),
+        Edge::Top => Rect::new(along_x, visible.y, size, size),
+        Edge::Bottom => Rect::new(along_x, visible.bottom() - size, size, size),
+        Edge::None => constrain(rect, visible),
     }
-    r
 }
 
-/// Expand from the hidden sliver back on screen, anchored to its edge.
+/// Expand from the hidden tab back on screen, anchored to its edge and keeping
+/// the tab's position along that edge.
 pub fn unhide_rect(hidden: Rect, edge: Edge, size: (f64, f64), visible: &Rect) -> Rect {
-    let mut r = Rect::new(hidden.x, hidden.y, size.0, size.1);
-    match edge {
-        Edge::Left => r.x = visible.x,
-        Edge::Right => r.x = visible.right() - size.0,
-        Edge::Top => r.y = visible.y,
-        Edge::Bottom => r.y = visible.bottom() - size.1,
-        Edge::None => {}
-    }
+    let (hcx, hcy) = hidden.center();
+    let r = match edge {
+        Edge::Left => Rect::new(visible.x, hcy - size.1 / 2.0, size.0, size.1),
+        Edge::Right => Rect::new(visible.right() - size.0, hcy - size.1 / 2.0, size.0, size.1),
+        Edge::Top => Rect::new(hcx - size.0 / 2.0, visible.y, size.0, size.1),
+        Edge::Bottom => Rect::new(hcx - size.0 / 2.0, visible.bottom() - size.1, size.0, size.1),
+        Edge::None => Rect::new(hidden.x, hidden.y, size.0, size.1),
+    };
     constrain(r, visible)
 }
 
@@ -249,14 +261,18 @@ pub fn anchored_resize(rect: Rect, edge: Edge, size: (f64, f64), visible: &Rect)
     constrain(r, visible)
 }
 
+/// Snapshot of everything the pet webview needs to render its state. The
+/// embedded [`Settings`] removes any chance of the UI and Rust disagreeing
+/// (language, row cap, animations, toggles…).
 #[derive(Clone, Debug, Serialize)]
 pub struct PetStateView {
     pub mode: &'static str,
     pub edge: &'static str,
     pub hidden: bool,
-    pub max_visible_rows: u32,
-    pub hover_expand_ms: u64,
-    pub collapse_delay_ms: u64,
+    /// True when the window is ordered out (tray-hidden) instead of parked at
+    /// the screen edge.
+    pub hidden_to_tray: bool,
+    pub settings: Settings,
 }
 
 pub fn mode_key(mode: PetMode) -> &'static str {
@@ -265,6 +281,7 @@ pub fn mode_key(mode: PetMode) -> &'static str {
         PetMode::Expanded => "expanded",
         PetMode::Dragging => "dragging",
         PetMode::EdgeHidden => "edge_hidden",
+        PetMode::TrayHidden => "tray_hidden",
     }
 }
 
@@ -278,14 +295,13 @@ pub fn edge_key(edge: Edge) -> &'static str {
     }
 }
 
-pub fn state_view(state: &PetState, prefs: &PetPrefs) -> PetStateView {
+pub fn state_view(state: &PetState, settings: &Settings) -> PetStateView {
     PetStateView {
         mode: mode_key(state.mode),
         edge: edge_key(state.edge),
         hidden: state.hidden,
-        max_visible_rows: prefs.max_visible_rows,
-        hover_expand_ms: prefs.hover_expand_ms,
-        collapse_delay_ms: prefs.collapse_delay_ms,
+        hidden_to_tray: state.mode == PetMode::TrayHidden,
+        settings: settings.clone(),
     }
 }
 
@@ -301,11 +317,7 @@ impl PetStore {
     }
 
     pub fn default_path() -> PathBuf {
-        let base = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("Library/Application Support/agent-monitor");
-        base.join("pet.json")
+        crate::settings::pet_path()
     }
 
     pub fn load(&self) -> PetPrefs {
@@ -381,31 +393,60 @@ mod tests {
     }
 
     #[test]
-    fn hidden_keeps_a_clickable_sliver_on_each_edge() {
-        let r = Rect::new(100.0, 100.0, 360.0, 400.0);
+    fn hidden_tab_is_a_sliver_square_flush_with_each_edge() {
+        let vis = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        let r = Rect::new(1500.0, 400.0, 360.0, 400.0);
         for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
-            let h = hide_rect(r, edge, HIDDEN_SLIVER);
-            let vis = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+            let h = hide_tab_rect(r, &vis, edge, HIDDEN_SLIVER);
+            assert_eq!(h.w, HIDDEN_SLIVER);
+            assert_eq!(h.h, HIDDEN_SLIVER);
+            // The snapped side is flush with the screen edge: nothing of it is
+            // off in a gap, and only the small square is on screen.
             let visible_w = h.right().min(vis.right()) - h.x.max(vis.x);
             let visible_h = h.bottom().min(vis.bottom()) - h.y.max(vis.y);
             assert!(
-                visible_w >= HIDDEN_SLIVER - 0.001 || visible_h >= HIDDEN_SLIVER - 0.001,
-                "edge {:?} leaves no discoverable sliver: {:?}",
+                (visible_w - HIDDEN_SLIVER).abs() < 0.001 && (visible_h - HIDDEN_SLIVER).abs() < 0.001,
+                "edge {:?} should expose only a {}px square, got {:?}",
                 edge,
+                HIDDEN_SLIVER,
                 h
             );
+            match edge {
+                Edge::Left => assert_eq!(h.x, vis.x),
+                Edge::Right => assert_eq!(h.right(), vis.right()),
+                Edge::Top => assert_eq!(h.y, vis.y),
+                Edge::Bottom => assert_eq!(h.bottom(), vis.bottom()),
+                Edge::None => {}
+            }
         }
     }
 
     #[test]
-    fn unhide_returns_fully_on_screen() {
+    fn hidden_tab_keeps_the_position_along_the_edge() {
+        let vis = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        let r = Rect::new(1848.0, 500.0, 72.0, 72.0);
+        let (_, cy) = r.center();
+        let h = hide_tab_rect(r, &vis, Edge::Right, HIDDEN_SLIVER);
+        assert!((h.center().1 - cy).abs() < 0.001);
+        // And it never leaves the visible frame.
+        assert!(h.y >= vis.y && h.bottom() <= vis.bottom());
+    }
+
+    #[test]
+    fn unhide_returns_fully_on_screen_and_keeps_the_along_edge_center() {
         let vis = Rect::new(0.0, 0.0, 1920.0, 1080.0);
         let expanded = (360.0, 400.0);
         for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
-            let hidden = hide_rect(Rect::new(1500.0, 400.0, 360.0, 400.0), edge, HIDDEN_SLIVER);
+            let hidden = hide_tab_rect(Rect::new(1500.0, 400.0, 360.0, 400.0), &vis, edge, HIDDEN_SLIVER);
             let out = unhide_rect(hidden, edge, expanded, &vis);
             assert!(out.x >= vis.x - 0.001 && out.right() <= vis.right() + 0.001);
             assert!(out.y >= vis.y - 0.001 && out.bottom() <= vis.bottom() + 0.001);
+            let along = match edge {
+                Edge::Left | Edge::Right => (out.center().1 - hidden.center().1).abs(),
+                Edge::Top | Edge::Bottom => (out.center().0 - hidden.center().0).abs(),
+                Edge::None => 0.0,
+            };
+            assert!(along < 0.001, "edge {:?} moved along the edge by {}", edge, along);
         }
     }
 
@@ -422,8 +463,66 @@ mod tests {
     fn expanded_height_is_bounded_by_rows() {
         assert_eq!(expanded_height_logical(1), HEADER_HEIGHT + ROW_HEIGHT + FOOTER_HEIGHT);
         assert_eq!(expanded_height_logical(5), HEADER_HEIGHT + ROW_HEIGHT * 5.0 + FOOTER_HEIGHT);
-        assert_eq!(expanded_height_logical(40), expanded_height_logical(5));
+        assert_eq!(expanded_height_logical(8), HEADER_HEIGHT + ROW_HEIGHT * 8.0 + FOOTER_HEIGHT);
+        assert_eq!(expanded_height_logical(40), expanded_height_logical(8));
         assert_eq!(expanded_height_logical(0), expanded_height_logical(1));
+    }
+
+    #[test]
+    fn row_presets_3_5_8_produce_exact_native_heights() {
+        for (rows, expected) in [
+            (3usize, 44.0 + 64.0 * 3.0 + 26.0),
+            (5usize, 44.0 + 64.0 * 5.0 + 26.0),
+            (8usize, 44.0 + 64.0 * 8.0 + 26.0),
+        ] {
+            assert_eq!(expanded_height_logical(rows), expected);
+        }
+        // 8 rows still fits an 1080 pt visible frame (862 + menu bar margins).
+        assert!(expanded_height_logical(8) < 1080.0);
+    }
+
+    #[test]
+    fn state_view_carries_mode_and_full_settings() {
+        let state = PetState {
+            mode: PetMode::TrayHidden,
+            edge: Edge::Right,
+            hidden: true,
+        };
+        let mut settings = Settings::default();
+        settings.max_visible_rows = 8;
+        settings.hover_expand_ms = 300;
+        let view = state_view(&state, &settings);
+        assert_eq!(view.mode, "tray_hidden");
+        assert!(view.hidden);
+        assert!(view.hidden_to_tray);
+        assert_eq!(view.settings.max_visible_rows, 8);
+        assert_eq!(view.settings.hover_expand_ms, 300);
+
+        let visible = PetState {
+            mode: PetMode::Collapsed,
+            edge: Edge::None,
+            hidden: false,
+        };
+        assert!(!state_view(&visible, &settings).hidden_to_tray);
+    }
+
+    #[test]
+    fn old_pet_json_with_behaviour_fields_still_loads_placement() {
+        let dir = std::env::temp_dir().join(format!("am-pet-legacy-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("pet.json");
+        std::fs::write(
+            &path,
+            r#"{"hidden":true,"position":{"screen_key":"main","rel_x":0.9,"rel_y":0.4,"edge":"right"},
+                "hover_expand_ms":999,"collapse_delay_ms":1111,"max_visible_rows":8}"#,
+        )
+        .unwrap();
+        let store = PetStore::new(path);
+        let prefs = store.load();
+        assert!(prefs.hidden);
+        assert_eq!(prefs.position.screen_key, "main");
+        assert!((prefs.position.rel_x - 0.9).abs() < f64::EPSILON);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -194,11 +194,13 @@ impl ClaudeCodeSource {
                 let file_key = fpath.to_string_lossy().to_string();
                 let file_mt = super::file_mtime_secs(&fpath);
                 let session_id = fname.trim_end_matches(".jsonl").to_string();
-                let is_live = active_sessions.contains_key(&session_id) || is_ide_project;
-                let stale_cutoff = ctx
-                    .now_secs
-                    .saturating_sub(if is_live { 24 * 3600 } else { 6 * 3600 });
-                if file_mt < stale_cutoff {
+                // Retention is injected from Settings (there is no separate
+                // live/non-live hard-coded 24 h / 6 h pair any more). Running
+                // rows are inherently recent because the silence rules below
+                // need a fresh mtime (10 s / 120 s), so no active exemption is
+                // required before parsing; this prefilter also keeps MAX_FILES
+                // bounded without opening old transcripts.
+                if !within_retention(file_mt, ctx.now_secs, ctx.retention_secs) {
                     continue;
                 }
                 let prev = self.files.get(&file_key);
@@ -260,6 +262,12 @@ impl ClaudeCodeSource {
 
 fn process_alive(ctx: &ScanCtx, pid: u32) -> bool {
     ctx.processes.entries.iter().any(|p| p.pid == pid)
+}
+
+/// Transcript freshness rule: a transcript is considered only while its file
+/// mtime is inside the user-configured retention window (boundary inclusive).
+fn within_retention(file_mtime_secs: u64, now_secs: u64, retention_secs: u64) -> bool {
+    file_mtime_secs >= now_secs.saturating_sub(retention_secs)
 }
 
 fn encode_project_name(folder: &str) -> String {
@@ -717,5 +725,18 @@ mod tests {
         assert_eq!(short_model("claude-opus-4-1"), "OPUS");
         assert_eq!(short_model("deepseek-v4.1-flash"), "DS");
         assert_eq!(short_model(""), "");
+    }
+
+    #[test]
+    fn transcript_retention_uses_the_injected_window() {
+        let now = 1_000_000;
+        let window = 3_600;
+        assert!(within_retention(now - window, now, window)); // inclusive boundary
+        assert!(within_retention(now - 60, now, window));
+        assert!(!within_retention(now - window - 1, now, window));
+        assert!(!within_retention(0, now, window));
+        // A larger setting keeps work the old fixed 6 h window dropped.
+        assert!(within_retention(now - 20 * 3_600, now, 24 * 3_600));
+        assert!(!within_retention(now - 20 * 3_600, now, 6 * 3_600));
     }
 }

@@ -14,7 +14,7 @@
 //! Waiting-approval is NOT claimed: no approval-request event was observed on
 //! this machine (the DSH approval policy is `never`).
 
-use super::{truncate_chars, ScanCtx, Source};
+use super::{retention_keeps, truncate_chars, ScanCtx, Source};
 use crate::model::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 const APP_NAME: &str = "DeepSeek Harness";
 const BUNDLE_ID: &str = "com.deepseek.dsh";
 const PROCESS_NEEDLE: &str = "DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness";
-const RETENTION_SECS: u64 = 6 * 3600;
 const RUNNING_STALE_SECS: u64 = 30 * 60;
 
 #[derive(Clone)]
@@ -159,6 +158,33 @@ impl DshSource {
     }
 }
 
+/// Retention decision for one projected session. Extracted so the rules are
+/// unit-testable without touching `~/.dsh`:
+///   * an open turn or an active user question is always kept,
+///   * `Running`/`Waiting*` statuses are always kept (shared helper),
+///   * when the session records a real last activity (`last_activity_ms > 0`)
+///     that timestamp alone decides — even if the projection file was rewritten
+///     recently. DSH rewrites every cache file on app start, so trusting the
+///     file mtime here would resurrect long-ended sessions,
+///   * only when the real activity is genuinely unknown (0) does the projection
+///     file's mtime stand in for it.
+fn keeps_row(
+    row: &DshRow,
+    status: TaskStatus,
+    activity_secs: u64,
+    now_secs: u64,
+    retention_secs: u64,
+) -> bool {
+    if row.open_turn || row.active_questions > 0 {
+        return true;
+    }
+    if row.last_activity_ms > 0 {
+        retention_keeps(status, activity_secs, now_secs, retention_secs)
+    } else {
+        row.file_mtime >= now_secs.saturating_sub(retention_secs)
+    }
+}
+
 impl Source for DshSource {
     fn descriptor(&self) -> AgentDescriptor {
         AgentDescriptor {
@@ -187,14 +213,6 @@ impl Source for DshSource {
                 row.file_mtime
             };
             let silence = ctx.now_secs.saturating_sub(activity);
-            // Retention: anything active, plus the last 6 h of finished work.
-            // Older completed sessions stay on disk but are not shown.
-            let active = row.open_turn || row.active_questions > 0;
-            let recent = activity >= ctx.now_secs.saturating_sub(RETENTION_SECS)
-                || row.file_mtime >= ctx.now_secs.saturating_sub(RETENTION_SECS);
-            if !active && !recent {
-                continue;
-            }
 
             let (status, reason) = if row.active_questions > 0 {
                 (
@@ -227,6 +245,14 @@ impl Source for DshSource {
             } else {
                 (TaskStatus::Unknown, "no turn boundary state".to_string())
             };
+
+            // Retention: an open turn / active question is kept no matter how
+            // old its last event is; finished sessions follow the configured
+            // window based on their real activity, falling back to the
+            // projection file mtime only when no activity was recorded.
+            if !keeps_row(row, status, activity, ctx.now_secs, ctx.retention_secs) {
+                continue;
+            }
 
             let title = if row.title.is_empty() {
                 Path::new(&row.cwd)
@@ -327,5 +353,86 @@ mod tests {
         // Guard: the adapter has no code path that produces WaitingApproval.
         let row = fixture(false, "end", 0, 1);
         assert_ne!(row.last_step_kind, "approval");
+    }
+
+    #[test]
+    fn retention_uses_real_activity_when_known_even_if_file_mtime_is_fresh() {
+        let now = 1_000_000;
+        let window = 3_600;
+        let old = now - 10 * window;
+        let mut row = fixture(false, "end", 0, 3);
+        // Regression: DSH rewrites the projection file on app start (fresh
+        // mtime) while the session's real lastMessageTime is 10 windows old.
+        // The real activity must decide, otherwise old sessions resurrect.
+        row.last_activity_ms = old * 1_000;
+        row.file_mtime = now - 60;
+        assert!(!keeps_row(&row, TaskStatus::Completed, old, now, window));
+        // Real activity inside the window is kept even with an ancient mtime.
+        row.last_activity_ms = (now - window) * 1_000;
+        row.file_mtime = 0;
+        assert!(keeps_row(
+            &row,
+            TaskStatus::Completed,
+            now - window,
+            now,
+            window
+        ));
+        // Open turn / active question are exempt regardless of age or status.
+        let open = fixture(true, "start", 0, 3);
+        assert!(keeps_row(&open, TaskStatus::Unknown, 0, now, window));
+        let asking = fixture(true, "start", 1, 3);
+        assert!(keeps_row(&asking, TaskStatus::WaitingInput, 0, now, window));
+        // Running/waiting statuses are exempt through the shared helper.
+        assert!(keeps_row(&row, TaskStatus::Running, 0, now, window));
+        assert!(keeps_row(
+            &row,
+            TaskStatus::WaitingApproval,
+            0,
+            now,
+            window
+        ));
+    }
+
+    #[test]
+    fn retention_falls_back_to_file_mtime_only_when_activity_is_unknown() {
+        let now = 1_000_000;
+        let window = 3_600;
+        let mut row = fixture(false, "end", 0, 3);
+        assert_eq!(row.last_activity_ms, 0, "fixture has no recorded activity");
+        // Unknown activity + recently written projection file -> kept.
+        row.file_mtime = now - 60;
+        assert!(keeps_row(
+            &row,
+            TaskStatus::Completed,
+            row.file_mtime,
+            now,
+            window
+        ));
+        // Unknown activity + file at the inclusive boundary -> kept.
+        row.file_mtime = now - window;
+        assert!(keeps_row(
+            &row,
+            TaskStatus::Completed,
+            row.file_mtime,
+            now,
+            window
+        ));
+        // Unknown activity + file one second past the window -> dropped.
+        row.file_mtime = now - window - 1;
+        assert!(!keeps_row(
+            &row,
+            TaskStatus::Completed,
+            row.file_mtime,
+            now,
+            window
+        ));
+        row.file_mtime = now - 10 * window;
+        assert!(!keeps_row(
+            &row,
+            TaskStatus::Completed,
+            row.file_mtime,
+            now,
+            window
+        ));
     }
 }

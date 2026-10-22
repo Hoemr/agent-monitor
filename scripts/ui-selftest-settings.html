@@ -1,0 +1,562 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Settings selftest pending</title>
+<style>
+html,body{margin:0;background:#111;color:#ddd;font:12px ui-monospace,Menlo,monospace}
+iframe{width:620px;height:560px;border:0;display:block}
+pre{white-space:pre-wrap;margin:8px;font-size:12px;line-height:1.35}
+</style>
+</head><body>
+<iframe id="frame" src="../src/settings.html?mock=1"></iframe>
+<pre id="results">PENDING</pre>
+<script>
+var results = [];
+var failures = 0;
+var finished = false;
+var frame = document.getElementById('frame');
+var win = null;
+var doc = null;
+var T = null;
+
+function check(name, ok, detail) {
+  results.push((ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' :: ' + detail : ''));
+  if (!ok) failures++;
+}
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+function q(sel) { return doc.querySelector(sel); }
+function qa(sel) { return Array.prototype.slice.call(doc.querySelectorAll(sel)); }
+function key(el, name) {
+  el.dispatchEvent(new win.KeyboardEvent('keydown', {
+    key: name, bubbles: true, cancelable: true
+  }));
+}
+function fire(el, type) {
+  el.dispatchEvent(new win.Event(type, { bubbles: true, cancelable: true }));
+}
+function last(cmd) { return T.lastCommand(cmd); }
+function lastSetPayload() {
+  var entry = last('set_settings');
+  return entry && entry.args ? entry.args.settings : null;
+}
+function count(cmd) {
+  var n = 0;
+  var log = T.invokeLog;
+  for (var i = 0; i < log.length; i++) if (log[i].cmd === cmd) n++;
+  return n;
+}
+
+// Tiny real PNGs used by the custom-icon checks.
+var TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+var TINY_PNG_RED = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP8b23wn4GBgYGJAQoAJZcCbU1gfKkAAAAASUVORK5CYII=';
+function pngBytes() {
+  var binary = win.atob(TINY_PNG.split(',')[1]);
+  var bytes = new win.Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+async function waitFor(predicate, tries) {
+  var limit = tries || 160;
+  for (var i = 0; i < limit; i++) {
+    var value = false;
+    try { value = predicate(); } catch (e) { value = false; }
+    if (value) return value;
+    await sleep(25);
+  }
+  return false;
+}
+function uploadIcon(slot, file) {
+  var input = q('input[type="file"][data-slot="' + slot + '"]');
+  if (!input) return null;
+  var transfer = new win.DataTransfer();
+  transfer.items.add(file);
+  input.files = transfer.files;
+  fire(input, 'change');
+  return input;
+}
+async function waitForBoot() {
+  for (var i = 0; i < 100; i++) {
+    var hooks = win.__AM_SETTINGS_TEST__;
+    if (hooks && hooks.settings) return hooks;
+    await sleep(40);
+  }
+  return null;
+}
+
+frame.addEventListener('load', async function () {
+  try {
+    win = frame.contentWindow;
+    doc = win.document;
+    T = await waitForBoot();
+    check('mock hooks expose the live settings state and invoke log',
+      !!T && !!T.settings && Array.isArray(T.invokeLog) && T.groups.length === 5,
+      T ? 'groups=' + T.groups.join(',') : 'hooks missing');
+    if (!T) { finish(); return; }
+    await sleep(60);
+
+    // 1. load once, no polling
+    var getsBefore = count('get_settings');
+    await sleep(320);
+    check('settings are read once at startup and never polled',
+      getsBefore === 1 && count('get_settings') === 1,
+      'get_settings=' + getsBefore + '->' + count('get_settings'));
+
+    // 2. layout fits the 620×560 window without horizontal scrolling
+    var scrollEl = q('#pane-scroll');
+    var sidebar = q('#sidebar');
+    check('layout fits the 620×560 window without horizontal scrolling',
+      !!scrollEl && scrollEl.scrollWidth <= scrollEl.clientWidth + 1 &&
+      Math.round(sidebar.getBoundingClientRect().width) === 180 &&
+      Math.round(doc.body.getBoundingClientRect().width) === 620,
+      'body=' + Math.round(doc.body.getBoundingClientRect().width) +
+      ' scroll=' + scrollEl.scrollWidth + '/' + scrollEl.clientWidth +
+      ' sidebar=' + Math.round(sidebar.getBoundingClientRect().width));
+
+    // 3. five sections, localised
+    var navs = qa('#sidebar .nav-item');
+    var navLabels = navs.map(function (n) { return n.querySelector('.nav-label').textContent; });
+    check('five sections render in the sidebar with English labels',
+      navs.length === 5 &&
+      navLabels.join('|') === 'General|Monitoring|Desktop Pet|Jump|Data',
+      navLabels.join('|'));
+
+    // 4. every Settings key is editable somewhere in the window
+    var expected = ['language', 'appearance', 'show_summary', 'show_jump_level', 'new_badge',
+      'refresh_interval', 'retention_hours', 'enabled_agents.codex',
+      'enabled_agents.dsh', 'enabled_agents.zcode', 'enabled_agents.claude_code',
+      'max_visible_rows', 'hover_expand_ms', 'collapse_delay_ms', 'snap_distance',
+      'hidden_sliver', 'collapsed_size', 'auto_hide_after_s',
+      'edge_hide_enabled', 'animations', 'icon_style', 'toast_on_degraded',
+      'auto_dismiss_invalid'];
+    var found = {};
+    T.groups.forEach(function (group) {
+      T.selectGroup(group);
+      qa('[data-setting]').forEach(function (el) {
+        found[el.getAttribute('data-setting')] = true;
+      });
+    });
+    var missingKeys = expected.filter(function (key) { return !found[key]; });
+    check('every documented Settings key is editable', missingKeys.length === 0,
+      'missing=' + (missingKeys.join(',') || 'none'));
+
+    // 5. fixture settings paint into their controls
+    T.selectGroup('general');
+    check('fixture settings paint into their controls',
+      q('input[data-setting="show_summary"]').checked === true &&
+      q('input[data-setting="show_jump_level"]').checked === true &&
+      q('input[data-setting="new_badge"]').checked === true &&
+      q('input[data-setting="language"][data-value="system"]').checked === true &&
+      q('input[data-setting="appearance"][data-value="system"]').checked === true);
+
+    // 6. switch saves the complete object
+    q('input[data-setting="show_summary"]').click();
+    await sleep(60);
+    var payload = lastSetPayload();
+    var requiredTop = ['version', 'language', 'appearance', 'show_summary',
+      'show_jump_level', 'new_badge', 'refresh_interval', 'retention_hours',
+      'enabled_agents', 'max_visible_rows', 'hover_expand_ms', 'collapse_delay_ms',
+      'snap_distance', 'hidden_sliver', 'collapsed_size', 'auto_hide_after_s',
+      'edge_hide_enabled', 'animations', 'icon_style', 'toast_on_degraded',
+      'auto_dismiss_invalid', 'legacy_imported'];
+    var missingTop = payload ? requiredTop.filter(function (k) {
+      return !Object.prototype.hasOwnProperty.call(payload, k);
+    }) : requiredTop;
+    check('switch writes the full Settings object via set_settings',
+      !!payload && payload.show_summary === false &&
+      payload.enabled_agents && payload.enabled_agents.claude_code === true &&
+      missingTop.length === 0,
+      payload ? 'keys=' + Object.keys(payload).length : 'no payload');
+
+    // 7. saved indicator
+    var savedEl = q('#save-status');
+    check('a subtle saved indicator confirms the write',
+      savedEl.hidden === false && /Saved|已保存/.test(savedEl.textContent),
+      'hidden=' + savedEl.hidden + ' text=' + savedEl.textContent);
+
+    // 7b. new-completions badge switch saves false
+    var badgeSwitch = q('input[data-setting="new_badge"]');
+    var badgeWasOn = badgeSwitch ? badgeSwitch.checked : false;
+    if (badgeSwitch) badgeSwitch.click();
+    await sleep(60);
+    check('new-completions badge switch saves false',
+      badgeWasOn === true && lastSetPayload().new_badge === false,
+      'new_badge=' + lastSetPayload().new_badge);
+    var badgeRestore = q('input[data-setting="new_badge"]');
+    if (badgeRestore) badgeRestore.click();
+    await sleep(40);
+
+    // 8. segmented control
+    T.selectGroup('monitor');
+    q('input[data-setting="refresh_interval"][data-value="10s"]').click();
+    await sleep(60);
+    var refreshPayload = lastSetPayload();
+    check('segmented control saves the selected refresh interval',
+      refreshPayload.refresh_interval === '10s' &&
+      q('input[data-setting="refresh_interval"][data-value="10s"]').checked === true,
+      'refresh=' + refreshPayload.refresh_interval);
+
+    // 9. slider: live numeric label, saved on change
+    T.selectGroup('pet');
+    var slider = q('input[data-setting="hover_expand_ms"]');
+    slider.value = '620';
+    fire(slider, 'input');
+    var sliderLabel = q('output[data-output-for="hover_expand_ms"]').textContent;
+    check('slider shows a live numeric value', /620\s*(ms|毫秒)/.test(sliderLabel), sliderLabel);
+    fire(slider, 'change');
+    await sleep(60);
+    check('slider saves its value on release', lastSetPayload().hover_expand_ms === 620,
+      'value=' + lastSetPayload().hover_expand_ms);
+
+    // 10. stepper clamps to the documented range
+    for (var step = 0; step < 12; step++) {
+      var inc = q('button[data-setting="hidden_sliver"][data-step="1"]');
+      if (!inc) break;
+      inc.click();
+      await sleep(14);
+    }
+    var stepperPayload = lastSetPayload();
+    var exceeded = T.invokeLog.some(function (entry) {
+      return entry.cmd === 'set_settings' && entry.args.settings.hidden_sliver > 24;
+    });
+    var stepperLabel = q('output[data-output-for="hidden_sliver"]').textContent;
+    check('stepper saves pixel steps and clamps at the range end',
+      stepperPayload.hidden_sliver === 24 && !exceeded && /24/.test(stepperLabel),
+      'value=' + stepperPayload.hidden_sliver + ' label=' + stepperLabel);
+
+    // 10b. collapsed size slider: bounded, saved, and reflected in the output
+    T.selectGroup('pet');
+    await sleep(30);
+    var sizeSlider = q('input[data-setting="collapsed_size"]');
+    check('collapsed size slider is bounded to 48–96 px',
+      sizeSlider && Number(sizeSlider.min) === 48 && Number(sizeSlider.max) === 96,
+      sizeSlider ? sizeSlider.min + '–' + sizeSlider.max : 'missing');
+    sizeSlider.value = '48';
+    fire(sizeSlider, 'input');
+    fire(sizeSlider, 'change');
+    await sleep(60);
+    var sizeLabel = q('output[data-output-for="collapsed_size"]').textContent;
+    check('collapsed size saves and shows its value',
+      lastSetPayload().collapsed_size === 48 && /48/.test(sizeLabel),
+      'value=' + lastSetPayload().collapsed_size + ' label=' + sizeLabel);
+
+    // 10c. auto-hide: "Off" at zero, seconds otherwise, saved on release
+    var hideSlider = q('input[data-setting="auto_hide_after_s"]');
+    var hideOffLabel = q('output[data-output-for="auto_hide_after_s"]').textContent;
+    check('auto-hide reads Off when disabled', /Off|关闭/.test(hideOffLabel), hideOffLabel);
+    hideSlider.value = '15';
+    fire(hideSlider, 'input');
+    var hideLabel = q('output[data-output-for="auto_hide_after_s"]').textContent;
+    fire(hideSlider, 'change');
+    await sleep(60);
+    check('auto-hide saves the idle seconds and shows them',
+      lastSetPayload().auto_hide_after_s === 15 && /15/.test(hideLabel),
+      'value=' + lastSetPayload().auto_hide_after_s + ' label=' + hideLabel);
+
+    // 10d. custom icon framework: style control, two upload slots, spec note
+    T.selectGroup('pet');
+    await sleep(30);
+    var iconPaneText = q('#pane-body').textContent;
+    var iconFileInputs = qa('input[type="file"]');
+    check('icon section offers a style control, two slots and the spec note',
+      !!q('input[data-setting="icon_style"]') &&
+      !!q('input[data-setting="icon_style"][data-value="builtin"]') &&
+      !!q('input[data-setting="icon_style"][data-value="custom"]') &&
+      iconFileInputs.length === 2 &&
+      iconFileInputs.every(function (el) {
+        return el.getAttribute('accept') === 'image/png,image/jpeg,image/webp';
+      }) &&
+      /144/.test(iconPaneText) && /2 MB/.test(iconPaneText) &&
+      /PNG/.test(iconPaneText) && /JPEG/.test(iconPaneText) &&
+      /WebP/.test(iconPaneText) &&
+      /square|正方形/i.test(iconPaneText) && /transparent|透明/i.test(iconPaneText),
+      'file inputs=' + iconFileInputs.length);
+
+    // 10e. icon_style saves "custom"
+    q('input[data-setting="icon_style"][data-value="custom"]').click();
+    await sleep(60);
+    check('icon style saves as custom',
+      lastSetPayload().icon_style === 'custom' &&
+      q('input[data-setting="icon_style"][data-value="custom"]').checked === true,
+      'style=' + lastSetPayload().icon_style);
+
+    // 10f. upload a PNG → save_custom_icon + refreshed preview + stored size
+    var savesBeforeUpload = count('save_custom_icon');
+    uploadIcon('collapsed', new win.File([pngBytes()], 'tiny.png', { type: 'image/png' }));
+    var uploadDone = await waitFor(function () {
+      return count('save_custom_icon') === savesBeforeUpload + 1 &&
+        !!q('[data-icon-preview="collapsed"] img');
+    });
+    var uploadEntry = last('save_custom_icon');
+    var uploadedImg = q('[data-icon-preview="collapsed"] img');
+    var uploadedSize = q('[data-icon-size="collapsed"]');
+    check('uploading a PNG invokes save_custom_icon and shows the preview',
+      uploadDone && count('save_custom_icon') === savesBeforeUpload + 1 &&
+      !!uploadEntry && uploadEntry.args.slot === 'collapsed' &&
+      /^data:image\/png;base64,/.test(uploadEntry.args.dataUrl) &&
+      !!uploadedImg &&
+      /^data:image\/png;base64,/.test(uploadedImg.getAttribute('src')) &&
+      !!uploadedSize && /PNG ·/.test(uploadedSize.textContent),
+      uploadEntry ? 'slot=' + uploadEntry.args.slot + ' size=' +
+        (uploadedSize ? uploadedSize.textContent : 'n/a') : 'no call');
+
+    // 10g. oversized files are rejected client-side before invoking
+    var savesBeforeBig = count('save_custom_icon');
+    uploadIcon('collapsed', new win.File(
+      [new win.Uint8Array(2 * 1024 * 1024 + 2048)], 'big.png', { type: 'image/png' }));
+    var bigRejected = await waitFor(function () {
+      return /2 MB|larger|超过/.test(q('#save-status').textContent);
+    }, 40);
+    await sleep(80);
+    check('oversized images are rejected client-side',
+      !!bigRejected && count('save_custom_icon') === savesBeforeBig,
+      q('#save-status').textContent);
+
+    // 10h. unsupported mime types are rejected client-side before invoking
+    var savesBeforeMime = count('save_custom_icon');
+    uploadIcon('collapsed', new win.File([pngBytes()], 'icon.gif', { type: 'image/gif' }));
+    var mimeRejected = await waitFor(function () {
+      return /PNG|JPEG|WebP|类型/.test(q('#save-status').textContent);
+    }, 40);
+    await sleep(80);
+    check('wrong mime types are rejected client-side',
+      !!mimeRejected && count('save_custom_icon') === savesBeforeMime,
+      q('#save-status').textContent);
+
+    // 10i. icons-changed updates the preview without a reload
+    T.setIcons({ collapsed: TINY_PNG_RED, hidden: null });
+    await sleep(80);
+    var eventImg = q('[data-icon-preview="collapsed"] img');
+    check('icons-changed updates the preview without a reload',
+      !!eventImg && eventImg.getAttribute('src') === TINY_PNG_RED,
+      eventImg ? eventImg.getAttribute('src').slice(0, 32) : 'no preview');
+
+    // 10j. Remove clears the stored slot and the preview
+    var clearsBefore = count('clear_custom_icon');
+    var removeBtn = q('[data-action="icon-remove-collapsed"]');
+    if (removeBtn) removeBtn.click();
+    await sleep(240);
+    var removeEntry = last('clear_custom_icon');
+    check('remove clears the custom icon and its preview',
+      !!removeBtn && count('clear_custom_icon') === clearsBefore + 1 &&
+      !!removeEntry && removeEntry.args.slot === 'collapsed' &&
+      !q('[data-icon-preview="collapsed"] img') &&
+      T.icons.collapsed === null,
+      'clears=' + (count('clear_custom_icon') - clearsBefore));
+
+    // 11. reset requires an inline confirmation (no window.confirm, no OK/Cancel)
+    T.selectGroup('general');
+    var resetsBefore = count('reset_settings');
+    q('[data-action="reset-general"]').click();
+    await sleep(40);
+    check('reset asks for an inline confirmation before writing',
+      count('reset_settings') === resetsBefore &&
+      !!q('[data-focus="confirm-cancel"]') && !!q('.confirm-bar'),
+      'resets=' + count('reset_settings'));
+
+    // 12. cancelling the confirmation writes nothing
+    q('[data-focus="confirm-cancel"]').click();
+    await sleep(40);
+    check('cancelling a reset sends nothing',
+      count('reset_settings') === resetsBefore && !q('.confirm-bar'),
+      'resets=' + count('reset_settings'));
+
+    // 13. confirming resets that section only
+    q('[data-action="reset-general"]').click();
+    await sleep(30);
+    q('[data-focus="confirm-ok"]').click();
+    await sleep(80);
+    var resetEntry = last('reset_settings');
+    check('confirming a reset resets only that section',
+      !!resetEntry && resetEntry.args.scope === 'general' &&
+      T.settings.show_summary === true && T.settings.max_visible_rows === 5,
+      resetEntry ? 'scope=' + resetEntry.args.scope : 'not called');
+
+    // 14. language switch re-renders everything, including the pane
+    q('input[data-setting="language"][data-value="zh"]').click();
+    await sleep(80);
+    check('language switch re-renders the window in Chinese',
+      doc.documentElement.lang === 'zh' &&
+      /通用/.test(q('#sidebar').textContent) &&
+      /语言/.test(q('#pane-body').textContent) &&
+      /更改会自动保存/.test(q('#save-hint').textContent),
+      'lang=' + doc.documentElement.lang);
+
+    // 15. and back
+    q('input[data-setting="language"][data-value="en"]').click();
+    await sleep(80);
+    check('switching back restores English labels',
+      doc.documentElement.lang === 'en' && /General/.test(q('#sidebar').textContent),
+      'lang=' + doc.documentElement.lang);
+
+    // 16. focus rings are defined for every control kind
+    var ringRules = [];
+    Array.prototype.forEach.call(doc.styleSheets, function (sheet) {
+      var rules;
+      try { rules = sheet.cssRules; } catch (e) { return; }
+      Array.prototype.forEach.call(rules, function (rule) {
+        if (rule.type !== 1) return;
+        var selector = rule.selectorText || '';
+        if (selector.indexOf(':focus-visible') === -1) return;
+        var style = rule.style;
+        if (style.outline || style.outlineWidth || style.boxShadow) ringRules.push(selector);
+      });
+    });
+    var ringText = ringRules.join(' ');
+    var ringKinds = ['switch', 'seg', 'slider', 'stepper', 'btn', 'nav-item'];
+    var missingRings = ringKinds.filter(function (kind) {
+      return ringText.indexOf(kind) === -1;
+    });
+    check('visible focus rings are defined for every control kind',
+      ringRules.length >= 7 && missingRings.length === 0,
+      'rules=' + ringRules.length + ' missing=' + missingRings.join(','));
+
+    // 17. bilingual dictionary parity
+    var enKeys = T.dictionaryKeys('en');
+    var zhKeys = T.dictionaryKeys('zh');
+    var missingZh = enKeys.filter(function (key) { return zhKeys.indexOf(key) === -1; });
+    check('Chinese and English dictionaries have identical keys',
+      enKeys.length === zhKeys.length && missingZh.length === 0,
+      'en=' + enKeys.length + ' zh=' + zhKeys.length);
+
+    // 18. appearance override → dark window
+    q('input[data-setting="appearance"][data-value="dark"]').click();
+    await sleep(80);
+    var scheme = win.getComputedStyle(doc.documentElement).colorScheme || '';
+    var bg = win.getComputedStyle(doc.body).backgroundColor;
+    var rgb = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(bg);
+    var darkness = rgb ? (Number(rgb[1]) + Number(rgb[2]) + Number(rgb[3])) / 3 : 255;
+    check('appearance override paints a dark, readable window',
+      doc.documentElement.getAttribute('data-appearance') === 'dark' &&
+      /dark/.test(scheme) && darkness < 90,
+      'bg=' + bg + ' scheme=' + scheme);
+
+    // 19. back to system
+    q('input[data-setting="appearance"][data-value="system"]').click();
+    await sleep(50);
+    check('appearance can return to system',
+      doc.documentElement.getAttribute('data-appearance') === 'system');
+
+    // 20. sidebar keyboard navigation + remembered section
+    var selectedNav = q('.nav-item[aria-selected="true"]');
+    key(selectedNav, 'ArrowDown');
+    await sleep(50);
+    var remembered = null;
+    try { remembered = win.localStorage.getItem('am-settings-group'); } catch (e) { /* ignore */ }
+    check('arrow keys move between sections and the choice is remembered',
+      T.group === 'monitor' &&
+      !!q('.nav-item[aria-selected="true"][data-group="monitor"]') &&
+      remembered === 'monitor',
+      'group=' + T.group + ' stored=' + remembered);
+
+    // 21. hide-to-edge off explains the menu bar fallback
+    T.selectGroup('pet');
+    q('input[data-setting="edge_hide_enabled"]').click();
+    await sleep(60);
+    var edgeDescEl = q('[data-row="edge_hide_enabled"] .row-desc');
+    var edgeDesc = edgeDescEl ? edgeDescEl.textContent : '';
+    check('turning off hide-to-edge explains the menu bar fallback',
+      q('input[data-setting="edge_hide_enabled"]').checked === false &&
+      /menu bar|菜单栏/i.test(edgeDesc), edgeDesc);
+    q('input[data-setting="edge_hide_enabled"]').click();
+    await sleep(40);
+
+    // 22. jump copy: failures always reported; undo for auto-dismiss
+    T.selectGroup('jump');
+    var jumpText = q('#pane-body').textContent;
+    check('degraded-toast setting says failures are always reported',
+      /always reported/i.test(jumpText), 'copy=' + jumpText.slice(0, 80));
+    check('auto-dismiss explains the undo toast', /undo/i.test(jumpText));
+
+    // 23. data paths come from get_settings_meta, read-only and focusable
+    T.selectGroup('data');
+    var paths = qa('.path-value');
+    var pathTexts = paths.map(function (p) { return p.textContent; });
+    check('data section lists read-only paths from get_settings_meta',
+      paths.length === 4 &&
+      paths.every(function (p) {
+        return p.tagName === 'CODE' && p.getAttribute('tabindex') === '0' &&
+          !!p.getAttribute('aria-label');
+      }) &&
+      pathTexts.some(function (t) { return /settings\.json$/.test(t); }) &&
+      !!T.meta.settings_path,
+      pathTexts.join(' | '));
+
+    // 24. open data folder
+    q('[data-action="open-data-dir"]').click();
+    await sleep(60);
+    check('open data folder invokes open_data_dir', !!last('open_data_dir'));
+
+    // 25. clear dismissed → confirmed, reports the count
+    q('[data-action="clear-dismissed"]').click();
+    await sleep(50);
+    var clearConfirmVisible = !!q('[data-focus="confirm-ok"]');
+    q('[data-focus="confirm-ok"]').click();
+    await sleep(80);
+    var clearStatus = q('#save-status').textContent;
+    check('clear dismissed is confirmed and reports the count',
+      clearConfirmVisible && !!last('clear_dismissed') && /3/.test(clearStatus),
+      'status=' + clearStatus);
+
+    // 26. escape cancels a confirmation first, closes the window second
+    q('[data-action="reset-all"]').click();
+    await sleep(50);
+    key(doc, 'Escape');
+    await sleep(50);
+    check('escape cancels an inline confirmation first',
+      !q('[data-focus="confirm-cancel"]') && !last('close_settings'),
+      'closed=' + !!last('close_settings'));
+    key(doc, 'Escape');
+    await sleep(50);
+    check('escape closes the window through close_settings', !!last('close_settings'));
+
+    // 27. every interactive control has an accessible name
+    var unnamed = [];
+    T.groups.forEach(function (group) {
+      T.selectGroup(group);
+      qa('#pane-body input, #pane-body button, #pane-body [tabindex="0"]').forEach(function (el) {
+        var name = (el.getAttribute('aria-label') || '').trim() ||
+          (el.textContent || '').trim();
+        if (!name) unnamed.push(el.outerHTML.slice(0, 90));
+      });
+    });
+    check('every interactive control has an accessible name',
+      unnamed.length === 0, unnamed.slice(0, 2).join(' | '));
+
+    // 28. external settings-changed re-renders (event-driven, no polling)
+    T.selectGroup('general');
+    var next = Object.assign({}, T.settings, { show_jump_level: false });
+    T.setSettings(next);
+    await sleep(60);
+    check('external settings-changed events re-render immediately',
+      q('input[data-setting="show_jump_level"]').checked === false);
+    T.setSettings(Object.assign({}, T.settings, { show_jump_level: true }));
+    await sleep(40);
+
+    // 29. instant save: no OK/Cancel anywhere
+    T.selectGroup('general');
+    var labels = qa('#pane-body button').map(function (b) { return b.textContent.trim(); });
+    var forbidden = labels.filter(function (l) { return /^(OK|Save|Apply|Cancel)$/i.test(l); });
+    check('no OK/Cancel buttons: changes apply instantly',
+      forbidden.length === 0 &&
+      /Changes save automatically/.test(q('#save-hint').textContent),
+      'buttons=' + labels.join(','));
+  } catch (e) {
+    check('selftest crashed', false, String(e && e.stack ? e.stack : e));
+  }
+  finish();
+});
+
+function finish() {
+  if (finished) return;
+  finished = true;
+  var summary = (failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)') +
+    '\n' + results.join('\n');
+  document.getElementById('results').textContent = summary;
+  document.title = 'SELFTEST ' + (failures === 0 ? 'PASS' : 'FAIL');
+}
+
+setTimeout(function () {
+  if (finished) return;
+  check('selftest completed before the watchdog timeout', false, 'iframe never booted');
+  finish();
+}, 9000);
+</script>
+</body></html>

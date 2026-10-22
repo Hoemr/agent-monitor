@@ -1,0 +1,143 @@
+{
+  "label": "cur-expanded",
+  "mode": "expanded",
+  "empty_snapshot": false,
+  "duration_s": 120.4,
+  "samples": 24,
+  "cpu_mean_pct": 0.141,
+  "cpu_p95_pct": 0.199,
+  "cpu_max_pct": 0.2,
+  "rss_start_mb": 106.53,
+  "rss_end_mb": 102.92,
+  "rss_growth_mb": -3.61,
+  "environment": {
+    "os": "27.0.1",
+    "arch": "arm64",
+    "binary": "src-tauri/target/release/agent-monitor",
+    "profile": "release"
+  },
+  "samples_detail": [
+    {
+      "t_s": 5.0,
+      "cpu_pct": 0.199,
+      "rss_mb": 106.53
+    },
+    {
+      "t_s": 10.0,
+      "cpu_pct": 0.199,
+      "rss_mb": 106.48
+    },
+    {
+      "t_s": 15.1,
+      "cpu_pct": 0.199,
+      "rss_mb": 106.64
+    },
+    {
+      "t_s": 20.1,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.55
+    },
+    {
+      "t_s": 25.1,
+      "cpu_pct": 0.0,
+      "rss_mb": 102.55
+    },
+    {
+      "t_s": 30.1,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.55
+    },
+    {
+      "t_s": 35.1,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.55
+    },
+    {
+      "t_s": 40.1,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 45.2,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 50.2,
+      "cpu_pct": 0.0,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 55.2,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 60.2,
+      "cpu_pct": 0.0,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 65.2,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 70.2,
+      "cpu_pct": 0.0,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 75.3,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 80.3,
+      "cpu_pct": 0.2,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 85.3,
+      "cpu_pct": 0.0,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 90.3,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 95.3,
+      "cpu_pct": 0.0,
+      "rss_mb": 102.89
+    },
+    {
+      "t_s": 100.3,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.92
+    },
+    {
+      "t_s": 105.4,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.92
+    },
+    {
+      "t_s": 110.4,
+      "cpu_pct": 0.0,
+      "rss_mb": 102.92
+    },
+    {
+      "t_s": 115.4,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.92
+    },
+    {
+      "t_s": 120.4,
+      "cpu_pct": 0.199,
+      "rss_mb": 102.92
+    }
+  ],
+  "valid": true,
+  "log": "/tmp/am-perf-cur-expanded.log"
+}

@@ -4,7 +4,8 @@
 //! [`TaskRecord`] model. The monitor knows nothing about Codex/DSH/ZCode
 //! specifics; the UI never branches on agent names.
 
-use crate::model::{AgentDescriptor, TaskRecord};
+use crate::model::{AgentDescriptor, TaskRecord, TaskStatus};
+use crate::settings::EnabledAgents;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -71,17 +72,22 @@ impl ProcessTable {
 }
 
 /// Per-scan context shared by all adapters.
+///
+/// `retention_secs` is injected from [`crate::settings::Settings::retention_secs`]
+/// on every scan; adapters must never hard-code their own window.
 #[derive(Clone, Debug)]
 pub struct ScanCtx {
     pub now_secs: u64,
     pub processes: Arc<ProcessTable>,
+    pub retention_secs: u64,
 }
 
 impl ScanCtx {
-    pub fn new(now_secs: u64, processes: Arc<ProcessTable>) -> Self {
+    pub fn new(now_secs: u64, processes: Arc<ProcessTable>, retention_secs: u64) -> Self {
         Self {
             now_secs,
             processes,
+            retention_secs,
         }
     }
 }
@@ -97,14 +103,43 @@ pub trait Source: Send {
     fn invalidate(&mut self) {}
 }
 
-/// Builds the production registry. Order defines the UI's tie-break order.
-pub fn build_registry() -> Vec<Box<dyn Source>> {
-    vec![
-        Box::new(claude_code::ClaudeCodeSource::new()),
-        Box::new(codex::CodexSource::new()),
-        Box::new(dsh::DshSource::new()),
-        Box::new(zcode::ZCodeSource::new()),
-    ]
+/// Builds the production registry from the user's per-agent switches.
+/// Order defines the UI's tie-break order and must stay stable.
+pub fn build_registry(enabled: &EnabledAgents) -> Vec<Box<dyn Source>> {
+    let mut sources: Vec<Box<dyn Source>> = Vec::new();
+    if enabled.claude_code {
+        sources.push(Box::new(claude_code::ClaudeCodeSource::new()));
+    }
+    if enabled.codex {
+        sources.push(Box::new(codex::CodexSource::new()));
+    }
+    if enabled.dsh {
+        sources.push(Box::new(dsh::DshSource::new()));
+    }
+    if enabled.zcode {
+        sources.push(Box::new(zcode::ZCodeSource::new()));
+    }
+    sources
+}
+
+/// Shared retention rule: work the user may still be waiting on is always kept,
+/// no matter how old its last event is. Everything finished (completed, failed,
+/// idle, unknown) is shown only while `now - activity <= retention`.
+///
+/// The boundary is inclusive so "retention = 6 h" keeps a task whose last
+/// activity was exactly 6 h ago.
+pub fn retention_keeps(
+    status: TaskStatus,
+    activity_secs: u64,
+    now_secs: u64,
+    retention_secs: u64,
+) -> bool {
+    match status {
+        // Active states must never disappear because of an age threshold: the
+        // user may be about to act on exactly those rows.
+        TaskStatus::Running | TaskStatus::WaitingInput | TaskStatus::WaitingApproval => true,
+        _ => activity_secs >= now_secs.saturating_sub(retention_secs),
+    }
 }
 
 // ── Shared helpers ──────────────────────────────────────────────
@@ -210,5 +245,88 @@ mod tests {
             a.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
             b.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn registry_reflects_enabled_agents_and_keeps_stable_order() {
+        let keys = |enabled: &EnabledAgents| {
+            build_registry(enabled)
+                .iter()
+                .map(|s| s.descriptor().key)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&EnabledAgents::default()), vec!["claude-code", "codex", "dsh", "zcode"]);
+        assert_eq!(
+            keys(&EnabledAgents {
+                codex: false,
+                dsh: false,
+                ..Default::default()
+            }),
+            vec!["claude-code", "zcode"]
+        );
+        assert_eq!(
+            keys(&EnabledAgents {
+                codex: false,
+                claude_code: false,
+                ..Default::default()
+            }),
+            vec!["dsh", "zcode"]
+        );
+        assert!(build_registry(&EnabledAgents {
+            codex: false,
+            dsh: false,
+            zcode: false,
+            claude_code: false,
+        })
+        .is_empty());
+    }
+
+    #[test]
+    fn scan_ctx_carries_the_injected_retention_window() {
+        let ctx = ScanCtx::new(1_000, Arc::new(ProcessTable::default()), 42);
+        assert_eq!(ctx.now_secs, 1_000);
+        assert_eq!(ctx.retention_secs, 42);
+        assert!(ctx.processes.entries.is_empty());
+    }
+
+    #[test]
+    fn retention_always_keeps_active_statuses_regardless_of_age() {
+        let now = 1_000_000;
+        for status in [
+            TaskStatus::Running,
+            TaskStatus::WaitingInput,
+            TaskStatus::WaitingApproval,
+        ] {
+            assert!(retention_keeps(status, 0, now, 3_600), "{status:?} must be exempt");
+            assert!(
+                retention_keeps(status, now - 10 * 3_600, now, 3_600),
+                "{status:?} must be exempt even far outside the window"
+            );
+        }
+    }
+
+    #[test]
+    fn retention_drops_finished_work_outside_the_window_inclusive_boundary() {
+        let now = 1_000_000;
+        let window = 6 * 3_600;
+        for status in [
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Idle,
+            TaskStatus::Unknown,
+        ] {
+            assert!(
+                retention_keeps(status, now - window, now, window),
+                "{status:?} at the boundary stays"
+            );
+            assert!(retention_keeps(status, now - 60, now, window));
+            assert!(
+                !retention_keeps(status, now - window - 1, now, window),
+                "{status:?} one second past the window is dropped"
+            );
+            assert!(!retention_keeps(status, 0, now, 3_600));
+        }
+        // Very large windows must not overflow or flip to "keep nothing".
+        assert!(retention_keeps(TaskStatus::Completed, 0, now, u64::MAX));
     }
 }

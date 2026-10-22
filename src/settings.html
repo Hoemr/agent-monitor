@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <div id="app">
+    <nav id="sidebar" role="tablist" aria-orientation="vertical"></nav>
+
+    <main id="content" role="tabpanel" aria-labelledby="pane-title">
+      <div id="pane-scroll">
+        <h1 id="pane-title" class="pane-title"></h1>
+        <div id="pane-body">
+          <div class="loading" id="loading">Loading…</div>
+        </div>
+      </div>
+      <footer id="save-bar">
+        <span id="save-hint"></span>
+        <span id="save-status" role="status" aria-live="polite" hidden></span>
+      </footer>
+    </main>
+  </div>
+  <script src="settings.js"></script>
+</body>
+</html>

@@ -15,11 +15,65 @@ function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 function fire(win, el, type, init) {
   el.dispatchEvent(new win.MouseEvent(type, Object.assign({ bubbles: true, cancelable: true, view: win }, init || {})));
 }
+function rgbaParts(value) {
+  var match = /rgba?\(([^)]+)\)/.exec(value || '');
+  if (!match) return null;
+  var parts = match[1].split(/[, ]+/).filter(Boolean).map(Number);
+  if (parts.length < 3 || parts.some(function (n) { return isNaN(n); })) return null;
+  return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+}
+function tokenColor(win, doc, name) {
+  var probe = doc.createElement('span');
+  probe.style.color = 'var(' + name + ')';
+  doc.body.appendChild(probe);
+  var value = win.getComputedStyle(probe).color;
+  probe.remove();
+  return rgbaParts(value);
+}
+function fixture() {
+  var now = Math.floor(Date.now() / 1000);
+  return {
+    collected_at_secs: now, attention_count: 1, agents: [],
+    tasks: [
+      { id: 'fx:valid', agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+        title: 'Valid jump target', status: 'running', status_reason: 'fixture',
+        last_activity_secs: now - 10, collected_at_secs: now, summary: 'summary text',
+        origin: 'index', target: {}, target_validity: 'valid', invalid_reason: null,
+        capability: { max_level: 'L3', notes: '', requires: [] }, level: 'L3', pinned: false },
+      { id: 'fx:invalid', agent_key: 'dsh', agent_name: 'DSH', host: 'desktop',
+        title: 'Invalid jump target', status: 'failed', status_reason: 'fixture',
+        last_activity_secs: now - 20, collected_at_secs: now, summary: 'boom',
+        origin: 'cache', target: {}, target_validity: 'invalid',
+        invalid_reason: 'workspace_missing',
+        capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L0', pinned: false }
+    ]
+  };
+}
+function completedOnly(activitySecs) {
+  return {
+    collected_at_secs: activitySecs, attention_count: 0, agents: [],
+    tasks: [{
+      id: 'new:1', agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+      title: 'Freshly completed task', status: 'completed', status_reason: 'fixture',
+      last_activity_secs: activitySecs, collected_at_secs: activitySecs,
+      summary: 'done', origin: 'event', target: {}, target_validity: 'valid',
+      invalid_reason: null, capability: { max_level: 'L3', notes: '', requires: [] },
+      level: 'L3', pinned: false
+    }]
+  };
+}
 var frame = document.getElementById('frame');
 frame.addEventListener('load', async function () {
   try {
     var win = frame.contentWindow;
     var doc = win.document;
+    var runtimeErrors = [];
+    win.addEventListener('error', function (event) {
+      runtimeErrors.push(String(event.message || event.error || 'error'));
+    });
+    win.addEventListener('unhandledrejection', function (event) {
+      runtimeErrors.push('rejection: ' + String(event.reason));
+    });
     await sleep(120);
     var T = win.__AM_TEST__;
     check('mock hooks present', !!T);
@@ -142,9 +196,430 @@ frame.addEventListener('load', async function () {
     check('degraded jump shows feedback', toast.hidden === false, toast.textContent.trim().slice(0, 40));
     check('degraded jump still counts one jump', T.jumpCalls.length === beforeToast + 1);
 
+    // 12b. collapsed size is applied through the CSS variable Rust resizes with
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    T.setSettings({ collapsed_size: 48 });
+    await sleep(30);
+    var sizeVar = win.getComputedStyle(doc.documentElement).getPropertyValue('--collapsed-size').trim();
+    var petBox = doc.getElementById('pet').getBoundingClientRect();
+    check('collapsed size setting drives the pet box', sizeVar === '48px' && Math.round(petBox.width) === 48,
+      'var=' + sizeVar + ' w=' + Math.round(petBox.width));
+    T.setSettings({ collapsed_size: 72 });
+
+    // 12c. hide-after-snapping fires once after the configured idle time
+    var hidesBefore = T.hidePetCalls;
+    T.setSettings({ auto_hide_after_s: 1 });
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(1200);
+    check('hide after snapping fires once when idle on an edge',
+      T.hidePetCalls - hidesBefore === 1, 'hides=' + (T.hidePetCalls - hidesBefore));
+    T.setSettings({ auto_hide_after_s: 0 });
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(1150);
+    check('auto-hide Off never hides the pet',
+      T.hidePetCalls - hidesBefore === 1, 'hides=' + (T.hidePetCalls - hidesBefore));
+
+    // 12d. explicit click expansion asks for window focus; hover never does
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(20);
+    var expandBefore = T.expandCalls.length;
+    fire(win, doc.getElementById('pet'), 'click');
+    await sleep(40);
+    check('click expansion asks for window focus',
+      T.expandCalls.length === expandBefore + 1 &&
+      T.expandCalls[T.expandCalls.length - 1] === true,
+      'focus=' + T.expandCalls[T.expandCalls.length - 1]);
+    T.applyPetState({ mode: 'collapsed' });
+    await sleep(20);
+    fire(win, app, 'mouseenter');
+    await sleep(240);
+    check('hover expansion never focuses the pet',
+      T.expandCalls[T.expandCalls.length - 1] === false,
+      'focus=' + T.expandCalls[T.expandCalls.length - 1]);
+
+    // 12e. clicking elsewhere (window blur) dismisses the expanded popover
+    T.applyPetState({ mode: 'expanded' });
+    var collapseBefore = T.collapseCalls;
+    win.dispatchEvent(new win.Event('blur'));
+    await sleep(40);
+    check('outside click (blur) collapses the popover immediately',
+      T.petState.mode === 'collapsed' && T.collapseCalls === collapseBefore + 1,
+      'mode=' + T.petState.mode + ' collapses=' + (T.collapseCalls - collapseBefore));
+
+    // 12f. mouse leave always collapses after the delay (no permanent suppress)
+    T.setSettings({ collapse_delay_ms: 300 });
+    T.applyPetState({ mode: 'expanded' });
+    var leaveBefore = T.collapseCalls;
+    fire(win, app, 'mouseleave');
+    await sleep(1200);
+    check('mouse leave always collapses after the delay',
+      T.collapseCalls === leaveBefore + 1 && T.petState.mode === 'collapsed',
+      'mode=' + T.petState.mode + ' collapses=' + (T.collapseCalls - leaveBefore));
+    T.setSettings({ collapse_delay_ms: 800 });
+
     // 13. bilingual dictionary completeness for statuses
     var zh = T.languages.indexOf('zh') !== -1;
     check('bilingual dictionaries present', zh);
+
+    // ── Settings integration (new in the settings phase) ─────────────
+    T.hideToast();
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(20);
+
+    // 14. footer gear opens settings exactly once
+    var gear = doc.getElementById('settings-btn');
+    check('footer gear button present', !!gear && gear.tagName === 'BUTTON' && !!gear.querySelector('svg'));
+    var openBefore = T.openSettingsCalls;
+    fire(win, gear, 'click');
+    await sleep(20);
+    check('gear opens settings exactly once', T.openSettingsCalls === openBefore + 1,
+      'calls=' + (T.openSettingsCalls - openBefore));
+
+    // 15. Cmd+, opens settings and is prevented from bubbling to the webview
+    var openBefore2 = T.openSettingsCalls;
+    var shortcut = new win.KeyboardEvent('keydown', {
+      key: ',', metaKey: true, bubbles: true, cancelable: true
+    });
+    doc.dispatchEvent(shortcut);
+    await sleep(20);
+    check('Cmd+, opens settings', T.openSettingsCalls === openBefore2 + 1 && shortcut.defaultPrevented,
+      'calls=' + (T.openSettingsCalls - openBefore2) + ' prevented=' + shortcut.defaultPrevented);
+
+    // 16. settings-changed applies language + row count live (no reload)
+    await T.setSettings({ language: 'zh', max_visible_rows: 3 });
+    await sleep(30);
+    var listEl = doc.getElementById('list');
+    var panelEl = doc.getElementById('panel');
+    check('settings event switches language',
+      doc.documentElement.lang.indexOf('zh') === 0 && app.getAttribute('data-lang') === 'zh',
+      doc.documentElement.lang + '/' + app.getAttribute('data-lang'));
+    check('settings event updates rows to 3',
+      listEl.style.maxHeight === '192px' && Math.round(panelEl.getBoundingClientRect().height) === 262,
+      listEl.style.maxHeight + ' h=' + panelEl.getBoundingClientRect().height);
+    await T.setSettings({ language: 'en', max_visible_rows: 5 });
+    await sleep(20);
+
+    // 17. summary / jump-level visibility flags
+    T.setMockSnapshot(fixture());
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(20);
+    check('summary visible by default', doc.querySelectorAll('.status-summary').length === 2,
+      'n=' + doc.querySelectorAll('.status-summary').length);
+    await T.setSettings({ show_summary: false });
+    await sleep(20);
+    check('show_summary=false hides summary', doc.querySelectorAll('.status-summary').length === 0,
+      'n=' + doc.querySelectorAll('.status-summary').length);
+    await T.setSettings({ show_summary: true });
+    await sleep(20);
+    await T.setSettings({ show_jump_level: false });
+    await sleep(20);
+    check('show_jump_level=false hides level', doc.querySelectorAll('.level').length === 0,
+      'n=' + doc.querySelectorAll('.level').length);
+    await T.setSettings({ show_jump_level: true });
+    await sleep(20);
+
+    // 18. animations=off removes transitions
+    T.applyPetState({ mode: 'collapsed' });
+    await T.setSettings({ animations: 'off' });
+    await sleep(20);
+    var duration = win.getComputedStyle(doc.getElementById('pet')).transitionDuration;
+    check('animations=off removes transitions',
+      doc.documentElement.getAttribute('data-animations') === 'off' && duration === '0s',
+      'dur=' + duration);
+    await T.setSettings({ animations: 'system' });
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(20);
+
+    // 19. toast_on_degraded=false silences only degraded/unconfirmed notices
+    T.setMockSnapshot(fixture());
+    await T.setSettings({ toast_on_degraded: false, auto_dismiss_invalid: false });
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(20);
+    T.hideToast();
+    fire(win, doc.querySelector('[data-task-id="fx:valid"]'), 'click');
+    await sleep(40);
+    check('toast_on_degraded=false suppresses degraded toast', toast.hidden === true,
+      'hidden=' + toast.hidden);
+    fire(win, doc.querySelector('[data-task-id="fx:invalid"]'), 'click');
+    await sleep(40);
+    check('failure toast still shows', toast.hidden === false && toast.classList.contains('error'),
+      'hidden=' + toast.hidden + ' class=' + toast.className);
+    T.hideToast();
+    await T.setSettings({ toast_on_degraded: true });
+
+    // 20. auto_dismiss_invalid dismisses invalid targets and offers Undo
+    T.setMockSnapshot(fixture());
+    await T.setSettings({ auto_dismiss_invalid: true });
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(20);
+    var autoCountBefore = T.snapshot.tasks.length;
+    fire(win, doc.querySelector('[data-task-id="fx:invalid"]'), 'click');
+    await sleep(60);
+    var stillThere = T.snapshot.tasks.some(function (task) { return task.id === 'fx:invalid'; });
+    check('auto_dismiss_invalid dismisses the task',
+      T.snapshot.tasks.length === autoCountBefore - 1 && !stillThere,
+      'n=' + T.snapshot.tasks.length + ' still=' + stillThere);
+    var undoBtn = doc.getElementById('toast-action');
+    check('auto-dismiss toast offers Undo',
+      toast.hidden === false && undoBtn.hidden === false && /撤销|Undo/.test(undoBtn.textContent),
+      'hidden=' + toast.hidden + ' action=' + undoBtn.textContent);
+    fire(win, undoBtn, 'click');
+    await sleep(60);
+    var restored = T.snapshot.tasks.some(function (task) { return task.id === 'fx:invalid'; });
+    check('Undo restores the dismissed task',
+      T.restoreCalls.indexOf('fx:invalid') !== -1 && restored && toast.hidden === true,
+      'restoreCalls=' + T.restoreCalls.join(',') + ' restored=' + restored + ' toastHidden=' + toast.hidden);
+
+    // ── New-completion badge, custom icons, edge-hidden tab (new) ────
+    await T.setSettings({
+      auto_dismiss_invalid: false, new_badge: true, icon_style: 'builtin',
+      language: 'en'
+    });
+    var newBadge = doc.getElementById('new-badge');
+    var headerNew = doc.getElementById('header-new');
+    var petIcon = doc.getElementById('pet-icon');
+    var glyph = doc.querySelector('.pet-glyph');
+    var pet = doc.getElementById('pet');
+
+    // 21. seenAtSecs only advances while the panel is open
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(30);
+    var seenWhileOpen = T.seenAtSecs;
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(1100); // cross a one-second boundary past the baseline
+    var completedAt = Math.floor(Date.now() / 1000);
+    T.setMockSnapshot(completedOnly(completedAt));
+    await sleep(30);
+    check('new completion shows on the collapsed pet',
+      newBadge.hidden === false && newBadge.textContent === '1' &&
+      T.petState.mode === 'collapsed' && T.seenAtSecs === seenWhileOpen,
+      'hidden=' + newBadge.hidden + ' n=' + newBadge.textContent +
+      ' seen=' + T.seenAtSecs + '/' + seenWhileOpen);
+    check('collapsed aria-label mentions new completions',
+      /newly completed|个新完成/.test(pet.getAttribute('aria-label') || ''),
+      pet.getAttribute('aria-label'));
+
+    // 21b. the badge is a quiet unfilled ring, not a solid green blob
+    var nbStyle = win.getComputedStyle(newBadge);
+    var nbBg = rgbaParts(nbStyle.backgroundColor);
+    var nbBorder = rgbaParts(nbStyle.borderTopColor);
+    var nbColor = rgbaParts(nbStyle.color);
+    var nbRect = newBadge.getBoundingClientRect();
+    check('new-completion badge is an unfilled green ring',
+      newBadge.hidden === false &&
+      Math.round(nbRect.width) === 16 && Math.round(nbRect.height) === 16 &&
+      nbStyle.borderTopWidth === '1px' && nbStyle.borderTopStyle === 'solid' &&
+      !!nbBorder && nbBorder.g > nbBorder.r && nbBorder.g > nbBorder.b &&
+      (!nbBg || nbBg.a <= 0.08) &&
+      !!nbColor && nbColor.g > nbColor.r && nbColor.g > nbColor.b &&
+      nbStyle.fontVariantNumeric.indexOf('tabular-nums') !== -1,
+      'size=' + Math.round(nbRect.width) + 'x' + Math.round(nbRect.height) +
+      ' bg=' + nbStyle.backgroundColor + ' border=' + nbStyle.borderTopWidth + ' ' +
+      nbStyle.borderTopColor + ' color=' + nbStyle.color);
+
+    // 22. expanding acknowledges the batch: badge resets, header chip shows it
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(30);
+    check('expanding resets the new badge to 0',
+      newBadge.hidden === true && newBadge.textContent === '0',
+      'hidden=' + newBadge.hidden + ' n=' + newBadge.textContent);
+    check('header chip announces the revealed completions',
+      headerNew.hidden === false && /^1 (new|个新完成)$/.test(headerNew.textContent.trim()),
+      'hidden=' + headerNew.hidden + ' text=' + headerNew.textContent);
+
+    // 23. new_badge=false hides the indicator, re-enabling brings it back
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    var futureAt = Math.floor(Date.now() / 1000) + 5;
+    T.setMockSnapshot(completedOnly(futureAt));
+    await sleep(20);
+    var badgeWasVisible = newBadge.hidden === false && newBadge.textContent === '1';
+    await T.setSettings({ new_badge: false });
+    await sleep(20);
+    check('new_badge=false hides the indicator',
+      badgeWasVisible && newBadge.hidden === true,
+      'before=' + badgeWasVisible + ' hidden=' + newBadge.hidden);
+    await T.setSettings({ new_badge: true });
+    await sleep(20);
+    check('new_badge=true restores the indicator',
+      newBadge.hidden === false && newBadge.textContent === '1',
+      'hidden=' + newBadge.hidden + ' n=' + newBadge.textContent);
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    T.setMockSnapshot(fixture());
+    await sleep(20);
+
+    // 24. custom icon slots loaded from Rust replace the glyph
+    check('custom icons are loaded from get_custom_icons',
+      !!T.customIcons && /^data:image\//.test(T.customIcons.collapsed || ''),
+      'slot=' + String(T.customIcons && T.customIcons.collapsed).slice(0, 22));
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await T.setSettings({ icon_style: 'custom' });
+    await sleep(30);
+    check('custom icon replaces the built-in glyph',
+      petIcon.hidden === false && /^data:image\//.test(petIcon.getAttribute('src') || '') &&
+      glyph.hidden === true && win.getComputedStyle(glyph).display === 'none',
+      'iconHidden=' + petIcon.hidden + ' glyphHidden=' + glyph.hidden +
+      ' glyphDisplay=' + win.getComputedStyle(glyph).display);
+    await T.setSettings({ icon_style: 'builtin' });
+    await sleep(20);
+    check('builtin icon style restores the glyph',
+      petIcon.hidden === true && glyph.hidden === false &&
+      win.getComputedStyle(glyph).display !== 'none',
+      'iconHidden=' + petIcon.hidden + ' glyphHidden=' + glyph.hidden +
+      ' glyphDisplay=' + win.getComputedStyle(glyph).display);
+
+    // 25. icons-changed re-applies; the tab prefers the hidden slot
+    var altIcon = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    var hiddenIcon = 'data:image/svg+xml;base64,' + win.btoa(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14">' +
+      '<rect width="14" height="14" fill="#30d158"/></svg>');
+    await T.setSettings({ icon_style: 'custom' });
+    await sleep(20);
+    T.emitIconsChanged({ collapsed: altIcon, hidden: hiddenIcon });
+    await sleep(30);
+    check('icons-changed event re-applies the image',
+      petIcon.hidden === false && petIcon.getAttribute('src') === altIcon,
+      'src=' + String(petIcon.getAttribute('src')).slice(0, 24));
+
+    // 26. edge-hidden tab: hidden_sliver square, 2×8 grip, nub rules
+    T.setMockSnapshot({ collected_at_secs: 0, attention_count: 0, agents: [], tasks: [] });
+    await T.setSettings({ icon_style: 'builtin' });
+    T.applyPetState({ mode: 'edge_hidden', edge: 'right' });
+    await sleep(30);
+    var appBox = doc.getElementById('app').getBoundingClientRect();
+    check('edge-hidden window is a hidden_sliver square',
+      Math.round(appBox.width) === 14 && Math.round(appBox.height) === 14,
+      Math.round(appBox.width) + 'x' + Math.round(appBox.height));
+    var nubRules = false;
+    try {
+      var sheets = doc.styleSheets;
+      for (var si = 0; si < sheets.length && !nubRules; si++) {
+        var rules = sheets[si].cssRules || [];
+        for (var ri = 0; ri < rules.length; ri++) {
+          var selector = rules[ri].selectorText || '';
+          if (selector.indexOf('mode-edge_hidden') !== -1 &&
+              (selector.indexOf('.pet-grip') !== -1 || selector.indexOf('#new-badge') !== -1)) {
+            nubRules = true;
+            break;
+          }
+        }
+      }
+    } catch (e) { nubRules = false; }
+    var gripStyle = win.getComputedStyle(doc.querySelector('.pet-grip'));
+    var gripRect = doc.querySelector('.pet-grip').getBoundingClientRect();
+    check('edge-hidden tab has dedicated nub rules',
+      nubRules && gripStyle.display === 'block' &&
+      Math.round(gripRect.width) === 2 && Math.round(gripRect.height) === 8,
+      'cssom=' + nubRules + ' grip=' + gripStyle.display + ' ' +
+      Math.round(gripRect.width) + 'x' + Math.round(gripRect.height));
+
+    // 27. custom artwork on the tab: prefer the hidden slot, badge becomes a dot
+    await T.setSettings({ icon_style: 'custom' });
+    await sleep(20);
+    check('edge-hidden tab prefers the hidden icon slot',
+      petIcon.hidden === false && petIcon.getAttribute('src') === hiddenIcon,
+      'src=' + String(petIcon.getAttribute('src')).slice(0, 24));
+    var hiddenCompletedAt = Math.floor(Date.now() / 1000) + 5;
+    T.setMockSnapshot(completedOnly(hiddenCompletedAt));
+    await sleep(30);
+    var dotStyle = win.getComputedStyle(newBadge);
+    var dotBg = rgbaParts(dotStyle.backgroundColor);
+    check('edge-hidden new badge is a filled 6 px dot',
+      newBadge.hidden === false && newBadge.classList.contains('dot') &&
+      Math.round(parseFloat(dotStyle.width)) === 6 &&
+      Math.round(parseFloat(dotStyle.height)) === 6 &&
+      !!dotBg && dotBg.a > 0.9 && dotBg.g > dotBg.r && dotBg.g > dotBg.b,
+      'hidden=' + newBadge.hidden + ' class=' + newBadge.className +
+      ' ' + dotStyle.width + 'x' + dotStyle.height + ' bg=' + dotStyle.backgroundColor);
+
+    // ── Notice: toast only while expanded, dot while collapsed ──────
+    T.clearNotice();
+    await T.setSettings({ auto_dismiss_invalid: false, toast_on_degraded: true, language: 'en' });
+    T.setMockSnapshot(fixture());
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(30);
+    fire(win, doc.querySelector('[data-task-id="fx:valid"]'), 'click');
+    await sleep(40);
+    check('degraded jump while expanded shows the toast',
+      toast.hidden === false && !!T.notice && T.notice.surface === 'toast',
+      'toastHidden=' + toast.hidden + ' surface=' + (T.notice && T.notice.surface));
+
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(20);
+    var noticeDot = doc.getElementById('notice-dot');
+    check('collapsing suppresses the toast and shows a notice dot',
+      toast.hidden === true && win.getComputedStyle(toast).display === 'none' &&
+      noticeDot.hidden === false && !!T.notice && T.notice.surface === 'dot',
+      'toast=' + win.getComputedStyle(toast).display + ' dotHidden=' + noticeDot.hidden +
+      ' surface=' + (T.notice && T.notice.surface));
+    check('collapsed pet announces the pending notice',
+      /Opened the window/.test(pet.getAttribute('aria-label') || '') &&
+      /Opened the window/.test(pet.getAttribute('title') || ''),
+      'aria=' + pet.getAttribute('aria-label') + ' title=' + pet.getAttribute('title'));
+    var warnBg = rgbaParts(win.getComputedStyle(noticeDot).backgroundColor);
+    var warnToken = tokenColor(win, doc, '--status-waiting');
+    check('notice dot colour follows the warn kind',
+      noticeDot.className.indexOf('warn') !== -1 &&
+      !!warnBg && !!warnToken && warnBg.r === warnToken.r &&
+      warnBg.g === warnToken.g && warnBg.b === warnToken.b,
+      'class=' + noticeDot.className + ' dot=' +
+      win.getComputedStyle(noticeDot).backgroundColor);
+
+    // An error notice with an action survives the collapse and comes back.
+    T.clearNotice();
+    await T.setSettings({ auto_dismiss_invalid: true });
+    T.setMockSnapshot(fixture());
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(20);
+    fire(win, doc.querySelector('[data-task-id="fx:invalid"]'), 'click');
+    await sleep(60);
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(20);
+    var errorBg = rgbaParts(win.getComputedStyle(noticeDot).backgroundColor);
+    var errorToken = tokenColor(win, doc, '--status-failed');
+    check('notice dot colour follows the error kind',
+      noticeDot.className.indexOf('error') !== -1 &&
+      !!errorBg && !!errorToken && errorBg.r === errorToken.r &&
+      errorBg.g === errorToken.g && errorBg.b === errorToken.b,
+      'class=' + noticeDot.className + ' dot=' +
+      win.getComputedStyle(noticeDot).backgroundColor);
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(20);
+    var undoAction = doc.getElementById('toast-action');
+    check('expanding restores the toast and its action',
+      toast.hidden === false && !!T.notice && T.notice.surface === 'toast' &&
+      undoAction.hidden === false && /撤销|Undo/.test(undoAction.textContent) &&
+      /workspace|工作区/.test(toast.textContent),
+      'toastHidden=' + toast.hidden + ' action=' + undoAction.textContent +
+      ' text=' + toast.textContent.slice(0, 40));
+    T.clearNotice();
+    await T.setSettings({ auto_dismiss_invalid: false });
+
+    // A deliberately short collapsed lifetime proves the dot is event-driven.
+    T.setMockSnapshot(fixture());
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(20);
+    T.setNoticeExpiry({ collapsed: 150 });
+    fire(win, doc.querySelector('[data-task-id="fx:valid"]'), 'click');
+    await sleep(40);
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(20);
+    check('notice dot stays alive while collapsed',
+      noticeDot.hidden === false && !!T.notice && T.notice.surface === 'dot',
+      'dotHidden=' + noticeDot.hidden + ' surface=' + (T.notice && T.notice.surface));
+    await sleep(320);
+    check('notice expires and clears the dot',
+      noticeDot.hidden === true && T.notice === null && toast.hidden === true,
+      'dotHidden=' + noticeDot.hidden + ' notice=' + JSON.stringify(T.notice));
+    T.setNoticeExpiry({ expanded: 4200, collapsed: 30000 });
+
+    // Restore a normal state for the final error check.
+    T.applyPetState({ mode: 'collapsed', edge: 'none' });
+    await T.setSettings({ icon_style: 'builtin', new_badge: true });
+    T.setMockSnapshot(fixture());
+    await sleep(20);
+
+    // 28. no runtime errors in the mock path
+    check('no runtime errors in mock', runtimeErrors.length === 0, runtimeErrors.join(' | '));
   } catch (e) {
     check('selftest crashed', false, String(e && e.stack ? e.stack : e));
   }
