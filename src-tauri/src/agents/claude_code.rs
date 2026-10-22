@@ -642,7 +642,7 @@ fn to_record(session: &Session, file_mtime: u64, ctx: &ScanCtx) -> TaskRecord {
         invalid_reason: None,
         capability: JumpCapability {
             max_level: JumpLevel::L2,
-            notes: "VSCode window by workspace; the extension exposes no verified session URI"
+            notes: "VSCode project-precise window focus via `code --reuse-window <workspace>`; the extension exposes no verified session URI"
                 .into(),
             requires: vec![PermissionKind::Automation],
         },
@@ -667,7 +667,7 @@ impl Source for ClaudeCodeSource {
             source: "~/.claude/projects/**/*.jsonl + file-history + ide/*.lock".into(),
             origin: DataOrigin::Event,
             max_level: JumpLevel::L2,
-            notes: "VSCode extension host (anthropic.claude-code); window-level jump by workspace."
+            notes: "VSCode extension host (anthropic.claude-code); project-precise window focus via the code CLI, AX raise fallback."
                 .into(),
         }
     }

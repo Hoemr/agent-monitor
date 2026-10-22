@@ -14,6 +14,18 @@ fn main() {
         agent_monitor::dump_jump_diagnostics();
         return;
     }
+    if let Some(pos) = args.iter().position(|a| a == "--ax-rows") {
+        match args.get(pos + 1).and_then(|pid| pid.parse::<u32>().ok()) {
+            Some(pid) => {
+                agent_monitor::dump_ax_rows(pid);
+                return;
+            }
+            None => {
+                eprintln!("usage: agent-monitor --ax-rows <pid>");
+                return;
+            }
+        }
+    }
     if let Some(pos) = args.iter().position(|a| a == "--jump") {
         if let Some(id) = args.get(pos + 1) {
             agent_monitor::jump_task(id);

@@ -9,6 +9,7 @@
 //!   * this file   — Tauri window/tray/command plumbing only
 
 pub mod agents;
+pub mod ax;
 pub mod icons;
 pub mod jump;
 pub mod model;
@@ -1595,6 +1596,31 @@ pub fn dump_jump_diagnostics() {
     match serde_json::to_string_pretty(&jump::collect_jump_diagnostics()) {
         Ok(json) => println!("{json}"),
         Err(e) => eprintln!("failed to serialise jump diagnostics: {e}"),
+    }
+}
+
+/// `agent-monitor --ax-rows <pid>`: read-only dump of the AX sidebar rows of a
+/// process (texts + global screen frames) as JSON. Lets jump/DSH work be
+/// verified without clicking anything.
+pub fn dump_ax_rows(pid: u32) {
+    #[derive(serde::Serialize)]
+    struct AxRowsDump {
+        pid: u32,
+        trusted: bool,
+        focused_window_title: Option<String>,
+        window_titles: Vec<String>,
+        rows: Vec<ax::Row>,
+    }
+    let dump = AxRowsDump {
+        pid,
+        trusted: ax::is_trusted(),
+        focused_window_title: ax::focused_window_title(pid),
+        window_titles: ax::window_titles(pid),
+        rows: ax::rows(pid),
+    };
+    match serde_json::to_string_pretty(&dump) {
+        Ok(json) => println!("{json}"),
+        Err(e) => eprintln!("failed to serialise AX rows: {e}"),
     }
 }
 

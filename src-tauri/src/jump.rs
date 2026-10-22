@@ -23,6 +23,25 @@ pub const AUTOMATION_PANE: &str =
 /// installed bundle when the running binary is not inside one (e.g. `cargo run`).
 pub const APP_BUNDLE_ID: &str = "com.agent.monitor";
 
+/// `JumpTarget::host_ref` marker for the DSH sidebar session route (L3).
+pub const DSH_SIDEBAR_HOST_REF: &str = "dsh-sidebar";
+const DSH_APP_NAME: &str = "DeepSeek Harness";
+const DSH_BUNDLE_ID: &str = "com.deepseek.dsh";
+const DSH_PROCESS_NEEDLE: &str = "DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness";
+const VSCODE_BUNDLE_ID: &str = "com.microsoft.VSCode";
+const VSCODE_APP_NAME: &str = "Code";
+const VSCODE_PROCESS_NEEDLE: &str = "Visual Studio Code.app/Contents/MacOS/";
+/// A session row must share at least this many characters with the stored title
+/// for a prefix match (exact matches are always accepted).
+const MIN_TITLE_PREFIX_CHARS: usize = 6;
+/// Click/verify timings (real macOS app switches are asynchronous).
+const DSH_FORWARD_SETTLE_MS: u64 = 350;
+const DSH_CLICK_VERIFY_MS: u64 = 900;
+/// First click + at most one retry from a freshly re-read row (re-layout can
+/// make a single synthetic click a no-op).
+const DSH_CLICK_ATTEMPTS: u32 = 2;
+const VSCODE_SETTLE_MS: u64 = 800;
+
 pub fn open_permission_settings(kind: PermissionKind) {
     let pane = match kind {
         PermissionKind::Accessibility => ACCESSIBILITY_PANE,
@@ -120,9 +139,9 @@ const AGENT_SPECS: [AgentSpec; 4] = [
         bundle_id: "com.deepseek.dsh",
         app_name: "DeepSeek Harness",
         ax_process: "DeepSeek Harness",
-        max_level: JumpLevel::L1,
-        notes: "one window for all sessions; dsh://open only focuses the app (no per-session route)",
-        deep_link: false,
+        max_level: JumpLevel::L3,
+        notes: "sidebar session selection via macOS AX click; verified by window-title read-back; requires Accessibility",
+        deep_link: true,
     },
     AgentSpec {
         key: "zcode",
@@ -141,7 +160,7 @@ const AGENT_SPECS: [AgentSpec; 4] = [
         app_name: "Visual Studio Code",
         ax_process: "Code",
         max_level: JumpLevel::L2,
-        notes: "VSCode-hosted; window matched by workspace (L2 verified)",
+        notes: "VSCode-hosted; project-precise window jump via `code --reuse-window <workspace>` (AX raise fallback)",
         deep_link: false,
     },
 ];
@@ -381,8 +400,9 @@ pub fn jump(task: &TaskRecord) -> JumpOutcome {
     let max = task.capability.max_level;
     let mut first_error = None;
 
-    // L3 — session / tab level.
-    if max >= JumpLevel::L3 && task.target.deep_link.is_some() {
+    // L3 — session / tab level. A deep link or a host-specific session route
+    // (DSH sidebar AX row) is required; otherwise the ladder starts at L2.
+    if max >= JumpLevel::L3 && has_session_route(task) {
         match try_session_level(task) {
             Attempt::Done(outcome) => return outcome,
             Attempt::NotPossible(reason) => first_error = Some(reason),
@@ -477,12 +497,24 @@ enum Attempt {
 
 // ── Level implementations ───────────────────────────────────────
 
+fn has_session_route(task: &TaskRecord) -> bool {
+    // Terminal tab selection (kept unchanged: it has its own L3 path).
+    task.target.terminal_host.as_deref() == Some("Terminal")
+        || task.target.deep_link.is_some()
+        || task.target.host_ref.as_deref() == Some(DSH_SIDEBAR_HOST_REF)
+}
+
 fn try_session_level(task: &TaskRecord) -> Attempt {
     // Terminal tab selection (Claude Code CLI and any terminal-hosted agent).
     if let Some(host) = task.target.terminal_host.as_deref() {
         if host == "Terminal" {
             return try_terminal_tab(task);
         }
+    }
+    // DSH: single-window Electron host, but its sidebar session rows are AX
+    // elements and a real click switches the session. Verified by window title.
+    if task.target.host_ref.as_deref() == Some(DSH_SIDEBAR_HOST_REF) {
+        return try_dsh_sidebar(task);
     }
     // Verified deep link.
     let Some(link) = task.target.deep_link.as_deref() else {
@@ -539,6 +571,20 @@ fn try_session_level(task: &TaskRecord) -> Attempt {
 }
 
 fn try_window_level(task: &TaskRecord) -> Attempt {
+    // VSCode: project-precise focusing via the `code` CLI comes first; the AX
+    // title/raise path below remains as the fallback.
+    if task.target.bundle_id.as_deref() == Some(VSCODE_BUNDLE_ID) {
+        if let Some(workspace) = task
+            .target
+            .workspace_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+        {
+            if let Attempt::Done(outcome) = try_vscode_reuse_window(task, workspace) {
+                return Attempt::Done(outcome);
+            }
+        }
+    }
     let process = process_name(task);
     let Some(expected) = task.target.window_title.as_deref().filter(|s| !s.is_empty()) else {
         return Attempt::NotPossible("no_window_hint".into());
@@ -581,6 +627,317 @@ fn try_window_level(task: &TaskRecord) -> Attempt {
         next_step: None,
         permission_needed: None,
     })
+}
+
+/// VSCode project-precise window jump (L2).
+///
+/// `code --reuse-window <workspace>` focuses the already-open window for that
+/// project (verified on this host with two windows open). Confirmed by the
+/// frontmost app plus the focused AX window title containing the workspace
+/// basename ("<file> — <folder>"); any failure falls through to the existing AX
+/// title/raise path so nothing regresses.
+fn try_vscode_reuse_window(task: &TaskRecord, workspace: &str) -> Attempt {
+    let Some(basename) = workspace_basename(workspace) else {
+        return Attempt::NotPossible("no_window_hint".into());
+    };
+    let launched = match resolve_code_cli(
+        std::env::var("PATH").ok().as_deref(),
+        &code_cli_extra_dirs(),
+    ) {
+        Some(cli) => Command::new(cli)
+            .args(["--reuse-window", workspace])
+            .status(),
+        None => Command::new("open")
+            .args(["-b", VSCODE_BUNDLE_ID, workspace])
+            .status(),
+    };
+    if !launched.map(|status| status.success()).unwrap_or(false) {
+        return Attempt::NotPossible("window_not_found".into());
+    }
+    std::thread::sleep(Duration::from_millis(VSCODE_SETTLE_MS));
+    if frontmost_app().as_deref() != Some(VSCODE_APP_NAME) {
+        return Attempt::NotPossible("focus_unconfirmed".into());
+    }
+    let Some(pid) = app_pid(VSCODE_PROCESS_NEEDLE) else {
+        return Attempt::NotPossible("focus_unconfirmed".into());
+    };
+    let Some(title) = crate::ax::focused_window_title(pid) else {
+        return Attempt::NotPossible("window_state_unavailable".into());
+    };
+    if !window_title_contains_workspace(&title, &basename) {
+        return Attempt::NotPossible("window_not_found".into());
+    }
+    Attempt::Done(JumpOutcome {
+        task_id: task.id.clone(),
+        kind: JumpOutcomeKind::Success,
+        requested: task.level,
+        achieved: JumpLevel::L2,
+        reason_key: "opened_window".into(),
+        detail: Some(title),
+        next_step: None,
+        permission_needed: None,
+    })
+}
+
+/// DSH sidebar session jump (L3).
+///
+/// Evidence chain: AX read of the sidebar rows → score every session row on
+/// title/project/relative-time → real CGEvent click on the matched title →
+/// focused window title must read back as "<title> — DeepSeek Harness".
+fn try_dsh_sidebar(task: &TaskRecord) -> Attempt {
+    if !crate::ax::is_trusted() {
+        return Attempt::NotPossible("needs_accessibility".into());
+    }
+    let app_name = task.target.app_name.as_deref().unwrap_or(DSH_APP_NAME);
+    let expected_title = task
+        .target
+        .window_title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(&task.title);
+
+    // Launch/focus the host if needed: the AX tree and the click target a live
+    // window.
+    if dsh_pid().is_none() {
+        let _ = Command::new("open").args(["-b", DSH_BUNDLE_ID]).status();
+        std::thread::sleep(Duration::from_millis(900));
+    }
+    let pid = match dsh_pid() {
+        Some(pid) => pid,
+        None => {
+            std::thread::sleep(Duration::from_millis(700));
+            match dsh_pid() {
+                Some(pid) => pid,
+                None => return Attempt::NotPossible("app_not_found".into()),
+            }
+        }
+    };
+
+    // Bring DSH forward *before* reading row frames: activation may re-layout or
+    // scroll the sidebar, and a click into a background app only activates it.
+    let _ = Command::new("open").args(["-b", DSH_BUNDLE_ID]).status();
+    std::thread::sleep(Duration::from_millis(DSH_FORWARD_SETTLE_MS));
+
+    // Already on the session: window-title read-back is the strongest evidence,
+    // no click needed.
+    if let Some(focused) = crate::ax::focused_window_title(pid) {
+        if session_title_matches(&focused, app_name, expected_title) {
+            return Attempt::Done(session_jump_outcome(task, focused));
+        }
+    }
+
+    let debug = std::env::var_os("AGENT_MONITOR_DEBUG_JUMP").is_some();
+    // Activation makes Chromium re-layout the sidebar (transient 1 px AX
+    // frames even after a short settle), so wait for a sane, stable row.
+    let (session, target_rect) =
+        match stable_session_target(pid, task, crate::model::now_secs(), debug) {
+            Ok(target) => target,
+            // Never click a guessed row: an ambiguous match degrades honestly.
+            Err(reason) => return Attempt::NotPossible(reason),
+        };
+    if debug {
+        eprintln!(
+            "dsh-jump: selected={:?} frame={:?} focused_before={:?}",
+            session.title,
+            target_rect,
+            crate::ax::focused_window_title(pid)
+        );
+    }
+    let mut target_rect = target_rect;
+    for attempt in 1..=DSH_CLICK_ATTEMPTS {
+        // Click immediately: frames are only valid for the state just observed.
+        if !crate::ax::click(target_rect) {
+            return Attempt::NotPossible("session_click_unverified".into());
+        }
+        std::thread::sleep(Duration::from_millis(DSH_CLICK_VERIFY_MS));
+        let focused_after = crate::ax::focused_window_title(pid);
+        if debug {
+            eprintln!("dsh-jump: attempt {attempt} focused_after={focused_after:?}");
+        }
+        match focused_after {
+            Some(focused) if session_title_matches(&focused, app_name, expected_title) => {
+                return Attempt::Done(session_jump_outcome(task, focused));
+            }
+            _ => {}
+        }
+        if attempt >= DSH_CLICK_ATTEMPTS {
+            return Attempt::NotPossible("session_click_unverified".into());
+        }
+        // The click may have been swallowed by a re-layout: re-read the rows and
+        // retry once from the *new* frame. Ambiguity still means "do not click".
+        let fresh = read_fresh_selection(pid, task, crate::model::now_secs());
+        match plan_retry(attempt, DSH_CLICK_ATTEMPTS, fresh) {
+            RetryPlan::Retry { title, frame } => {
+                if debug {
+                    eprintln!("dsh-jump: retry click title={title:?} frame={frame:?}");
+                }
+                target_rect = frame;
+            }
+            RetryPlan::GiveUp(reason) => return Attempt::NotPossible(reason.to_string()),
+        }
+    }
+    Attempt::NotPossible("session_click_unverified".into())
+}
+
+/// Snapshot of a fresh post-miss read used by [`plan_retry`].
+#[derive(Clone, Debug, PartialEq)]
+enum FreshSelection {
+    None,
+    Ambiguous,
+    Match {
+        title: String,
+        frame: Option<crate::ax::Rect>,
+    },
+}
+
+/// What to do after a click that did not verify: one more click is allowed only
+/// when the fresh read still nominates exactly one matched row with a sane text
+/// frame and the attempt budget is not exhausted. A guessed row is never clicked.
+#[derive(Clone, Debug, PartialEq)]
+enum RetryPlan {
+    Retry {
+        title: String,
+        frame: crate::ax::Rect,
+    },
+    GiveUp(&'static str),
+}
+
+fn plan_retry(attempts_used: u32, max_attempts: u32, fresh: FreshSelection) -> RetryPlan {
+    if attempts_used >= max_attempts {
+        return RetryPlan::GiveUp("session_click_unverified");
+    }
+    match fresh {
+        FreshSelection::None => RetryPlan::GiveUp("session_row_not_found"),
+        FreshSelection::Ambiguous => RetryPlan::GiveUp("session_ambiguous"),
+        FreshSelection::Match {
+            title,
+            frame: Some(frame),
+        } if frame.is_sane() && frame.h >= 10.0 && frame.w >= 10.0 => {
+            RetryPlan::Retry { title, frame }
+        }
+        // A 1 px frame means "layout in progress": never click it.
+        FreshSelection::Match { .. } => RetryPlan::GiveUp("session_click_unverified"),
+    }
+}
+
+/// One fresh sidebar read after a click miss (no stability polling: the app is
+/// already active and this is the last chance before an honest failure).
+fn read_fresh_selection(pid: u32, task: &TaskRecord, now_secs: u64) -> FreshSelection {
+    let rows = crate::ax::rows(pid);
+    if rows.is_empty() {
+        return FreshSelection::None;
+    }
+    let sessions = parse_sidebar_sessions(&rows);
+    match select_session(&sessions, task, now_secs) {
+        SessionSelection::None => FreshSelection::None,
+        SessionSelection::Ambiguous => FreshSelection::Ambiguous,
+        SessionSelection::One(session) => FreshSelection::Match {
+            title: session.title.clone(),
+            frame: session.title_frame.or(session.row_frame),
+        },
+    }
+}
+
+fn session_jump_outcome(task: &TaskRecord, detail: String) -> JumpOutcome {
+    JumpOutcome {
+        task_id: task.id.clone(),
+        kind: JumpOutcomeKind::Success,
+        requested: task.level,
+        achieved: JumpLevel::L3,
+        reason_key: "opened_session".into(),
+        detail: Some(detail),
+        next_step: None,
+        permission_needed: None,
+    }
+}
+
+fn app_pid(needle: &str) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .ok()?;
+    pid_for_app_path(&String::from_utf8_lossy(&output.stdout), needle)
+}
+
+fn dsh_pid() -> Option<u32> {
+    app_pid(DSH_PROCESS_NEEDLE)
+}
+
+/// Read the AX sidebar until the selected session row is sane and stable across
+/// two consecutive reads, then return it with its click target. Chromium
+/// re-lays out the sidebar on activation, so a single read can see 1 px frames
+/// or a pre-activation ordering; clicking those would hit the wrong row.
+fn stable_session_target(
+    pid: u32,
+    task: &TaskRecord,
+    now_secs: u64,
+    debug: bool,
+) -> Result<(SidebarSession, crate::ax::Rect), String> {
+    const ATTEMPTS: u32 = 12;
+    /// How many reads a transient "no match"/"ambiguous" may last after
+    /// activation before it is reported (the sidebar is re-laid out on focus).
+    const SELECTION_SETTLE_ATTEMPTS: u32 = 8;
+    let mut previous: Option<(String, crate::ax::Rect)> = None;
+    let mut last_sane: Option<(SidebarSession, crate::ax::Rect)> = None;
+    for attempt in 0..ATTEMPTS {
+        let rows = crate::ax::rows(pid);
+        if rows.is_empty() {
+            std::thread::sleep(Duration::from_millis(150));
+            continue;
+        }
+        let sessions = parse_sidebar_sessions(&rows);
+        let session = match select_session(&sessions, task, now_secs) {
+            SessionSelection::One(session) => session,
+            // A miss right after activation is usually transient: Chromium may
+            // have rendered only the workspace rows (or half the list) yet.
+            // Retry a bounded number of times before declaring the session
+            // absent/ambiguous, so a fast click never degrades spuriously.
+            SessionSelection::None => {
+                if attempt + 1 < SELECTION_SETTLE_ATTEMPTS {
+                    std::thread::sleep(Duration::from_millis(150));
+                    continue;
+                }
+                return Err("session_row_not_found".into());
+            }
+            SessionSelection::Ambiguous => {
+                if attempt + 1 < SELECTION_SETTLE_ATTEMPTS {
+                    std::thread::sleep(Duration::from_millis(150));
+                    continue;
+                }
+                return Err("session_ambiguous".into());
+            }
+        };
+        let Some(rect) = session.title_frame.or(session.row_frame) else {
+            std::thread::sleep(Duration::from_millis(150));
+            continue;
+        };
+        // A real text run is ~12-18 pt high; 1 px means "layout in progress".
+        if !rect.is_sane() || rect.h < 10.0 || rect.w < 10.0 {
+            std::thread::sleep(Duration::from_millis(150));
+            continue;
+        }
+        let title = session.title.clone();
+        let stable = previous
+            .as_ref()
+            .map(|(previous_title, previous_rect)| {
+                *previous_title == title
+                    && (previous_rect.x - rect.x).abs() < 1.5
+                    && (previous_rect.y - rect.y).abs() < 1.5
+            })
+            .unwrap_or(false);
+        if stable {
+            if debug {
+                eprintln!("dsh-jump: row stable after {} attempt(s)", attempt + 1);
+            }
+            return Ok((session.clone(), rect));
+        }
+        previous = Some((title, rect));
+        last_sane = Some((session.clone(), rect));
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    // Layout never settled completely: use the last sane observation (still far
+    // better than a 1 px frame); the click is verified afterwards.
+    last_sane.ok_or_else(|| "ax_unavailable".to_string())
 }
 
 fn try_app_level(task: &TaskRecord) -> Attempt {
@@ -958,6 +1315,369 @@ fn best_title_match(titles: &[String], hint: &str) -> Option<String> {
     matching_windows(titles, hint).into_iter().next()
 }
 
+// ── DSH sidebar matching helpers (pure, unit tested) ───────────
+
+/// One parsed sidebar session row (see docs/ATTENTION.md-adjacent jump notes).
+#[derive(Clone, Debug, PartialEq)]
+struct SidebarSession {
+    /// Workspace/project row text that preceded this session row.
+    workspace: Option<String>,
+    title: String,
+    /// Frame of the title text run (best click target).
+    title_frame: Option<crate::ax::Rect>,
+    /// Frame of the whole row (fallback click target).
+    row_frame: Option<crate::ax::Rect>,
+    status: Option<String>,
+    /// Relative time label from the row, e.g. "23分钟" -> (1380, 60).
+    time_secs_ago: Option<u64>,
+    time_unit_secs: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SessionSelection<'a> {
+    None,
+    Ambiguous,
+    One(&'a SidebarSession),
+}
+
+/// Status words DSH renders next to a sidebar session (exact matches only, so a
+/// title that merely contains "完成" is not discarded).
+fn is_status_label(text: &str) -> bool {
+    let trimmed = text.trim();
+    const CHINESE: [&str; 10] = [
+        "进行中",
+        "已完成",
+        "失败",
+        "已中止",
+        "已取消",
+        "等待中",
+        "等待审批",
+        "等待输入",
+        "运行中",
+        "空闲",
+    ];
+    if CHINESE.contains(&trimmed) {
+        return true;
+    }
+    // DSH also renders "N 个子智能体运行中" in the row while sub-agents work.
+    let digit_prefix = trimmed
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .count();
+    if digit_prefix > 0 && trimmed[digit_prefix..].trim_start().starts_with("个子智能体") {
+        return true;
+    }
+    matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "running" | "completed" | "failed" | "waiting" | "idle" | "in progress"
+    )
+}
+
+/// Parse a relative-time label into `(value_secs, granularity_secs)`. DSH shows
+/// `刚刚` / `N分钟` / `N小时` / `N天`; compact English forms are accepted too.
+/// `None` for anything else (titles that merely contain digits stay titles).
+fn parse_relative_time_label(text: &str) -> Option<(u64, u64)> {
+    let trimmed = text.trim();
+    if trimmed == "刚刚" || trimmed.eq_ignore_ascii_case("just now") {
+        return Some((0, 60));
+    }
+    let without_suffix = trimmed.trim_end_matches('前').trim();
+    let digit_start = without_suffix.find(|ch: char| ch.is_ascii_digit())?;
+    let digits: String = without_suffix[digit_start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    let value = digits.parse::<u64>().ok()?;
+    let unit_text = without_suffix[digit_start + digits.len()..].trim();
+    let unit = if unit_text == "秒" || unit_text == "s" || unit_text.starts_with("second") {
+        1
+    } else if unit_text == "分钟"
+        || unit_text == "分"
+        || unit_text == "m"
+        || unit_text.starts_with("min")
+    {
+        60
+    } else if unit_text == "小时"
+        || unit_text == "时"
+        || unit_text == "h"
+        || unit_text.starts_with("hour")
+    {
+        3600
+    } else if unit_text == "天" || unit_text == "d" || unit_text.starts_with("day") {
+        86400
+    } else {
+        return None;
+    };
+    Some((value.saturating_mul(unit), unit))
+}
+
+/// Group AX rows into workspace → session rows. DSH renders a workspace row
+/// with exactly one text; every following multi-text row is one of its sessions.
+fn parse_sidebar_sessions(rows: &[crate::ax::Row]) -> Vec<SidebarSession> {
+    let mut sessions = Vec::new();
+    let mut workspace: Option<String> = None;
+    for row in rows {
+        let texts: Vec<&crate::ax::TextRun> = row
+            .texts
+            .iter()
+            .filter(|run| !run.text.trim().is_empty())
+            .collect();
+        if texts.is_empty() {
+            continue;
+        }
+        if texts.len() == 1 {
+            // A one-text row is a workspace/project row.
+            workspace = Some(texts[0].text.trim().to_string());
+            continue;
+        }
+        let mut title_runs: Vec<&crate::ax::TextRun> = Vec::new();
+        let mut status = None;
+        let mut time = None;
+        for run in &texts {
+            let text = run.text.trim();
+            if let Some(parsed) = parse_relative_time_label(text) {
+                time.get_or_insert(parsed);
+                continue;
+            }
+            if is_status_label(text) {
+                status.get_or_insert_with(|| text.to_string());
+                continue;
+            }
+            title_runs.push(run);
+        }
+        // The longest remaining text is the title; status/time labels are short.
+        let Some(title_run) = title_runs
+            .into_iter()
+            .max_by_key(|run| run.text.trim().chars().count())
+        else {
+            continue;
+        };
+        sessions.push(SidebarSession {
+            workspace: workspace.clone(),
+            title: title_run.text.trim().to_string(),
+            title_frame: title_run.frame,
+            row_frame: row.frame,
+            status,
+            time_secs_ago: time.map(|(value, _)| value),
+            time_unit_secs: time.map(|(_, unit)| unit),
+        });
+    }
+    sessions
+}
+
+/// Normalised title key: lowercase, collapsed whitespace, DSH's leading markdown
+/// `#`, and a trailing ellipsis from truncated labels removed.
+fn normalized_title_key(title: &str) -> String {
+    let mut text = normalize_title(title);
+    while let Some(rest) = text.strip_prefix('#') {
+        text = rest.trim_start().to_string();
+    }
+    text.trim_end_matches('…')
+        .trim_end_matches("...")
+        .trim()
+        .to_string()
+}
+
+/// `100` exact normalised match, `60` for a prefix match in either direction
+/// (tolerates DSH's truncated row labels), `0` otherwise. Prefix matches need
+/// at least [`MIN_TITLE_PREFIX_CHARS`] shared characters.
+fn title_match_score(stored: &str, row_title: &str) -> u32 {
+    let stored_key = normalized_title_key(stored);
+    let row_key = normalized_title_key(row_title);
+    if stored_key.is_empty() || row_key.is_empty() {
+        return 0;
+    }
+    if stored_key == row_key {
+        return 100;
+    }
+    let (short, long) = if stored_key.chars().count() <= row_key.chars().count() {
+        (stored_key.as_str(), row_key.as_str())
+    } else {
+        (row_key.as_str(), stored_key.as_str())
+    };
+    if short.chars().count() < MIN_TITLE_PREFIX_CHARS {
+        return 0;
+    }
+    if long.starts_with(short) {
+        60
+    } else {
+        0
+    }
+}
+
+/// Last path component of a workspace path (project name for matching).
+fn workspace_basename(path: &str) -> Option<String> {
+    let trimmed = path.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Path::new(trimmed)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn project_match_score(expected_basename: &str, row_workspace: &str) -> u32 {
+    let expected = normalize_title(expected_basename);
+    let actual = normalize_title(row_workspace);
+    if expected.is_empty() || actual.is_empty() {
+        return 0;
+    }
+    if expected == actual {
+        20
+    } else if actual.contains(&expected) || expected.contains(&actual) {
+        10
+    } else {
+        0
+    }
+}
+
+/// Relative-time evidence: the label's unit is the rounding tolerance. DSH
+/// rounds down, so `N分钟` covers `[N-1, N+2)` minutes.
+fn time_match_score(expected_age_secs: u64, label_secs: u64, unit_secs: u64) -> u32 {
+    if unit_secs == 0 {
+        return 0;
+    }
+    let lower = label_secs.saturating_sub(unit_secs);
+    let upper = label_secs.saturating_add(unit_secs.saturating_mul(2));
+    if expected_age_secs >= lower && expected_age_secs <= upper {
+        15
+    } else {
+        0
+    }
+}
+
+/// Score a row on all three signals. A title match is required (a workspace or
+/// time match alone must never click a guessed row); project and time only
+/// disambiguate between title matches.
+fn session_candidate_score(session: &SidebarSession, task: &TaskRecord, now_secs: u64) -> u32 {
+    let stored = task
+        .target
+        .window_title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(&task.title);
+    let title = title_match_score(stored, &session.title);
+    if title == 0 {
+        return 0;
+    }
+    let project = match (
+        task.target
+            .workspace_path
+            .as_deref()
+            .and_then(workspace_basename),
+        session.workspace.as_deref(),
+    ) {
+        (Some(expected), Some(actual)) => project_match_score(&expected, actual),
+        _ => 0,
+    };
+    let time = match (session.time_secs_ago, session.time_unit_secs) {
+        (Some(label_secs), Some(unit)) => time_match_score(
+            now_secs.saturating_sub(task.last_activity_secs),
+            label_secs,
+            unit,
+        ),
+        _ => 0,
+    };
+    title + project + time
+}
+
+fn select_session<'a>(
+    sessions: &'a [SidebarSession],
+    task: &TaskRecord,
+    now_secs: u64,
+) -> SessionSelection<'a> {
+    let mut best: Option<(u32, &'a SidebarSession)> = None;
+    let mut tied = false;
+    for session in sessions {
+        let score = session_candidate_score(session, task, now_secs);
+        if score == 0 {
+            continue;
+        }
+        match best {
+            None => {
+                best = Some((score, session));
+                tied = false;
+            }
+            Some((best_score, _)) => {
+                if score > best_score {
+                    best = Some((score, session));
+                    tied = false;
+                } else if score == best_score {
+                    tied = true;
+                }
+            }
+        }
+    }
+    match best {
+        None => SessionSelection::None,
+        Some(_) if tied => SessionSelection::Ambiguous,
+        Some((_, session)) => SessionSelection::One(session),
+    }
+}
+
+/// Strip the ` — <App>` window-title suffix that macOS appends.
+fn strip_window_app_suffix<'a>(title: &'a str, app_name: &str) -> &'a str {
+    let trimmed = title.trim();
+    for separator in [" — ", " – ", " - "] {
+        if let Some(stripped) = trimmed.strip_suffix(app_name) {
+            if let Some(prefix) = stripped.strip_suffix(separator) {
+                return prefix.trim();
+            }
+        }
+    }
+    trimmed
+}
+
+/// Does the focused window title (e.g. "多窗口… — DeepSeek Harness") match the
+/// stored session title?
+fn session_title_matches(window_title: &str, app_name: &str, stored_title: &str) -> bool {
+    let focused = strip_window_app_suffix(window_title, app_name);
+    title_match_score(stored_title, focused) > 0
+}
+
+/// Does a VSCode window title ("<file> — <folder>") name the workspace folder?
+fn window_title_contains_workspace(window_title: &str, workspace_basename: &str) -> bool {
+    let title = normalize_title(window_title);
+    let basename = normalize_title(workspace_basename);
+    !title.is_empty() && !basename.is_empty() && title.contains(&basename)
+}
+
+/// Find `code` in PATH first, then the given install directories.
+fn resolve_code_cli(path_env: Option<&str>, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
+    if let Some(path_env) = path_env {
+        for dir in path_env.split(':').filter(|dir| !dir.is_empty()) {
+            let candidate = Path::new(dir).join("code");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    extra_dirs
+        .iter()
+        .map(|dir| dir.join("code"))
+        .find(|candidate| candidate.is_file())
+}
+
+fn code_cli_extra_dirs() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]
+}
+
+/// Parse `<pid> <command>` lines from `ps -axo pid=,command=` and return the
+/// first pid whose command contains `needle`.
+fn pid_for_app_path(ps_output: &str, needle: &str) -> Option<u32> {
+    ps_output.lines().find_map(|line| {
+        let line = line.trim_start();
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let pid: u32 = parts.next()?.parse().ok()?;
+        let command = parts.next()?;
+        command.contains(needle).then_some(pid)
+    })
+}
+
 fn open_url(url: &str) -> Result<(), String> {
     Command::new("open")
         .arg(url)
@@ -1327,8 +2047,10 @@ mod tests {
 
         assert_eq!(spec("dsh").bundle_id, "com.deepseek.dsh");
         assert_eq!(spec("dsh").app_name, "DeepSeek Harness");
-        assert_eq!(spec("dsh").max_level, JumpLevel::L1);
-        assert!(!spec("dsh").deep_link);
+        // v0.6.0: sidebar AX session route — deep_link now means "session route".
+        assert_eq!(spec("dsh").max_level, JumpLevel::L3);
+        assert!(spec("dsh").deep_link);
+        assert!(spec("dsh").notes.contains("AX"));
 
         assert_eq!(spec("zcode").bundle_id, "dev.zcode.app");
         assert_eq!(spec("zcode").app_name, "ZCode");
@@ -1402,5 +2124,458 @@ mod tests {
             );
         }
         assert_eq!(json["agents"][0]["max_level"], "L3");
+    }
+
+    // ── DSH sidebar session jump helpers ────────────────────────
+
+    use crate::ax::{Rect, Row, TextRun};
+
+    fn ax_row(frames: &[(&str, Option<Rect>)], frame: Option<Rect>) -> Row {
+        Row {
+            texts: frames
+                .iter()
+                .map(|(text, frame)| TextRun {
+                    text: (*text).to_string(),
+                    frame: *frame,
+                })
+                .collect(),
+            frame,
+        }
+    }
+
+    fn sample_rect(y: f64) -> Rect {
+        Rect {
+            x: 360.0,
+            y,
+            w: 140.0,
+            h: 17.0,
+        }
+    }
+
+    fn dsh_task(title: &str, workspace: &str, activity: u64, level: JumpLevel) -> TaskRecord {
+        let mut record = task(level, JumpLevel::L3);
+        record.id = "dsh:session-1".into();
+        record.agent_key = "dsh".into();
+        record.agent_name = "DSH".into();
+        record.title = title.into();
+        record.last_activity_secs = activity;
+        record.target = JumpTarget {
+            app_name: Some("DeepSeek Harness".into()),
+            bundle_id: Some("com.deepseek.dsh".into()),
+            deep_link: None,
+            window_title: Some(title.into()),
+            workspace_path: Some(workspace.into()),
+            host_ref: Some(DSH_SIDEBAR_HOST_REF.into()),
+            ..Default::default()
+        };
+        record.capability.max_level = JumpLevel::L3;
+        record.level = level;
+        record
+    }
+
+    #[test]
+    fn has_session_route_accepts_deep_links_terminal_and_dsh_sidebar() {
+        let plain = task(JumpLevel::L3, JumpLevel::L3);
+        let mut plain = plain;
+        plain.target.deep_link = None;
+        plain.target.host_ref = None;
+        assert!(!has_session_route(&plain));
+
+        let mut deep_link = plain.clone();
+        deep_link.target.deep_link = Some("codex://threads/x".into());
+        assert!(has_session_route(&deep_link));
+
+        let mut sidebar = plain.clone();
+        sidebar.target.host_ref = Some(DSH_SIDEBAR_HOST_REF.into());
+        assert!(has_session_route(&sidebar));
+
+        let mut terminal = plain;
+        terminal.target.terminal_host = Some("Terminal".into());
+        assert!(has_session_route(&terminal));
+    }
+
+    #[test]
+    fn session_title_matches_strips_the_app_window_suffix() {
+        let stored = "多窗口询问提醒与跳转";
+        assert!(session_title_matches(
+            "多窗口询问提醒与跳转 — DeepSeek Harness",
+            "DeepSeek Harness",
+            stored
+        ));
+        // A running marker/prefix must not hide an exact title match.
+        assert!(session_title_matches(
+            "多窗口询问提醒与跳转 - DeepSeek Harness",
+            "DeepSeek Harness",
+            stored
+        ));
+        assert!(!session_title_matches(
+            "另一个会话 — DeepSeek Harness",
+            "DeepSeek Harness",
+            stored
+        ));
+        // No suffix at all (e.g. a bare window title) still matches.
+        assert!(session_title_matches(
+            "多窗口询问提醒与跳转",
+            "DeepSeek Harness",
+            stored
+        ));
+    }
+
+    #[test]
+    fn title_match_score_prefers_exact_and_tolerates_truncation() {
+        assert_eq!(title_match_score("Fix the parser", "Fix the parser"), 100);
+        // Normalisation: case, dashes and whitespace collapse.
+        assert_eq!(
+            title_match_score("Fix  the Parser", "fix the parser — Codex"),
+            60
+        );
+        // DSH truncates row labels: a prefix in either direction matches.
+        assert_eq!(
+            title_match_score(
+                "给 agent-monitor 增加“设置页 + 3小时提醒功能",
+                "# 给 agent-monitor 增加“设置页 +"
+            ),
+            60
+        );
+        assert_eq!(
+            title_match_score("# 给 agent-monitor 增加“设置页 +", "给 agent-monitor 增加"),
+            60
+        );
+        // Too short to be a safe prefix, unrelated text, or empty -> no match.
+        assert_eq!(title_match_score("Fix", "Fix the parser"), 0);
+        assert_eq!(title_match_score("Fix the parser", "Rewrite the parser"), 0);
+        assert_eq!(title_match_score("", "Fix the parser"), 0);
+        assert_eq!(title_match_score("Fix the parser", "  "), 0);
+        // Trailing ellipsis from a truncated label is ignored.
+        assert_eq!(title_match_score("多窗口询问提醒与跳转", "多窗口询问提醒…"), 60);
+    }
+
+    #[test]
+    fn parse_relative_time_label_understands_dsh_labels() {
+        assert_eq!(parse_relative_time_label("刚刚"), Some((0, 60)));
+        assert_eq!(parse_relative_time_label("23分钟"), Some((23 * 60, 60)));
+        assert_eq!(parse_relative_time_label("3 小时"), Some((3 * 3600, 3600)));
+        assert_eq!(parse_relative_time_label("1天"), Some((86_400, 86_400)));
+        assert_eq!(parse_relative_time_label("23分钟前"), Some((23 * 60, 60)));
+        assert_eq!(parse_relative_time_label("just now"), Some((0, 60)));
+        assert_eq!(parse_relative_time_label("5 min"), Some((300, 60)));
+        // Titles that merely contain digits are not time labels.
+        assert_eq!(parse_relative_time_label("# 给 agent-monitor 增加“设置页 +"), None);
+        assert_eq!(parse_relative_time_label("2024 roadmap"), None);
+        assert_eq!(parse_relative_time_label("13分15秒"), None);
+        assert_eq!(parse_relative_time_label("进行中"), None);
+    }
+
+    #[test]
+    fn status_labels_are_exact_not_substrings() {
+        assert!(is_status_label("进行中"));
+        assert!(is_status_label("已完成"));
+        assert!(is_status_label("失败"));
+        // DSH's sub-agent activity badge is a status, not a session title.
+        assert!(is_status_label("1 个子智能体运行中"));
+        assert!(is_status_label("12个子智能体运行中"));
+        assert!(!is_status_label("进行中的重构"));
+        assert!(!is_status_label("# 进行中与已完成：两个功能均已实现"));
+        assert!(!is_status_label("子智能体协作调研"));
+        assert!(is_status_label("running"));
+    }
+
+    #[test]
+    fn sidebar_rows_group_workspaces_and_extract_session_titles() {
+        // Mirrors the real DSH sidebar: one workspace row, then multi-text
+        // session rows; a one-text session ("wo") is treated as a workspace row.
+        let rows = vec![
+            ax_row(&[("AgentMonitor", None)], Some(sample_rect(346.0))),
+            ax_row(
+                &[
+                    ("进行中", None),
+                    ("多窗口询问提醒与跳转", Some(sample_rect(389.0))),
+                    ("23分钟", None),
+                ],
+                Some(sample_rect(382.0)),
+            ),
+            ax_row(
+                &[("# 给 agent-monitor 增加“设置页 +", None), ("3小时", None)],
+                Some(sample_rect(416.0)),
+            ),
+            ax_row(&[("wo", None)], Some(sample_rect(486.0))),
+            ax_row(&[("审稿", None)], Some(sample_rect(722.0))),
+        ];
+        let sessions = parse_sidebar_sessions(&rows);
+        assert_eq!(sessions.len(), 2, "only the two multi-text rows are sessions");
+
+        let first = &sessions[0];
+        assert_eq!(first.workspace.as_deref(), Some("AgentMonitor"));
+        assert_eq!(first.title, "多窗口询问提醒与跳转");
+        assert_eq!(first.status.as_deref(), Some("进行中"));
+        assert_eq!(first.time_secs_ago, Some(23 * 60));
+        assert_eq!(first.time_unit_secs, Some(60));
+        assert_eq!(first.title_frame, Some(sample_rect(389.0)));
+        assert_eq!(first.row_frame, Some(sample_rect(382.0)));
+
+        let second = &sessions[1];
+        assert_eq!(second.workspace.as_deref(), Some("AgentMonitor"));
+        assert_eq!(second.title, "# 给 agent-monitor 增加“设置页 +");
+        assert_eq!(second.status, None);
+        assert_eq!(second.time_secs_ago, Some(3 * 3600));
+        // The "wo" row reset the workspace, so "审稿" is the visible workspace
+        // for rows after it; earlier sessions keep "AgentMonitor".
+        assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn subagent_badge_does_not_become_the_session_title() {
+        let rows = vec![
+            ax_row(&[("AgentMonitor", None)], None),
+            ax_row(
+                &[
+                    ("进行中", None),
+                    ("1 个子智能体运行中", None),
+                    ("多窗口询问提醒与跳转", Some(sample_rect(389.0))),
+                    ("42分钟", None),
+                ],
+                Some(sample_rect(382.0)),
+            ),
+        ];
+        let sessions = parse_sidebar_sessions(&rows);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "多窗口询问提醒与跳转");
+        assert_eq!(sessions[0].status.as_deref(), Some("进行中"));
+        assert_eq!(sessions[0].time_secs_ago, Some(42 * 60));
+    }
+
+    #[test]
+    fn retry_after_a_missed_click_needs_a_fresh_unique_sane_row() {
+        let sane = Rect {
+            x: 265.0,
+            y: 389.0,
+            w: 140.0,
+            h: 17.0,
+        };
+        let matched = FreshSelection::Match {
+            title: "多窗口询问提醒与跳转".into(),
+            frame: Some(sane),
+        };
+        assert_eq!(
+            plan_retry(1, DSH_CLICK_ATTEMPTS, matched.clone()),
+            RetryPlan::Retry {
+                title: "多窗口询问提醒与跳转".into(),
+                frame: sane,
+            }
+        );
+        // Attempt budget exhausted: report honestly, never guess again.
+        assert_eq!(
+            plan_retry(2, DSH_CLICK_ATTEMPTS, matched.clone()),
+            RetryPlan::GiveUp("session_click_unverified")
+        );
+        // A fresh ambiguous / missing selection is never clicked.
+        assert_eq!(
+            plan_retry(1, DSH_CLICK_ATTEMPTS, FreshSelection::Ambiguous),
+            RetryPlan::GiveUp("session_ambiguous")
+        );
+        assert_eq!(
+            plan_retry(1, DSH_CLICK_ATTEMPTS, FreshSelection::None),
+            RetryPlan::GiveUp("session_row_not_found")
+        );
+        // A transient 1 px frame (layout in progress) must not be clicked.
+        assert_eq!(
+            plan_retry(
+                1,
+                DSH_CLICK_ATTEMPTS,
+                FreshSelection::Match {
+                    title: "t".into(),
+                    frame: Some(Rect {
+                        x: 265.0,
+                        y: 346.0,
+                        w: 140.0,
+                        h: 1.0,
+                    }),
+                }
+            ),
+            RetryPlan::GiveUp("session_click_unverified")
+        );
+        assert_eq!(
+            plan_retry(
+                1,
+                DSH_CLICK_ATTEMPTS,
+                FreshSelection::Match {
+                    title: "t".into(),
+                    frame: None,
+                }
+            ),
+            RetryPlan::GiveUp("session_click_unverified")
+        );
+    }
+
+    #[test]
+    fn workspace_basename_handles_trailing_slashes_and_empty_paths() {
+        assert_eq!(
+            workspace_basename("/Users/wei/Paper/DropDPO-Confidence/").as_deref(),
+            Some("DropDPO-Confidence")
+        );
+        assert_eq!(workspace_basename("/tmp/ws").as_deref(), Some("ws"));
+        assert_eq!(workspace_basename(""), None);
+        assert_eq!(workspace_basename("   "), None);
+        assert_eq!(workspace_basename("/"), None);
+    }
+
+    #[test]
+    fn project_and_time_signals_disambiguate_identical_titles() {
+        let now = 1_000_000;
+        // Two sessions share the same (short) title but live in different
+        // workspaces and have different activity ages.
+        let rows = vec![
+            ax_row(&[("AgentMonitor", None)], None),
+            ax_row(
+                &[("You are the frontend engineer", None), ("2小时", None)],
+                Some(sample_rect(394.0)),
+            ),
+            ax_row(&[("OtherProject", None)], None),
+            ax_row(
+                &[("You are the frontend engineer", None), ("30分钟", None)],
+                Some(sample_rect(428.0)),
+            ),
+        ];
+        let sessions = parse_sidebar_sessions(&rows);
+        // The task belongs to OtherProject and its activity matches that row's
+        // "30分钟", so project + time both point at the second row.
+        let task = dsh_task(
+            "You are the frontend engineer",
+            "/Users/wei/Documents/OtherProject",
+            now - 30 * 60,
+            JumpLevel::L3,
+        );
+        match select_session(&sessions, &task, now) {
+            SessionSelection::One(session) => {
+                assert_eq!(session.workspace.as_deref(), Some("OtherProject"));
+                assert_eq!(session.time_secs_ago, Some(30 * 60));
+            }
+            other => panic!("expected a unique match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn equal_scored_rows_are_ambiguous_and_never_clicked() {
+        let now = 1_000_000;
+        let rows = vec![
+            ax_row(&[("AgentMonitor", None)], None),
+            ax_row(
+                &[("You are the Rust backend", None), ("5分钟", None)],
+                Some(sample_rect(394.0)),
+            ),
+            ax_row(
+                &[("You are the Rust backend", None), ("5分钟", None)],
+                Some(sample_rect(428.0)),
+            ),
+        ];
+        let sessions = parse_sidebar_sessions(&rows);
+        let task = dsh_task(
+            "You are the Rust backend",
+            "/Users/wei/Documents/AgentMonitor",
+            now - 5 * 60,
+            JumpLevel::L3,
+        );
+        assert_eq!(
+            select_session(&sessions, &task, now),
+            SessionSelection::Ambiguous
+        );
+    }
+
+    #[test]
+    fn candidate_requires_a_title_match() {
+        let now = 1_000_000;
+        let rows = vec![
+            ax_row(&[("AgentMonitor", None)], None),
+            ax_row(
+                &[("Unrelated session", None), ("5分钟", None)],
+                Some(sample_rect(394.0)),
+            ),
+        ];
+        let sessions = parse_sidebar_sessions(&rows);
+        // Same workspace + matching time must not select a different title.
+        let task = dsh_task(
+            "You are the Rust backend",
+            "/Users/wei/Documents/AgentMonitor",
+            now - 5 * 60,
+            JumpLevel::L3,
+        );
+        assert_eq!(select_session(&sessions, &task, now), SessionSelection::None);
+    }
+
+    #[test]
+    fn time_match_score_tolerates_downward_rounding() {
+        // "23分钟" means 23-24 minutes elapsed; label/unit = (1380, 60).
+        assert_eq!(time_match_score(23 * 60, 23 * 60, 60), 15);
+        assert_eq!(time_match_score(23 * 60 - 30, 23 * 60, 60), 15);
+        assert_eq!(time_match_score(24 * 60 + 30, 23 * 60, 60), 15);
+        assert_eq!(time_match_score(26 * 60, 23 * 60, 60), 0);
+        assert_eq!(time_match_score(20 * 60, 23 * 60, 60), 0);
+        // Without a granularity there is no time signal.
+        assert_eq!(time_match_score(1_000, 1_000, 0), 0);
+    }
+
+    #[test]
+    fn vscode_reuse_window_verifies_by_workspace_basename() {
+        assert!(window_title_contains_workspace(
+            "arr_submission.pdf — DropDPO-Confidence",
+            "DropDPO-Confidence"
+        ));
+        assert!(window_title_contains_workspace(
+            "results.md — dropdpo-confidence",
+            "DropDPO-Confidence"
+        ));
+        assert!(!window_title_contains_workspace(
+            "arr_submission.pdf — OtherProject",
+            "DropDPO-Confidence"
+        ));
+        assert!(!window_title_contains_workspace("", "DropDPO-Confidence"));
+        assert!(!window_title_contains_workspace("anything", ""));
+    }
+
+    #[test]
+    fn code_cli_resolution_prefers_path_then_install_dirs() {
+        let base = std::env::temp_dir().join(format!(
+            "am-jump-code-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let in_path = base.join("path-bin");
+        let extra = base.join("homebrew-bin");
+        std::fs::create_dir_all(&in_path).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        let path_env = in_path.to_string_lossy().to_string();
+
+        // Only the install dir has a `code` -> fallback used.
+        std::fs::write(extra.join("code"), b"").unwrap();
+        assert_eq!(
+            resolve_code_cli(Some(&path_env), &[extra.clone()]),
+            Some(extra.join("code"))
+        );
+        // PATH wins even if an install dir also has one.
+        std::fs::write(in_path.join("code"), b"").unwrap();
+        assert_eq!(
+            resolve_code_cli(Some(&path_env), &[extra.clone()]),
+            Some(in_path.join("code"))
+        );
+        // Nothing found.
+        assert_eq!(resolve_code_cli(Some("/nonexistent"), &[]), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pid_for_app_path_parses_ps_output() {
+        let ps = "  123 /Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness --flag\n  456 /usr/bin/other\n  789 /Applications/Visual Studio Code.app/Contents/MacOS/Code";
+        assert_eq!(
+            pid_for_app_path(ps, "DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness"),
+            Some(123)
+        );
+        assert_eq!(
+            pid_for_app_path(ps, "Visual Studio Code.app/Contents/MacOS/"),
+            Some(789)
+        );
+        assert_eq!(pid_for_app_path(ps, "ZCode.app/Contents/MacOS/"), None);
     }
 }

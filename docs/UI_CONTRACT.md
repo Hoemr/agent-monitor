@@ -179,6 +179,12 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   (newest conversation first). The UI must render in snapshot order and must not
   re-group by status; attention is surfaced by the header count and the coloured
   state dot/Label.
+* **Footer count**: the expanded footer shows how many sessions the current window
+  can display, not just the total: `visible = min(tasks.length, max_visible_rows)`
+  (the same rule Rust uses for the window height). When some rows scroll, render
+  `"{visible} / {total} sessions"` (e.g. `5 / 119 个会话`); when everything fits,
+  render `"{total} sessions"`. A localized `title`/aria hint explains
+  "Showing V of T sessions".
 
 ## Interaction rules implemented by the frontend
 
@@ -209,7 +215,10 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   pet (and the hidden tab, preferring the `hidden` slot) renders the image
   instead of the built-in glyph; badges stay on top. See `docs/ICONS.md`.
 * Clicking a row calls `jump_to_task` once. Dragging inside the list must scroll,
-  not jump, and never trigger a drag of the window.
+  not jump, and never trigger a drag of the window. The jump ladder is verified by
+  read-back: Codex L3 (deep link), DSH L3 (macOS AX sidebar click, requires
+  Accessibility), VSCode L2 (project window focused with `code --reuse-window`
+  when available, AX raise as fallback), app activation L1.
 * A dedicated drag handle (top bar) starts window dragging; a movement threshold
   (>4 px) distinguishes drag from click.
 * Hover the collapsed/edge-hidden pet → `set_expanded(true, focus=false)` after

@@ -130,7 +130,7 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
   "pet_path": "…/pet.json",
   "dismissed_path": "…/dismissed.json",
   "version": 1,
-  "app_version": "0.5.0",
+  "app_version": "0.6.0",
   "system_language": "zh",
   "legacy_imported": true,
   "corrupt_backup": null
@@ -174,7 +174,7 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 source ~/.cargo/env
 cargo test --release --manifest-path src-tauri/Cargo.toml      # 含 settings/pet/monitor 单测
 cargo build --release --manifest-path src-tauri/Cargo.toml
-bash scripts/ui-test.sh              # 桌宠（88 项）+ 设置窗口（60 项），聚合退出码
+bash scripts/ui-test.sh              # 桌宠（96 项）+ 设置窗口（60 项），聚合退出码
 bash scripts/ui-test-settings.sh     # 只跑设置窗口
 src-tauri/target/release/agent-monitor --dump-tasks   # 打印生效的 enabled/retention/rows
 src-tauri/target/release/agent-monitor --jump-diagnostics  # 跳转权限/应用自检 JSON

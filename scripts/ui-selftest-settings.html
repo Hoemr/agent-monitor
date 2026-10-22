@@ -567,13 +567,13 @@ frame.addEventListener('load', async function () {
       var state = row.querySelector('.agent-state');
       return state ? state.textContent : '';
     }).join(' | ');
-    check('agent rows list levels, install/run state and deep-link support',
+    check('agent rows list levels, install/run state and session-route support',
       agentRows.length === 4 &&
-      agentLevels.join(',') === 'L1,L1,L2,L3' &&
+      agentLevels.join(',') === 'L1,L2,L3,L3' &&
       /Installed/.test(agentStates) && /Not installed/.test(agentStates) &&
       /Running/.test(agentStates) && /Stopped/.test(agentStates) &&
-      qa('.agent-flag[data-deep-link="yes"]').length === 1 &&
-      qa('.agent-flag[data-deep-link="no"]').length === 3,
+      qa('.agent-flag[data-deep-link="yes"]').length === 2 &&
+      qa('.agent-flag[data-deep-link="no"]').length === 2,
       'rows=' + agentRows.length + ' levels=' + agentLevels.join(','));
 
     // 22f. “Check again” re-runs the self-check

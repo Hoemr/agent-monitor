@@ -387,12 +387,12 @@ var I18N = {
       },
       agents: {
         heading: 'Agent capabilities',
-        desc: 'Maximum jump level, install/run state and deep-link support, as measured on this Mac.',
+        desc: 'Maximum jump level, install/run state and session-route support, as measured on this Mac.',
         installed: 'Installed',
         notInstalled: 'Not installed',
         running: 'Running',
         notRunning: 'Stopped',
-        deepLink: 'Deep link',
+        deepLink: 'Session route',
         noDeepLink: 'App level only',
         noDiagnostics: 'The self-check has not reported yet.'
       },
@@ -609,12 +609,12 @@ var I18N = {
       },
       agents: {
         heading: 'Agent 能力',
-        desc: '本机实测的最高跳转等级、安装/运行状态与 deep link 支持。',
+        desc: '本机实测的最高跳转等级、安装/运行状态与会话级跳转支持。',
         installed: '已安装',
         notInstalled: '未安装',
         running: '运行中',
         notRunning: '未运行',
-        deepLink: '支持 deep link',
+        deepLink: '支持会话级跳转',
         noDeepLink: '仅应用级',
         noDiagnostics: '自检尚未返回结果。'
       },
@@ -2069,9 +2069,9 @@ function mockDiagnostics() {
       {
         key: 'dsh', name: 'DSH',
         bundle_id: 'com.deepseek.dsh', app_name: 'DeepSeek Harness',
-        max_level: 'L1',
-        notes: 'Only dsh://open exists, so app-level focus is the declared maximum.',
-        installed: true, running: true, deep_link: false
+        max_level: 'L3',
+        notes: 'Sidebar session rows are selected with a verified macOS AX click (Accessibility required); dsh://open only focuses the app.',
+        installed: true, running: true, deep_link: true
       },
       {
         key: 'zcode', name: 'ZCode',

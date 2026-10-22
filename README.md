@@ -42,7 +42,7 @@ Chinese UI (language setting updates the pet, this window and the menu bar):
 
 ![settings in Chinese](screenshots/settings-zh.png)
 
-### Pending questions & jump setup (0.5.0)
+### Pending questions, project-precise jump & setup
 
 A session that **newly** blocks on a question turns the collapsed badge amber and
 pulses it. Settings → Attention can additionally send a macOS notification, play
@@ -80,9 +80,9 @@ right click opens the menu (localized from the Settings language; `System` follo
 | Agent | Source | Multi-session | Highest verified jump |
 |---|---|---|---|
 | **Codex** (ChatGPT app + VSCode extension) | `~/.codex/state_5.sqlite` + rollout JSONL + `thread_history_1.sqlite` | thread id | **L3** `codex://threads/<id>` (verified) |
-| **DSH** (DeepSeek Harness) | `~/.dsh/storages/session_projcache/sessions/*.json` | session dir | **L1** (host has no session URL — documented) |
+| **DSH** (DeepSeek Harness) | `~/.dsh/storages/session_projcache/sessions/*.json` | session dir | **L3** — sidebar session click via macOS AX (verified, needs Accessibility) |
 | **ZCode** | `~/.zcode/v2/tasks-index.sqlite` | `task_id` | **blocked** on this host (`ZCode.app` exits immediately); data/mapping implemented |
-| **Claude Code** (`anthropic.claude-code` **VSCode extension**) | `~/.claude/projects/**/*.jsonl`, `file-history/`, `ide/*.lock` | transcript UUID | **L2** VSCode window (verified) |
+| **Claude Code** (`anthropic.claude-code` **VSCode extension**) | `~/.claude/projects/**/*.jsonl`, `file-history/`, `ide/*.lock` | transcript UUID | **L2** — project-precise VSCode window via `code --reuse-window` (verified) |
 
 Full matrix with evidence and limitations: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) ·
 jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md).
@@ -107,8 +107,14 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
   quiet). See [`docs/ATTENTION.md`](docs/ATTENTION.md).
 * **Jump with honest degradation**: session → window → app → nothing. A level is
   reported only after a read-back check; failures/degradations show a short toast
-  with a “Grant permission” action when needed. A declared-max app-level jump
-  (DSH) now reports success instead of a permanent “degraded” toast.
+  with a “Grant permission” action when needed. An app-level-only jump at its
+  declared maximum reports success instead of a permanent “degraded” toast.
+* **Project/session-precise jump**: DSH sessions are selected directly in its
+  sidebar (macOS AX row match on session title + project/cwd + relative time, then
+  a verified synthetic click → L3); VSCode windows are focused by workspace with
+  `code --reuse-window <path>` (the right window even with many projects open,
+  AX raise as fallback) → L2. The current window is checked first, so a session
+  that is already visible opens without a click.
 * **Jump setup & self-check in Settings → Jump**: live Accessibility /
   Automation / window-read status, one-click buttons to open the exact System
   Settings pane or reveal the app for dragging into Accessibility, a first-run
@@ -118,7 +124,9 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
 * **Desktop pet**: drag anywhere, snap to the nearest screen edge, hide to a
   small square tab (8–24 px) whose snapped side is fully off-screen (or to the
   menu bar when edge-hiding is disabled), hover/click to expand inward, 3/5/8
-  visible rows with scroll, quiet idle dot.
+  visible rows with scroll, quiet idle dot. The footer shows
+  `visible / total` sessions (e.g. `5 / 119`) so the count matches what the
+  window can display.
 * **New-completion indicator**: while collapsed/hidden, an unfilled green ring
   (and the expanded header chip) shows how many tasks completed since you last
   looked at the panel — switchable with `new_badge`. A pending jump notice shows
@@ -202,8 +210,8 @@ System Settings pane. It never resets or forces permissions.
 ## Development
 
 ```bash
-npm test          # cargo test (120 unit tests: model/monitor/attention/agents/pet/settings/icons/jump)
-npm run ui-test   # 148 headless UI checks (pet 88 + settings 60, real DOM events)
+npm test          # cargo test (139 unit tests: model/monitor/attention/agents/pet/settings/icons/jump/ax)
+npm run ui-test   # 156 headless UI checks (pet 96 + settings 60, real DOM events)
 npm run perf      # 5 min × hidden / idle / expanded sampling of the release app
 npm run jump-probe
 ```
@@ -224,8 +232,15 @@ AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
 
 * Codex shows an AI-generated window title while its database stores the first
   prompt, so Codex uses navigation evidence for L3 and cannot do exact-title L2.
-* DSH is a single-window Electron app whose only deep link is `dsh://open` (focus),
-  so session-level jumping is impossible and is reported as L1.
+* DSH is a single-window Electron app: it has no session URL, so session selection
+  is done by clicking the sidebar row through the macOS AX API (requires
+  Accessibility). Electron's AX tree only exposes rendered sidebar rows, so a
+  session that is far outside the virtualized list degrades to app focus instead
+  of guessing; duplicate titles are resolved with project + relative-time evidence
+  and are reported as ambiguous rather than clicking the wrong session.
+* VSCode project focusing uses the `code` CLI when installed (PATH, Homebrew,
+  `/usr/local/bin`); without it the app falls back to `open -b com.microsoft.VSCode
+  <workspace>` and then AX window matching.
 * `ZCode.app` (Electron 41) exits immediately on the test host (macOS 27 beta);
   its data is shown, its jump is reported as unconfirmed. Details in `docs/JUMP.md`.
 * Claude Code is treated as the **VSCode extension host** only (per project scope);

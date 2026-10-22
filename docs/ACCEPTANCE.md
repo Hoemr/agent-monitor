@@ -14,7 +14,7 @@ Every command below was executed on this machine; unexecuted items are labelled
 | Repo / stack identified | Tauri 2 + Rust + static JS (Hoemr/agent-monitor v0.3.1), legacy Claude-Code-only scanner |
 | Build & run method | `cargo build --release`; binary `src-tauri/target/release/agent-monitor`; `.app` via `scripts/bundle-mac.sh` |
 | Real data sources for all 4 objects | Verified by reading files/SQLite and printing live counts (see below) |
-| Jump interfaces verified | Codex L3, DSH L1, VSCode L2, Terminal L1 (evidence in `docs/JUMP.md`) |
+| Jump interfaces verified | Codex L3, DSH L1 *(L3 since Phase 7)*, VSCode L2, Terminal L1 (evidence in `docs/JUMP.md`) |
 | Capability matrix | `docs/CAPABILITIES.md`, verified/待验证/blocked separated |
 | Assumptions recorded | `docs/PHASE0.md` §7 + “corrections” at the end |
 
@@ -80,8 +80,8 @@ All jump evidence is in `docs/JUMP.md` (commands + before/after titles).
 | VSCode agent plugin is VSCode-hosted | **Pass** — Claude Code records now always use `host="vscode"` and target `com.microsoft.VSCode`; verified in `--dump-tasks` (`claude hosts: [('vscode', 'com.microsoft.VSCode')]`). No Claude task is routed to Terminal |
 | Window-level combinations | **Pass** — VSCode: window raised and verified (`success/L2`) |
 | VSCode target focuses its window | **Pass** — evidence #5 in JUMP.md |
-| Independent apps use verified level | **Pass** — ChatGPT L3, DSH L1, ZCode blocked (declared L1, reported unconfirmed/degraded) |
-| Shared window is not mis-declared | **Pass** — DSH capped at L1; multiple window matches → `window_ambiguous` degraded outcome |
+| Independent apps use verified level | **Pass** — ChatGPT L3, DSH L1 *(L3 since Phase 7)*, ZCode blocked (declared L1, reported unconfirmed/degraded) |
+| Shared window is not mis-declared | **Pass** — DSH capped at L1 at the time *(L3 via AX sidebar since Phase 7)*; multiple window matches → `window_ambiguous` degraded outcome |
 | Closed target / permission / app missing feedback | **Pass (code + tests)** — `Invalid` target fails with `workspace_missing` etc. and a dismiss action; AppleScript permission errors map to `needs_accessibility`/`needs_automation` with a “Grant permission” toast (unit tested) |
 | No infinite retries / repeated permission dialogs | **Pass** — one attempt per click, no loops; settings only opened by the user's toast action |
 
@@ -303,6 +303,74 @@ L2/L3 attempt now carries `permission_needed` + `next_step: "grant_permission"`.
 * Real Notification Center appearance/denial is a system-level toggle; the
   command is unit-tested and executed with `osascript` but a denied banner cannot
   be asserted headlessly.
+
+---
+
+## Phase 7 — project/session-precise jump + footer count (0.6.0, 2026-10-22)
+
+### Automated gates
+
+| Gate | Command | Result |
+|---|---|---|
+| Rust unit tests | `cargo test --manifest-path src-tauri/Cargo.toml` | **139 passed, 0 failed** (120 baseline + 19 for AX/jump matching) |
+| Pet UI (real DOM) | `scripts/ui-selftest.html` | **ALL PASS, 96 checks** (88 + 8 footer/visible-count checks) |
+| Settings UI (real DOM) | `scripts/ui-selftest-settings.html` | **ALL PASS, 60 checks** (session-route labels/mock updated) |
+| Release build | `cargo build --release` | 0 warnings / 0 errors |
+| Bundle | `bash scripts/bundle-mac.sh` | `dist/Agent Monitor.app` 0.6.0, ad-hoc |
+
+### DSH session-level jump (real app, 3 round-trips)
+
+New native AX/CoreGraphics bridge (`src-tauri/src/ax.rs`; no crates, no subprocess
+helper). Sidebar rows are scored on title + project (cwd basename) + relative
+time; the matched row is clicked and the focused window title is read back.
+
+```text
+--jump dsh:session-0bfd41d5… ("# 给 agent-monitor 增加“设置页 +")
+  before: 多窗口询问提醒与跳转 — DeepSeek Harness
+  after : # 给 agent-monitor 增加“设置页 + — DeepSeek Harness
+  outcome: success / L3 / opened_session      (3/3 round-trips, row stable after 2 reads)
+
+--jump dsh:session-9ab2d0aa… (this conversation)  -> success / L3, back to 多窗口…
+already-visible session                            -> success / L3, no click
+subagent session not rendered in the sidebar       -> degraded / L1 / session_row_not_found
+                                                      (window unchanged — never a guessed click)
+```
+
+`--ax-rows <pid>` prints trusted state, focused window title, window titles and
+every sidebar row with frames — the read-only verification aid.
+
+### VSCode project-precise window jump (real, two windows)
+
+Two VSCode windows open, the other project focused:
+
+```text
+focused before: Welcome — AgentMonitor
+--jump claude-code:625572ae…  -> success / L2 / opened_window
+detail: arr_submission.pdf — DropDPO-Confidence
+focused after : arr_submission.pdf — DropDPO-Confidence
+```
+
+`code --reuse-window <workspace_path>` (resolved from `/opt/homebrew/bin/code`)
+selects the right project window; AX raise remains the fallback when the CLI is
+missing.
+
+### Footer count
+
+With 6 sessions and `max_visible_rows=5` the expanded footer reads
+`5 / 6 sessions` (`5 / 6 个会话`) with the hint “Showing 5 of 6 sessions”; with
+rows=8 it reads `6 sessions`; with 20 sessions at rows=5 it reads
+`5 / 20 sessions`; an empty snapshot reads `0 sessions`. Covered by 8 real-DOM
+checks in the pet suite.
+
+### Deferred / known limits
+
+* DSH sidebar AX exposes only rendered rows (virtualized list); a row outside the
+  viewport degrades honestly instead of scrolling automatically.
+* Identical titles that also share project and time bucket are reported as
+  `session_ambiguous` rather than clicking one of them.
+* The DSH AX route depends on Electron's accessibility tree; a DSH update could
+  change the tree, which is why every jump verifies the window title before
+  claiming L3.
 
 ---
 

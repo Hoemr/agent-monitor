@@ -90,6 +90,24 @@ function questionFixture(n, attentionCount) {
     question_count: n, agents: [], tasks: tasks
   };
 }
+// Plain `n`-session snapshot for the footer count checks (no attention).
+function sessionFixture(n) {
+  var now = Math.floor(Date.now() / 1000);
+  var tasks = [];
+  for (var i = 0; i < n; i++) {
+    tasks.push({
+      id: 'footer:' + i, agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+      title: 'Session ' + i, status: 'running', status_reason: 'fixture',
+      last_activity_secs: now - i * 10, collected_at_secs: now, summary: null,
+      origin: 'index', target: {}, target_validity: 'valid', invalid_reason: null,
+      capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false
+    });
+  }
+  return {
+    collected_at_secs: now, attention_count: 0, question_count: 0,
+    agents: [], tasks: tasks
+  };
+}
 var frame = document.getElementById('frame');
 frame.addEventListener('load', async function () {
   try {
@@ -117,6 +135,17 @@ frame.addEventListener('load', async function () {
     // 1. rows render
     var rows = doc.querySelectorAll('.task');
     check('renders one row per task', rows.length === 6, 'rows=' + rows.length);
+
+    // 1b. the footer reports what the window can show, not the raw total
+    var footerCount = doc.getElementById('footer-count');
+    check('footer shows visible / total for the 6-task mock at rows=5',
+      !!footerCount && /^5 \/ 6 (sessions|个会话)$/.test(footerCount.textContent.trim()),
+      'text=' + JSON.stringify(footerCount.textContent) +
+      ' rows=' + T.settings.max_visible_rows);
+    check('footer count hint mentions 5 of 6',
+      /5/.test(footerCount.title) && /6/.test(footerCount.title) &&
+      /Showing|当前窗口显示/.test(footerCount.title),
+      'title=' + footerCount.title);
 
     // 2. status glyph is not colour-only and distinct
     var glyphs = rows.length ? Array.from(rows).map(function (r) {
@@ -818,6 +847,61 @@ frame.addEventListener('load', async function () {
 
     T.setAttentionHold(4000);
     await T.setSettings({ animations: 'system', language: 'en', new_badge: true });
+    T.setMockSnapshot(fixture());
+    T.applyPetState({ mode: 'collapsed', edge: 'none' });
+    await sleep(20);
+
+    // ── Footer: visible / total session count (new) ────────────────
+    // The expanded window only fits max_visible_rows rows, so the footer must
+    // not claim the raw total when the list is scrolled.
+    await T.setSettings({ language: 'en', max_visible_rows: 5 });
+    T.setMockSnapshot(sessionFixture(6));
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(20);
+    check('footer shows visible / total when rows are scrolled',
+      /^5 \/ 6 (sessions|个会话)$/.test(footerCount.textContent.trim()),
+      'text=' + JSON.stringify(footerCount.textContent));
+    check('footer count hint is localized and mentions visible/total',
+      /Showing 5 of 6|当前窗口显示 5 个，共 6 个/.test(footerCount.title) &&
+      footerCount.getAttribute('aria-label') === footerCount.title,
+      'title=' + footerCount.title + ' aria=' + footerCount.getAttribute('aria-label'));
+
+    // 37b. widening the window to all 6 rows drops the total
+    await T.setSettings({ max_visible_rows: 8 });
+    await sleep(20);
+    check('footer drops the total when every row fits',
+      /^6 (sessions|个会话)$/.test(footerCount.textContent.trim()) &&
+      footerCount.textContent.indexOf('/') === -1,
+      'text=' + JSON.stringify(footerCount.textContent) +
+      ' title=' + footerCount.title);
+    check('footer hint follows the wider window',
+      /Showing 6 of 6|当前窗口显示 6 个，共 6 个/.test(footerCount.title),
+      'title=' + footerCount.title);
+
+    // 37c. the visible count never exceeds max_visible_rows
+    await T.setSettings({ max_visible_rows: 5 });
+    T.setMockSnapshot(sessionFixture(20));
+    await sleep(20);
+    check('footer caps the visible count at max_visible_rows',
+      /^5 \/ 20 (sessions|个会话)$/.test(footerCount.textContent.trim()) &&
+      /Showing 5 of 20|当前窗口显示 5 个，共 20 个/.test(footerCount.title),
+      'text=' + JSON.stringify(footerCount.textContent) +
+      ' title=' + footerCount.title);
+
+    // 37d. an empty snapshot stays "0 sessions"
+    T.setMockSnapshot({
+      collected_at_secs: 0, attention_count: 0, question_count: 0,
+      agents: [], tasks: []
+    });
+    await sleep(20);
+    check('footer stays 0 sessions when empty',
+      /^0 (sessions|个会话)$/.test(footerCount.textContent.trim()) &&
+      /Showing 0 of 0|当前窗口显示 0 个，共 0 个/.test(footerCount.title),
+      'text=' + JSON.stringify(footerCount.textContent) +
+      ' title=' + footerCount.title);
+
+    // Restore a normal state after the footer checks.
+    await T.setSettings({ max_visible_rows: 5, language: 'en' });
     T.setMockSnapshot(fixture());
     T.applyPetState({ mode: 'collapsed', edge: 'none' });
     await sleep(20);

@@ -192,8 +192,8 @@ impl Source for DshSource {
             name: "DSH".into(),
             source: "~/.dsh/storages/session_projcache/sessions/*.json".into(),
             origin: DataOrigin::Cache,
-            max_level: JumpLevel::L1,
-            notes: "Single-window Electron host: its open-url handler only implements dsh://open (focus app). No session-level route exists, so DSH is application-level only."
+            max_level: JumpLevel::L3,
+            notes: "Single-window Electron host; the sidebar session list is exposed via macOS AX and a real click switches the session (L3, verified by window-title read-back; requires Accessibility)."
                 .into(),
         }
     }
@@ -282,17 +282,20 @@ impl Source for DshSource {
                     deep_link: None,
                     window_title: Some(row.title.clone()),
                     workspace_path: Some(row.cwd.clone()),
+                    // Session-level route: the sidebar AX row is clicked and the
+                    // focused window title verifies the switch (jump.rs).
+                    host_ref: Some("dsh-sidebar".into()),
                     ..Default::default()
                 },
                 target_validity: TargetValidity::Unconfirmed,
                 invalid_reason: None,
                 capability: JumpCapability {
-                    max_level: JumpLevel::L1,
-                    notes: "Application-level only: the host exposes no session deep link (verified in docs/JUMP.md)."
+                    max_level: JumpLevel::L3,
+                    notes: "Sidebar session selection via a native macOS AX click, verified by the focused window title; requires Accessibility."
                         .into(),
-                    requires: vec![PermissionKind::Automation],
+                    requires: vec![PermissionKind::Accessibility],
                 },
-                level: JumpLevel::L1,
+                level: JumpLevel::L3,
                 pinned: false,
             };
             if !row.cwd.is_empty() && !Path::new(&row.cwd).is_dir() {

@@ -99,6 +99,7 @@ var I18N = {
     empty: 'No active sessions',
     emptyHint: 'Start a Codex, DSH, ZCode or Claude Code session',
     sessions: 'sessions',
+    visibleCountTitle: 'Showing {v} of {t} sessions',
     needAttention: 'need attention',
     clear: 'Clear',
     collapse: 'Collapse',
@@ -140,6 +141,10 @@ var I18N = {
       no_target: 'This task has no jump target.',
       no_session_route: 'No session-level route is available.',
       no_window_hint: 'No window title is available to match.',
+      ax_unavailable: 'Could not read the DSH sidebar (Accessibility permission or an unsupported app version).',
+      session_row_not_found: 'The session is not visible in the DSH sidebar — expand its project or scroll it into view.',
+      session_ambiguous: 'Several sessions share this title; project/time evidence could not tell them apart.',
+      session_click_unverified: 'Clicked the session row, but the window did not switch.',
       task_gone: 'The task no longer exists.',
       grant: 'Grant permission'
     }
@@ -149,6 +154,7 @@ var I18N = {
     empty: '暂无活跃会话',
     emptyHint: '启动 Codex、DSH、ZCode 或 Claude Code 会话',
     sessions: '个会话',
+    visibleCountTitle: '当前窗口显示 {v} 个，共 {t} 个会话',
     needAttention: '个待处理',
     clear: '清除',
     collapse: '收起',
@@ -190,6 +196,10 @@ var I18N = {
       no_target: '该任务没有可跳转目标。',
       no_session_route: '没有可用的会话级跳转方式。',
       no_window_hint: '没有可用于匹配的窗口标题。',
+      ax_unavailable: '无法读取 DSH 侧栏（需要辅助功能权限，或应用版本不兼容）。',
+      session_row_not_found: 'DSH 侧栏中没有该会话——请展开所属项目或滚动到可见位置。',
+      session_ambiguous: '存在同名会话，项目/时间信息不足以区分。',
+      session_click_unverified: '已点击会话行，但窗口没有切换。',
       task_gone: '任务已不存在。',
       grant: '去授权'
     }
@@ -575,6 +585,9 @@ function applySettings(next) {
   petState.collapse_delay_ms = settings.collapse_delay_ms;
 
   applyRows();
+  // The footer count depends on max_visible_rows as well as the data, so a
+  // settings change repaints it even when the render hash below is unchanged.
+  updateFooterCount();
 
   var needsRender = previous.language !== settings.language ||
     previous.show_summary !== settings.show_summary ||
@@ -601,8 +614,13 @@ function applySettings(next) {
 // `settings.max_visible_rows` drives the CSS max-height; the window itself is
 // resized by Rust to exactly 44 + rows × 64 + 26 logical px. In the mock the
 // page emulates that window height so layout/screenshots match the real app.
+// The 1..8 clamp is shared with Rust and with the footer's visible count.
+function rowCap() {
+  return Math.max(1, Math.min(8, Number(settings.max_visible_rows) || 5));
+}
+
 function applyRows() {
-  var rows = Math.max(1, Math.min(8, Number(settings.max_visible_rows) || 5));
+  var rows = rowCap();
   listEl.style.maxHeight = (rows * 64) + 'px';
   syncMockGeometry();
 }
@@ -624,7 +642,7 @@ function syncMockGeometry() {
   appEl.style.removeProperty('width');
   var expanded = mode === 'expanded' || mode === 'dragging';
   if (!expanded) { appEl.style.removeProperty('height'); return; }
-  var rows = Math.max(1, Math.min(8, Number(settings.max_visible_rows) || 5));
+  var rows = rowCap();
   // Mirror Rust's `visible_rows`/`expanded_height_logical`: never taller than
   // the row cap, never taller than the data, always at least one row.
   var tasks = (snapshot.tasks || []).length;
@@ -645,6 +663,22 @@ function openSettings() {
 }
 
 // ── Rendering ───────────────────────────────────────────────────
+
+// Footer count: how many sessions the current window can actually show, plus
+// the total when the list is scrolled. `visible` follows the same rule as the
+// expanded window height (min(tasks, clamp(max_visible_rows, 1..8))), except
+// that an empty snapshot stays 0 instead of the window's one-row minimum.
+function updateFooterCount() {
+  var total = (snapshot.tasks || []).length;
+  var visible = Math.min(total, rowCap());
+  var truncated = total > visible;
+  footerCountEl.textContent = truncated
+    ? visible + ' / ' + total + ' ' + t('sessions')
+    : total + ' ' + t('sessions');
+  var title = t('visibleCountTitle').replace('{v}', visible).replace('{t}', total);
+  footerCountEl.title = title;
+  footerCountEl.setAttribute('aria-label', title);
+}
 
 function render(snapshotData) {
   if (!snapshotData) return;
@@ -677,7 +711,7 @@ function render(snapshotData) {
     ? attention + ' ' + t('needAttention')
     : '';
 
-  footerCountEl.textContent = tasks.length + ' ' + t('sessions');
+  updateFooterCount();
   footerHintEl.textContent = FOOTER_HINT;
   applyStaticStrings();
   updateNewIndicators();

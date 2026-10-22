@@ -10,14 +10,24 @@ signal confirmed it; “command sent” is never counted.
 1. `TargetValidity::Invalid` → fail immediately (`workspace_missing`, `rollout_missing`, …) with next step `dismiss`. No blind app activation.
 2. **L3** — session/tab:
    * host deep link (`open <url>`) + read back frontmost process and window titles;
-     * exact title match (DSH-style hosts), or
+     * exact title match, or
      * a **new window title** compared to the pre-jump snapshot (Codex AI titles);
+   * **DSH sidebar session click** (`host_ref = "dsh-sidebar"`, round 2): native
+     macOS AX read of the sidebar rows → match on session title + project (cwd
+     basename) + relative time → synthetic click on the row → focused window title
+     read-back (`<session> — DeepSeek Harness`). Requires Accessibility; DSH has no
+     session URL, so this is the only possible session route;
    * Terminal tab: `ps`+`lsof` resolves the controlling tty, AppleScript selects the
      tab by tty and reads it back.
-3. **L2** — window: System Events AX window list → `perform action "AXRaise"` +
-   `set index of window to 1` → read back frontmost process. Multiple matching
-   windows are focused but reported as `window_ambiguous` (degraded) rather than
-   claiming a specific session.
+3. **L2** — window:
+   * **VSCode project-precise** (round 2): `code --reuse-window <workspace_path>`
+     focuses the already-open window for that project even with many VSCode
+     windows; verified by frontmost `Code` + AX focused window title containing
+     the workspace basename (Fallback: `open -b com.microsoft.VSCode <path>`);
+   * otherwise System Events AX window list → `perform action "AXRaise"` +
+     `set index of window to 1` → read back frontmost process. Multiple matching
+     windows are focused but reported as `window_ambiguous` (degraded) rather than
+     claiming a specific session.
 4. **L1** — `open -b <bundle>` (fallback `open -a <name>`) → frontmost verification;
    if it cannot be confirmed the outcome is `unconfirmed`.
 5. **L0** — no target → `no_target`/`task_gone`.
@@ -110,8 +120,8 @@ is the most common reason "jump suddenly stopped working".
   dragged into the Accessibility list;
 * a three-step first-run guide and a note about ad-hoc re-authorisation;
 * the per-agent capability table (max level, installed/running, deep-link
-  support) so declared limitations (DSH L1, ZCode blocked) are visible in the
-  app instead of only in this document.
+  support — Codex/DSH session routes, VSCode project windows, ZCode blocked)
+  so declared limitations are visible in the app instead of only in this document.
 
 ### Command `get_jump_diagnostics`
 
@@ -144,10 +154,78 @@ is the most common reason "jump suddenly stopped working".
 
 ### Jump outcome fixes (same release)
 
-* An L1-only adapter (DSH) reports **success** at its declared maximum level
+* An app-level-only jump reports **success** when it reaches its declared
+  maximum level (this was the DSH L1 fix in 0.5.0; DSH reaches L3 since round 2)
   instead of a permanent "degraded" toast; degradation is now
   `requested > achieved`.
 * When the L2/L3 attempts fail because of a missing privacy grant, the final
   outcome carries `permission_needed` + `next_step: "grant_permission"` even if
   the app itself was activated, so the toast offers the grant button instead of
   an unexplained "focus unconfirmed".
+
+
+## Round 2 — project/session-precise jump (0.6.0, measured 2026-10-22)
+
+The earlier "DSH capped at L1" finding is superseded: the host still has **no
+session URL** (`dsh://open` only focuses the app), but the sidebar is exposed
+through the native macOS AX API, and a real click on a session row switches the
+window. This is implemented with a small AX/CoreGraphics bridge
+(`src-tauri/src/ax.rs`, no new crates): read `AXRow`s of the sidebar outline,
+score them, click the matched row's frame with `CGEvent`, read back the focused
+window title.
+
+### Matching evidence (never a guessed click)
+
+A DSH session row is scored on three independent signals:
+
+1. **title** — normalized exact match, then bidirectional prefix (≥6 chars) so
+   truncated sidebar labels still match; leading `#`/trailing ellipsis normalized;
+2. **project** — `target.workspace_path` basename vs the sidebar workspace row
+   (DSH groups sessions by project, which disambiguates duplicate titles);
+3. **relative time** — the row's `刚刚/N分钟/N小时/N天` label vs
+   `now - last_activity_secs`, as a tie-breaker.
+
+If two different rows tie, the outcome is `session_ambiguous` and **no click is
+made**. After activation the sidebar re-lays out (transient 1 px frames / partial
+rows), so the route waits for a sane frame that is identical across two
+consecutive AX reads, clicks immediately, and on a verify miss re-reads and
+retries once; only then `session_click_unverified`.
+
+### Measured results (real app, real DSH data)
+
+| Action | Evidence (before → after) | Outcome |
+|---|---|---|
+| `--jump dsh:session-0bfd41d5…` ("# 给 agent-monitor 增加“设置页 +") | focused title `多窗口询问提醒与跳转 — DeepSeek Harness` → `# 给 agent-monitor 增加“设置页 + — DeepSeek Harness` | **success / L3 `opened_session`** (3/3 round-trips; row stable after 2 reads) |
+| jump back to `dsh:session-9ab2d0aa…` (this conversation) | window title returns to `多窗口询问提醒与跳转 — DeepSeek Harness` | **success / L3** |
+| already visible session | no click; focused title read-back matches | **success / L3** |
+| subagent session not rendered in the root sidebar | no click; app activated only | **degraded / L1 `session_row_not_found`** (honest; window unchanged) |
+| `--ax-rows <pid>` | trusted=true, 14–20 sidebar rows with frames + focused title | read-only verification aid |
+
+### VSCode project-precise window jump (real, two windows)
+
+Setup: two VSCode windows open (`Welcome — AgentMonitor` focused,
+`arr_submission.pdf — DropDPO-Confidence` in the background). Jump to a Claude
+Code session whose workspace is `~/Paper/DropDPO-Confidence`:
+
+```text
+focused before: Welcome — AgentMonitor
+--jump claude-code:625572ae… → success / L2 / opened_window
+detail: arr_submission.pdf — DropDPO-Confidence
+focused after : arr_submission.pdf — DropDPO-Confidence   (window order swapped)
+```
+
+`code --reuse-window <path>` was resolved from `/opt/homebrew/bin/code`; without
+the CLI the route falls back to `open -b com.microsoft.VSCode <path>` and then to
+the legacy AX raise, so nothing regresses.
+
+### New reason keys (pet toast i18n)
+
+`ax_unavailable`, `session_row_not_found`, `session_ambiguous`,
+`session_click_unverified` (plus existing `needs_accessibility`). All are
+reported with an actionable Chinese/English message; failures never leave the UI
+silent.
+
+### Verification footer count (same release)
+
+The expanded popup now shows `visible / total sessions` (e.g. `5 / 119 个会话`)
+instead of the raw total, matching the rows the window can display.
