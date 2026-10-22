@@ -65,6 +65,28 @@ capability table (see [`docs/JUMP.md`](docs/JUMP.md)).
 
 ![jump setup in Chinese](screenshots/settings-jump-zh.png)
 
+### New completions, status dots & in-app updates (0.7.0)
+
+Opening the panel now marks the rows that completed since your last look with a
+green dot, so you can see *which* sessions are new. While the pet is collapsed a
+three-dot status cluster shows **yellow** (someone is waiting on a question),
+**green** (new completions) and **red** (failed/interrupted sessions) at the same
+time, with the jump-notice dot moved to the bottom-right corner.
+
+| Collapsed: three status dots | Expanded: newly completed rows |
+|---|---|
+| ![status dots](screenshots/pet-status-dots-dark.png) | ![new row markers](screenshots/pet-expanded-markers-dark.png) |
+
+Settings → Updates (and tray → Check for Updates…) checks GitHub Releases,
+downloads the signed `.app` tarball, verifies it and installs it in place, then
+offers a restart — no reinstall ([`docs/UPDATING.md`](docs/UPDATING.md)).
+
+| Updates (dark) | Updates (light) |
+|---|---|
+| ![updates](screenshots/settings-update-dark.png) | ![updates light](screenshots/settings-update-light.png) |
+
+![updates in Chinese](screenshots/settings-update-zh.png)
+
 ### Menu-bar icon
 
 ![tray icons](screenshots/tray-icons.png)
@@ -129,8 +151,19 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
   window can display.
 * **New-completion indicator**: while collapsed/hidden, an unfilled green ring
   (and the expanded header chip) shows how many tasks completed since you last
-  looked at the panel — switchable with `new_badge`. A pending jump notice shows
-  as a small text-free dot while collapsed and expands into the full toast.
+  looked at the panel — switchable with `new_badge`. When you open the panel,
+  the rows that are new carry a green “newly completed” marker, so you can see
+  *which* ones changed, not just the count.
+* **Three status dots while collapsed**: a compact top-left cluster shows
+  **yellow** (a session is waiting on a question), **green** (new completions
+  since your last look) and **red** (failed/interrupted sessions). All three can
+  appear at once and each has an accessible label; the jump-feedback notice dot
+  moved to the bottom-right corner so the two never collide.
+* **Updates built in**: Settings → Updates (and tray → Check for Updates…) checks
+  GitHub Releases, downloads the signed `.app` tarball, verifies its minisign
+  signature, installs it in place and offers a restart — no reinstall, no manual
+  download. Launch checks are automatic (switchable) and silent when up to date
+  or offline. See [`docs/UPDATING.md`](docs/UPDATING.md).
 * **Custom icon framework**: make a square PNG/JPEG/WebP (≤2 MB), upload it in
   Settings → Desktop Pet → Icon, and the collapsed pet / hidden tab use your
   artwork — built-in glyph remains the fallback. Spec and extension points:
@@ -210,8 +243,8 @@ System Settings pane. It never resets or forces permissions.
 ## Development
 
 ```bash
-npm test          # cargo test (139 unit tests: model/monitor/attention/agents/pet/settings/icons/jump/ax)
-npm run ui-test   # 156 headless UI checks (pet 96 + settings 60, real DOM events)
+npm test          # cargo test (151 unit tests: model/monitor/attention/agents/pet/settings/icons/jump/ax/update)
+npm run ui-test   # 210 headless UI checks (pet 129 + settings 81, real DOM events)
 npm run perf      # 5 min × hidden / idle / expanded sampling of the release app
 npm run jump-probe
 ```
@@ -220,7 +253,8 @@ Layout/design notes for the frontend contract: [`docs/UI_CONTRACT.md`](docs/UI_C
 Adding an agent: [`docs/NEW_AGENT.md`](docs/NEW_AGENT.md) — one adapter file + one
 registry line; no UI or monitor changes.
 Custom artwork: [`docs/ICONS.md`](docs/ICONS.md) — image spec, upload flow, slots
-and how to add a new slot.
+and how to add a new slot. In-app updates: [`docs/UPDATING.md`](docs/UPDATING.md) —
+signing keys, CI secrets, release assets and local verification.
 
 Extension acceptance uses the clearly-labelled synthetic adapter:
 
@@ -241,6 +275,14 @@ AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
 * VSCode project focusing uses the `code` CLI when installed (PATH, Homebrew,
   `/usr/local/bin`); without it the app falls back to `open -b com.microsoft.VSCode
   <workspace>` and then AX window matching.
+* Updates are **full-artifact in-app updates** (like cc-switch), not binary
+  deltas: the normal ~9 MB `.app` tarball is downloaded and swapped in place.
+  The bundle is ad-hoc signed, so macOS may ask for Accessibility/Automation
+  again after an update (Settings → Jump shows the live status).
+* The GitHub Release must be **published** (not a draft/prerelease) and carry
+  `latest.json` + the signed macOS tarball; until a newer release exists the
+  updater correctly reports "up to date". CI needs
+  `TAURI_SIGNING_PRIVATE_KEY` — see [`docs/UPDATING.md`](docs/UPDATING.md).
 * `ZCode.app` (Electron 41) exits immediately on the test host (macOS 27 beta);
   its data is shown, its jump is reported as unconfirmed. Details in `docs/JUMP.md`.
 * Claude Code is treated as the **VSCode extension host** only (per project scope);

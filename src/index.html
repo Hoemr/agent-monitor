@@ -13,6 +13,13 @@
          aria-label="Agent Monitor, no active sessions, click to expand">
       <img id="pet-icon" class="pet-icon" hidden alt="">
       <span class="pet-glyph" aria-hidden="true"><i></i><i></i><i></i></span>
+      <!-- Collapsed semantic status cluster: amber = waiting on a question,
+           green = newly completed, red = failed/interrupted. -->
+      <span id="status-dots" class="status-dots" role="img" hidden>
+        <span id="status-dot-question" class="status-dot question" hidden></span>
+        <span id="status-dot-new" class="status-dot new" hidden></span>
+        <span id="status-dot-failed" class="status-dot failed" hidden></span>
+      </span>
       <span id="badge" class="badge" hidden aria-hidden="true">0</span>
       <span id="new-badge" class="new-badge" hidden aria-hidden="true">0</span>
       <span id="notice-dot" class="notice-dot" hidden aria-hidden="true"></span>

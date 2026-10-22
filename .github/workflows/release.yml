@@ -1,9 +1,18 @@
 name: Build and release (macOS)
 
+# Tag pushes always produce signed updater artifacts: an unsigned release would
+# silently break in-app updates for every existing install, so a missing
+# TAURI_SIGNING_PRIVATE_KEY fails the job loudly. Manual workflow_dispatch runs
+# can still be used as dry runs (skip_updater=true) without the secret.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      skip_updater:
+        description: 'Dry run: skip signed updater artifacts (no latest.json)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -16,6 +25,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Decide whether to build updater artifacts
+        id: updater
+        run: |
+          sign=false
+          if [ "${GITHUB_REF}" != "${GITHUB_REF#refs/tags/}" ]; then
+            sign=true
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ inputs.skip_updater }}" != "true" ]; then
+            sign=true
+          fi
+          echo "sign=${sign}" >> "$GITHUB_OUTPUT"
+          echo "updater artifacts: ${sign}"
+
       - name: Test
         run: cargo test --release --manifest-path src-tauri/Cargo.toml
 
@@ -25,19 +50,65 @@ jobs:
       - name: Assemble .app bundle
         run: bash scripts/bundle-mac.sh
 
-      - name: Package
+      - name: Package (manual download zip)
         run: |
           cd dist
           ditto -c -k --sequesterRsrc --keepParent "Agent Monitor.app" "Agent-Monitor-macos-arm64.zip"
 
-      - name: Upload artifact
+      - name: Require the updater signing secret
+        if: steps.updater.outputs.sign == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Signed updater artifacts are mandatory for releases (in-app updates verify this signature); add the secret before tagging."
+            exit 1
+          fi
+
+      - name: Build signed updater artifacts (tarball + .sig + latest.json)
+        if: steps.updater.outputs.sign == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ -n "${GITHUB_REF_NAME:-}" ] && git rev-parse -q --verify "refs/tags/${GITHUB_REF_NAME}" >/dev/null; then
+            NOTES="$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}")"
+            if [ -n "${NOTES//[[:space:]]/}" ]; then export RELEASE_NOTES="${NOTES}"; fi
+          fi
+          bash scripts/make-updater-artifact.sh --tag "${GITHUB_REF_NAME}"
+
+      - name: Upload manual-download artifact
         uses: actions/upload-artifact@v4
         with:
           name: Agent-Monitor-macos-arm64
           path: dist/Agent-Monitor-macos-arm64.zip
 
-      - name: Attach to release
+      - name: Upload updater artifacts
+        if: steps.updater.outputs.sign == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Agent-Monitor-macos-arm64-updater
+          path: |
+            dist/Agent-Monitor-macos-arm64.app.tar.gz
+            dist/Agent-Monitor-macos-arm64.app.tar.gz.sig
+            dist/latest.json
+
+      - name: Attach manual download to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Agent-Monitor-macos-arm64.zip
+
+      # latest.json must be attached to the same release as the tarball: the
+      # app reads https://github.com/<repo>/releases/latest/download/latest.json,
+      # which only resolves published, non-prerelease releases.
+      - name: Attach updater artifacts to release
+        if: startsWith(github.ref, 'refs/tags/') && steps.updater.outputs.sign == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Agent-Monitor-macos-arm64.app.tar.gz
+            dist/Agent-Monitor-macos-arm64.app.tar.gz.sig
+            dist/latest.json

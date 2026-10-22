@@ -60,9 +60,12 @@ renders whatever the snapshot contains.
 | `open_permission_settings` | `kind: "accessibility"\|"automation"` | — | system pane |
 | `get_jump_diagnostics` | — | JumpDiagnostics | permission + per-agent jump self-check (see `docs/JUMP.md`) |
 | `reveal_app_in_finder` | — | Result | reveal the .app bundle so it can be added to Accessibility |
+| `check_for_update` | — | UpdateCheck | in-app updater check (`{current_version, available, version?, notes?, pub_date?}`) |
+| `install_update` | — | Result | download + verify + install the update in place; emits progress events |
+| `restart_app` | — | — | restart to finish an installed update |
 | `get_settings` | — | Settings | single source of truth (see `docs/SETTINGS.md`) |
 | `set_settings` | `settings: Settings` | Settings (normalized) | instant save + broadcast `settings-changed` |
-| `reset_settings` | `scope: "all"\|"general"\|"attention"\|"monitor"\|"pet"\|"jump"` | Settings | group defaults |
+| `reset_settings` | `scope: "all"\|"general"\|"attention"\|"monitor"\|"pet"\|"jump"\|"update"` | Settings | group defaults |
 | `get_settings_meta` | — | SettingsMeta | data paths / version / system language |
 | `import_legacy_settings` | `lang?`, `pollMs?` | Settings \| null | one-shot v0.3.x migration |
 | `clear_dismissed` | — | number | clear ignored tasks (persisted) |
@@ -127,6 +130,7 @@ Settings (abridged; authoritative list in `docs/SETTINGS.md`):
   "notify_on_question": true,
   "alert_sound": true,
   "auto_show_on_question": true,
+  "auto_check_updates": true,
   "toast_on_degraded": true,
   "auto_dismiss_invalid": false,
   "legacy_imported": false
@@ -154,6 +158,15 @@ session **newly** blocks on a question:
 The pet pulses its amber question badge, the header shows the waiting count, and
 Rust separately shows a macOS notification / plays a sound / auto-reveals the
 panel. Detection, dedupe and settings: `docs/ATTENTION.md`.
+
+In-app updater events (see `docs/UPDATING.md`):
+
+| Event | Payload |
+|---|---|
+| `update-available` | `{ current_version, available: true, version, notes, pub_date }` (startup auto-check only) |
+| `update-progress` | `{ downloaded, total \| null }` |
+| `update-installed` | `{ version }` — restart still required |
+| `open-update-pane` | — (tray → Settings, select the Updates pane and check) |
 
 Dev-only: with `?mock=1` (or `?mock=collapsed`) the pet page renders a fixture and
 exposes `window.__AM_TEST__` for `scripts/ui-selftest.html`. The settings page uses
@@ -251,6 +264,23 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   pulse (disabled by `animations=off` / Reduce Motion) and the collapsed pet's
   aria-label/title mention the waiting count. The panel itself is auto-expanded
   by Rust when `auto_show_on_question` is on — the page never focuses the window.
+* New completions are identifiable **in the list**: on opening, the ids completed
+  since the last look are captured and each such row carries a green “newly
+  completed” marker while the panel stays open (the header chip still shows the
+  count; the collapsed green ring is unchanged).
+* Collapsed pet status dots (semantic, can coexist, top-left vertical cluster):
+  **yellow** = at least one session waits for an answer, **green** = at least one
+  new completion since the last look, **red** = at least one failed/interrupted
+  session. The cluster is hidden while the panel is expanded and uses a compact
+  variant in the 14 px edge/tray-hidden tab. The jump-feedback notice dot moved to
+  the bottom-right corner so it never collides with the status cluster. Each dot
+  and the cluster carry localized `aria-label`/`title` text.
+* Soft jump warnings (`degraded` / `unconfirmed`) are shown **once per task and
+  reason per session**; repeated clicks on the same stale target do not re-toast.
+  `failed` outcomes are always reported. This is in-memory only.
+* `update-available` paints a notice (“new version available”) with an **Update**
+  action that opens Settings (Updates pane); when collapsed it is the usual
+  notice dot (bottom-right). No auto-download.
 * `max_visible_rows` drives both the Rust window height (44 + rows×64 + 26) and
   the list's CSS max-height; `show_summary` / `show_jump_level` hide the
   corresponding row elements; `animations=off` disables window geometry
@@ -266,7 +296,7 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   hides it (state preserved); the app keeps running in the menu bar and remains
   **accessory** (no Dock icon).
 * Left group navigation (General / Attention / Monitoring / Desktop Pet / Jump /
-  Data) and a
+  Updates / Data) and a
   scrollable content pane; the selected group is remembered in the settings
   window's own localStorage, not in `settings.json`.
 * macOS Preferences behaviour: no OK/Cancel, every change is saved immediately;

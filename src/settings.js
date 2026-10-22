@@ -25,7 +25,8 @@ var mockState = {
   icons: { collapsed: null, hidden: null },
   iconMeta: {},
   dismissed: 3,
-  closed: false
+  closed: false,
+  updateCheckMode: 'available'   // 'available' | 'uptodate' | 'error'
 };
 
 function clone(value) {
@@ -69,7 +70,7 @@ function queryParam(name) {
 
 // ── Settings contract (mirrors src-tauri/src/settings.rs) ───────
 
-var GROUPS = ['general', 'attention', 'monitor', 'pet', 'jump', 'data'];
+var GROUPS = ['general', 'attention', 'monitor', 'pet', 'jump', 'update', 'data'];
 var GROUP_KEY = 'am-settings-group';
 
 var RETENTION_CHOICES = [1, 6, 24, 72];
@@ -104,6 +105,7 @@ function defaultSettings() {
     notify_on_question: true,
     alert_sound: true,
     auto_show_on_question: true,
+    auto_check_updates: true,
     refresh_interval: 'auto',
     retention_hours: 6,
     enabled_agents: { codex: true, dsh: true, zcode: true, claude_code: true },
@@ -161,6 +163,7 @@ function normalizeSettings(settings) {
   out.notify_on_question = !!out.notify_on_question;
   out.alert_sound = !!out.alert_sound;
   out.auto_show_on_question = !!out.auto_show_on_question;
+  out.auto_check_updates = !!out.auto_check_updates;
   if (out.icon_style !== 'custom') out.icon_style = 'builtin';
   return out;
 }
@@ -179,6 +182,8 @@ function resetScope(settings, scope) {
     out.notify_on_question = d.notify_on_question;
     out.alert_sound = d.alert_sound;
     out.auto_show_on_question = d.auto_show_on_question;
+  } else if (scope === 'update') {
+    out.auto_check_updates = d.auto_check_updates;
   } else if (scope === 'monitor') {
     out.refresh_interval = d.refresh_interval;
     out.retention_hours = d.retention_hours;
@@ -209,11 +214,11 @@ var I18N = {
     nav: {
       label: 'Settings sections',
       general: 'General', attention: 'Attention', monitor: 'Monitoring',
-      pet: 'Desktop Pet', jump: 'Jump', data: 'Data'
+      pet: 'Desktop Pet', jump: 'Jump', update: 'Updates', data: 'Data'
     },
     pane: {
       general: 'General', attention: 'Attention', monitor: 'Monitoring',
-      pet: 'Desktop Pet', jump: 'Jump', data: 'Data'
+      pet: 'Desktop Pet', jump: 'Jump', update: 'Updates', data: 'Data'
     },
     common: {
       cancel: 'Cancel', reset: 'Reset', clear: 'Clear', open: 'Open',
@@ -398,6 +403,40 @@ var I18N = {
       },
       reset: { label: 'Reset Jump…', confirm: 'Restore the Jump section to defaults?' }
     },
+    update: {
+      pane: 'Updates',
+      versionSection: 'Version',
+      currentVersion: 'Current version',
+      releases: 'Releases',
+      releasesNote: 'Release notes and downloads are published on GitHub. Opening the page is left to your browser; the URL above is shown for copying.',
+      autoChecks: 'Automatic checks',
+      autoCheck: {
+        label: 'Check for updates automatically',
+        desc: 'Check GitHub Releases once about 4 seconds after launch. When Agent Monitor is up to date or offline, nothing is shown.'
+      },
+      statusSection: 'Update',
+      check: {
+        label: 'Check for Updates',
+        desc: 'Ask GitHub whether a newer release exists. Nothing is downloaded until you confirm.'
+      },
+      checkButton: 'Check for Updates',
+      idle: 'Not checked yet.',
+      checking: 'Checking for updates…',
+      upToDate: 'Up to date ({version}).',
+      available: 'Update available: {version}',
+      published: 'Published {date}',
+      notesHeading: 'Release notes',
+      installButton: 'Download & Install',
+      installing: 'Downloading and installing {version}…',
+      progressPct: 'Downloading… {pct}%',
+      progressBytes: 'Downloaded {bytes}',
+      installed: 'Update {version} installed — restart to finish.',
+      restartButton: 'Restart Now',
+      errorTitle: 'Could not check for updates.',
+      errorInstall: 'Could not install the update.',
+      errorHint: 'Check your network connection and try again.',
+      reset: { label: 'Reset Updates…', confirm: 'Restore the Updates section to defaults?' }
+    },
     data: {
       pane: 'Data',
       storage: 'Storage',
@@ -431,11 +470,11 @@ var I18N = {
     nav: {
       label: '设置分区',
       general: '通用', attention: '提醒', monitor: '监控',
-      pet: '桌宠', jump: '跳转', data: '数据'
+      pet: '桌宠', jump: '跳转', update: '更新', data: '数据'
     },
     pane: {
       general: '通用', attention: '提醒', monitor: '监控',
-      pet: '桌宠', jump: '跳转', data: '数据'
+      pet: '桌宠', jump: '跳转', update: '更新', data: '数据'
     },
     common: {
       cancel: '取消', reset: '恢复', clear: '清除', open: '打开',
@@ -620,6 +659,40 @@ var I18N = {
       },
       reset: { label: '恢复跳转默认设置…', confirm: '将“跳转”恢复为默认设置？' }
     },
+    update: {
+      pane: '更新',
+      versionSection: '版本',
+      currentVersion: '当前版本',
+      releases: '发布页面',
+      releasesNote: '发布说明与下载包都发布在 GitHub。打开网页请使用浏览器；上方地址可直接复制。',
+      autoChecks: '自动检查',
+      autoCheck: {
+        label: '自动检查更新',
+        desc: '启动约 4 秒后在后台检查一次 GitHub Releases。已是最新或离线时不会打扰你。'
+      },
+      statusSection: '更新',
+      check: {
+        label: '检查更新',
+        desc: '向 GitHub 查询是否有更新的版本。在你确认之前不会下载任何内容。'
+      },
+      checkButton: '检查更新',
+      idle: '尚未检查。',
+      checking: '正在检查更新…',
+      upToDate: '已是最新版本（{version}）。',
+      available: '发现新版本：{version}',
+      published: '发布于 {date}',
+      notesHeading: '发布说明',
+      installButton: '下载并安装',
+      installing: '正在下载并安装 {version}…',
+      progressPct: '正在下载… {pct}%',
+      progressBytes: '已下载 {bytes}',
+      installed: '版本 {version} 已安装——重启后完成。',
+      restartButton: '立即重启',
+      errorTitle: '无法检查更新。',
+      errorInstall: '无法安装更新。',
+      errorHint: '请检查网络连接后重试。',
+      reset: { label: '恢复更新默认设置…', confirm: '将“更新”恢复为默认设置？' }
+    },
     data: {
       pane: '数据',
       storage: '存储',
@@ -754,6 +827,7 @@ var ICONS = {
   monitor: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.4"/><path d="M8 4.7V8l2.3 1.5"/></svg>',
   pet: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2.6" y="3.1" width="10.8" height="9.8" rx="2.2"/><circle cx="8" cy="8" r="1.7" fill="currentColor" stroke="none"/></svg>',
   jump: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.4 11.6 11.6 4.4M6.2 4.4h5.4v5.4"/></svg>',
+  update: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.4v6.9"/><path d="M5.3 6.8 8 9.5l2.7-2.7"/><path d="M2.9 12.6h10.2"/></svg>',
   data: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.2" y="4" width="11.6" height="8" rx="1.7"/><path d="M4.4 9.7h1.7"/><circle cx="11.1" cy="9.7" r=".9" fill="currentColor" stroke="none"/></svg>'
 };
 
@@ -773,7 +847,17 @@ var state = {
   diagnosticsLoaded: false,   // one successful read
   diagnosticsLoading: false,
   diagnosticsRequested: false, // lazy: the jump pane was opened at least once
-  diagnosticsError: null
+  diagnosticsError: null,
+  update: {
+    phase: 'idle',            // idle|checking|uptodate|available|installing|installed|error
+    result: null,             // { current_version, available, version, notes, pub_date }
+    progress: null,           // { downloaded, total }
+    error: null,
+    errorKind: null,          // 'check' | 'install'
+    installedVersion: null,
+    checking: false
+  },
+  pendingUpdatePane: false    // open-update-pane arrived before boot finished
 };
 
 var saveQueue = { inFlight: false, pending: null };
@@ -906,6 +990,7 @@ function button(cls, label, opts) {
     type: 'button',
     class: 'btn ' + (cls || ''),
     text: label,
+    disabled: opts.disabled ? true : null,
     'data-focus': opts.focus || null,
     'data-action': opts.action || null,
     'aria-label': opts.ariaLabel || null,
@@ -1072,8 +1157,8 @@ function stepperRow(opts) {
   ]);
 }
 
-function infoRow(labelKey, value) {
-  return h('div', { class: 'row' }, [
+function infoRow(labelKey, value, rowKey) {
+  return h('div', { class: 'row', 'data-row': rowKey || null }, [
     h('span', { class: 'row-text' }, [h('span', { class: 'row-title', text: i(labelKey) })]),
     h('span', { class: 'control' }, [h('span', { class: 'info-value', text: value })])
   ]);
@@ -1609,6 +1694,323 @@ function buildJumpAgents() {
   return section('jump.agents.heading', content, i('jump.agents.desc'));
 }
 
+// ── In-app updates (docs/UPDATING.md) ──────────────────────────
+//
+// The Updates pane is a small state machine (idle → checking → available →
+// installing → installed, or error). Nothing is polled: the “Check for
+// Updates” button and the tray `open-update-pane` event are the only triggers,
+// and progress comes from `update-progress` events. A manual check returns its
+// result; `update-available` is only the startup auto-check.
+
+var RELEASES_URL = 'https://github.com/Hoemr/agent-monitor/releases';
+
+function updateVersionText() {
+  var meta = state.meta || {};
+  return meta.app_version ? String(meta.app_version) : '—';
+}
+
+function normalizeUpdateResult(raw) {
+  raw = raw || {};
+  return {
+    current_version: raw.current_version || raw.currentVersion || '',
+    available: !!raw.available,
+    version: raw.version || '',
+    notes: raw.notes || '',
+    pub_date: raw.pub_date || raw.pubDate || ''
+  };
+}
+
+/* latest.json carries an RFC 3339 timestamp; show just the calendar date. */
+function formatUpdateDate(value) {
+  var text = String(value || '');
+  var match = /^(\d{4}-\d{2}-\d{2})/.exec(text);
+  return match ? match[1] : text;
+}
+
+/* During boot there is no settings object yet; the boot render paints the
+ * phase stored in the meantime. Away from the pane we only store the state so
+ * a burst of progress events cannot re-render an unrelated pane. */
+function renderUpdateView() {
+  if (!state.settings || state.group !== 'update') return;
+  renderAll();
+}
+
+function applyUpdateResult(raw) {
+  var result = normalizeUpdateResult(raw);
+  state.update.result = result;
+  state.update.error = null;
+  state.update.errorKind = null;
+  state.update.checking = false;
+  state.update.phase = result.available ? 'available' : 'uptodate';
+  renderUpdateView();
+}
+
+/* Startup auto-check → `update-available`. Paint it; never install. */
+function applyUpdateAvailable(raw) {
+  if (!raw || state.update.checking) return;
+  if (state.update.phase === 'installing' || state.update.phase === 'installed') return;
+  applyUpdateResult(raw);
+}
+
+function applyUpdateProgress(raw) {
+  if (!raw || state.update.phase === 'installed') return;
+  var downloaded = Number(raw.downloaded);
+  if (!isFinite(downloaded) || downloaded < 0) downloaded = 0;
+  var total = raw.total === null || raw.total === undefined ? null : Number(raw.total);
+  if (total !== null && (!isFinite(total) || total <= 0)) total = null;
+  state.update.checking = false;
+  state.update.phase = 'installing';
+  state.update.progress = { downloaded: downloaded, total: total };
+  renderUpdateView();
+}
+
+function applyUpdateInstalled(raw) {
+  var result = state.update.result || {};
+  state.update.checking = false;
+  state.update.phase = 'installed';
+  state.update.installedVersion = (raw && raw.version) || result.version || '';
+  state.update.progress = { downloaded: 1, total: 1 };
+  renderUpdateView();
+}
+
+function checkForUpdate() {
+  // Idempotent: a click and the tray event must never start two checks.
+  if (state.update.checking || state.update.phase === 'installing') return;
+  state.update.checking = true;
+  state.update.phase = 'checking';
+  state.update.error = null;
+  state.update.errorKind = null;
+  renderUpdateView();
+  invoke('check_for_update').then(function (payload) {
+    applyUpdateResult(payload);
+  }).catch(function (err) {
+    state.update.checking = false;
+    state.update.phase = 'error';
+    state.update.errorKind = 'check';
+    state.update.error = String(err && err.message ? err.message : err);
+    renderUpdateView();
+  });
+}
+
+function installUpdate() {
+  if (state.update.phase !== 'available') return;
+  state.update.phase = 'installing';
+  state.update.progress = { downloaded: 0, total: null };
+  state.update.error = null;
+  state.update.errorKind = null;
+  renderUpdateView();
+  invoke('install_update').then(function () {
+    // Normal path: `update-installed` already moved us on. This fallback keeps
+    // the user from being stuck at 100% if the event was lost.
+    if (state.update.phase === 'installing') {
+      state.update.phase = 'installed';
+      state.update.installedVersion = (state.update.result && state.update.result.version) || '';
+      state.update.progress = { downloaded: 1, total: 1 };
+      renderUpdateView();
+    }
+  }).catch(function (err) {
+    state.update.phase = 'error';
+    state.update.errorKind = 'install';
+    state.update.error = String(err && err.message ? err.message : err);
+    renderUpdateView();
+  });
+}
+
+function restartApp() {
+  invoke('restart_app').catch(function (err) {
+    flashStatus('error', String(err && err.message ? err.message : err), 5000);
+  });
+}
+
+/* Tray “Check for Updates…” → Settings on the Updates pane plus one check. */
+function openUpdatePane() {
+  if (!state.settings) {
+    state.pendingUpdatePane = true;
+    return;
+  }
+  state.pendingUpdatePane = false;
+  if (state.group !== 'update') selectGroup('update');
+  checkForUpdate();
+}
+
+function updateProgressInfo(progress) {
+  var downloaded = progress ? progress.downloaded : 0;
+  var total = progress ? progress.total : null;
+  if (total && total > 0) {
+    var pct = Math.max(0, Math.min(100, Math.round((downloaded / total) * 100)));
+    return { pct: pct, text: i('update.progressPct', { pct: pct }) };
+  }
+  var bytes = formatBytes(downloaded);
+  return { pct: null, text: i('update.progressBytes', { bytes: bytes || '0 B' }) };
+}
+
+function updateCheckButton() {
+  var u = state.update;
+  var busy = u.checking || u.phase === 'checking' || u.phase === 'installing';
+  return button('', i('update.checkButton'), {
+    action: 'update-check',
+    focus: 'update-check',
+    disabled: busy,
+    onclick: function () { checkForUpdate(); }
+  });
+}
+
+function updatePanel() {
+  var u = state.update;
+  var phase = u.phase || 'idle';
+  var children = [];
+
+  if (phase === 'available') {
+    var version = (u.result && u.result.version) || '';
+    children.push(h('div', { class: 'update-head' }, [
+      h('span', {
+        class: 'update-title',
+        role: 'status',
+        'aria-live': 'polite',
+        'data-update-title': '',
+        text: i('update.available', { version: version })
+      }),
+      h('span', { class: 'control update-actions' }, [
+        button('', i('update.installButton'), {
+          action: 'update-install',
+          focus: 'update-install',
+          onclick: function () { installUpdate(); }
+        })
+      ])
+    ]));
+    if (u.result && u.result.pub_date) {
+      children.push(h('span', {
+        class: 'update-meta',
+        'data-update-meta': '',
+        text: i('update.published', { date: formatUpdateDate(u.result.pub_date) })
+      }));
+    }
+    if (u.result && u.result.notes) {
+      children.push(h('div', {
+        class: 'update-notes',
+        'data-update-notes': '',
+        tabindex: '0',
+        'aria-label': i('update.notesHeading'),
+        text: u.result.notes
+      }));
+    }
+  } else if (phase === 'installing') {
+    var target = (u.result && u.result.version) || '';
+    var info = updateProgressInfo(u.progress);
+    var barAttrs = { class: 'update-progress', 'data-update-progress': '' };
+    if (info.pct !== null) {
+      barAttrs.role = 'progressbar';
+      barAttrs['aria-valuemin'] = '0';
+      barAttrs['aria-valuemax'] = '100';
+      barAttrs['aria-valuenow'] = String(info.pct);
+    } else {
+      barAttrs['data-indeterminate'] = 'true';
+    }
+    children.push(h('span', {
+      class: 'update-title',
+      role: 'status',
+      'aria-live': 'polite',
+      'data-update-title': '',
+      text: i('update.installing', { version: target })
+    }));
+    children.push(h('div', barAttrs, [
+      h('div', {
+        class: 'update-progress-fill',
+        style: 'width:' + (info.pct === null ? 35 : info.pct) + '%'
+      })
+    ]));
+    children.push(h('span', {
+      class: 'update-progress-text',
+      'data-update-progress-text': '',
+      text: info.text
+    }));
+  } else if (phase === 'installed') {
+    var installed = u.installedVersion || (u.result && u.result.version) || '';
+    children.push(h('div', { class: 'update-head' }, [
+      h('span', {
+        class: 'update-title',
+        role: 'status',
+        'aria-live': 'polite',
+        'data-update-title': '',
+        text: i('update.installed', { version: installed })
+      }),
+      h('span', { class: 'control update-actions' }, [
+        button('', i('update.restartButton'), {
+          action: 'update-restart',
+          focus: 'update-restart',
+          onclick: restartApp
+        })
+      ])
+    ]));
+  } else if (phase === 'checking') {
+    children.push(h('span', {
+      class: 'update-title',
+      role: 'status',
+      'aria-live': 'polite',
+      'data-update-title': '',
+      text: i('update.checking')
+    }));
+  } else if (phase === 'uptodate') {
+    var current = (u.result && u.result.current_version) || updateVersionText();
+    children.push(h('span', {
+      class: 'update-title',
+      role: 'status',
+      'aria-live': 'polite',
+      'data-update-title': '',
+      text: i('update.upToDate', { version: current })
+    }));
+  } else if (phase === 'error') {
+    children.push(h('span', {
+      class: 'update-title update-error-title',
+      role: 'status',
+      'aria-live': 'polite',
+      'data-update-title': '',
+      text: i(u.errorKind === 'install' ? 'update.errorInstall' : 'update.errorTitle')
+    }));
+    if (u.error) {
+      children.push(h('span', { class: 'update-error', 'data-update-error': '', text: u.error }));
+    }
+    children.push(h('span', { class: 'update-meta', text: i('update.errorHint') }));
+  } else {
+    children.push(h('span', {
+      class: 'update-title',
+      role: 'status',
+      'aria-live': 'polite',
+      'data-update-title': '',
+      text: i('update.idle')
+    }));
+  }
+
+  return h('div', { class: 'row row-stacked update-panel', 'data-update-phase': phase }, children);
+}
+
+function buildUpdate() {
+  var settings = state.settings;
+  var frag = document.createDocumentFragment();
+
+  frag.appendChild(section('update.versionSection', card([
+    infoRow('update.currentVersion', updateVersionText(), 'update-version'),
+    pathRow('update.releases', RELEASES_URL)
+  ]), i('update.releasesNote')));
+
+  frag.appendChild(section('update.autoChecks', card([
+    switchRow({
+      key: 'auto_check_updates',
+      titleKey: 'update.autoCheck.label',
+      descKey: 'update.autoCheck.desc',
+      checked: settings.auto_check_updates
+    })
+  ])));
+
+  frag.appendChild(section('update.statusSection', card([
+    actionRow('update.check.label', 'update.check.desc', [updateCheckButton()]),
+    updatePanel()
+  ])));
+
+  frag.appendChild(h('div', { class: 'pane-actions' }, [resetFooter('update', 'update.reset')]));
+  return frag;
+}
+
 // ── Pane builders ──────────────────────────────────────────────
 
 function buildGeneral() {
@@ -1910,6 +2312,7 @@ var BUILDERS = {
   monitor: buildMonitor,
   pet: buildPet,
   jump: buildJump,
+  update: buildUpdate,
   data: buildData
 };
 
@@ -2040,10 +2443,28 @@ function mockMeta() {
     pet_path: dir + '/pet.json',
     dismissed_path: dir + '/dismissed.json',
     version: 1,
-    app_version: '0.4.1',
+    app_version: '0.7.0',
     system_language: 'en',
     legacy_imported: false,
     corrupt_backup: null
+  };
+}
+
+/* Browser-mock updater fixtures (never used in the packaged app). */
+var MOCK_UPDATE_NOTES = 'What’s new in 0.7.1\n\n' +
+  '• Settings → Updates pane: in-app download and install with a live progress bar.\n' +
+  '• Check for Updates from the menu bar; the pane opens automatically and checks once.\n' +
+  '• Jump self-check now reports per-agent session routes.\n\n' +
+  'Fixes\n' +
+  '• Restart is only offered after the new bundle is installed.';
+
+function mockUpdateResult() {
+  return {
+    current_version: (mockState.meta && mockState.meta.app_version) || '0.7.0',
+    available: true,
+    version: '0.7.1',
+    notes: MOCK_UPDATE_NOTES,
+    pub_date: '2026-10-21'
   };
 }
 
@@ -2151,6 +2572,42 @@ function mockInvoke(cmd, args) {
       }
       return null;
     }
+    case 'check_for_update': {
+      var mode = mockState.updateCheckMode || 'available';
+      var current = (mockState.meta && mockState.meta.app_version) || '0.7.0';
+      // Deferred so the “Checking…” state is observable and a second trigger
+      // lands while the first check is still in flight.
+      return new Promise(function (resolve, reject) {
+        setTimeout(function () {
+          if (mode === 'error') {
+            reject(new Error('Could not reach github.com (mock)'));
+            return;
+          }
+          if (mode === 'uptodate') {
+            resolve({ current_version: current, available: false });
+            return;
+          }
+          resolve(mockUpdateResult());
+        }, 40);
+      });
+    }
+    case 'install_update':
+      // Mirrors the real backend: progress events during the download, then
+      // update-installed, and the command resolves once installation is done.
+      return new Promise(function (resolve) {
+        var steps = [30, 60, 100];
+        steps.forEach(function (downloaded, index) {
+          setTimeout(function () {
+            mockEmit('update-progress', { downloaded: downloaded, total: 100 });
+          }, 40 * (index + 1));
+        });
+        setTimeout(function () {
+          mockEmit('update-installed', { version: '0.7.1' });
+          resolve(null);
+        }, 160);
+      });
+    case 'restart_app':
+      return null;
     case 'close_settings':
       mockState.closed = true;
       return null;
@@ -2205,6 +2662,32 @@ if (MOCK) {
     get diagnosticsLoaded() { return state.diagnosticsLoaded; },
     get diagnosticsRequested() { return state.diagnosticsRequested; },
     get diagnosticsError() { return state.diagnosticsError; },
+    get update() {
+      return clone({
+        phase: state.update.phase,
+        result: state.update.result,
+        progress: state.update.progress,
+        error: state.update.error,
+        errorKind: state.update.errorKind,
+        installedVersion: state.update.installedVersion,
+        checking: state.update.checking
+      });
+    },
+    setUpdateCheckMode: function (mode) {
+      mockState.updateCheckMode = mode || 'available';
+    },
+    emitUpdateAvailable: function (payload) {
+      mockEmit('update-available', payload ? clone(payload) : mockUpdateResult());
+    },
+    emitUpdateProgress: function (payload) {
+      mockEmit('update-progress', clone(payload || { downloaded: 50, total: 100 }));
+    },
+    emitUpdateInstalled: function (payload) {
+      mockEmit('update-installed', clone(payload || { version: '0.7.1' }));
+    },
+    emitOpenUpdatePane: function () {
+      mockEmit('open-update-pane', null);
+    },
     setIcons: function (next) {
       mockState.icons = normalizeIcons(next);
       mockEmit('icons-changed', clone(mockState.icons));
@@ -2261,11 +2744,35 @@ function boot() {
     if (window.console) console.warn('icons-changed listener unavailable', err);
   });
 
+  // In-app updater: startup notice, install progress, installed, tray trigger.
+  listen('update-available', function (event) {
+    applyUpdateAvailable(event && event.payload);
+  }).catch(function (err) {
+    if (window.console) console.warn('update-available listener unavailable', err);
+  });
+  listen('update-progress', function (event) {
+    applyUpdateProgress(event && event.payload);
+  }).catch(function (err) {
+    if (window.console) console.warn('update-progress listener unavailable', err);
+  });
+  listen('update-installed', function (event) {
+    applyUpdateInstalled(event && event.payload);
+  }).catch(function (err) {
+    if (window.console) console.warn('update-installed listener unavailable', err);
+  });
+  listen('open-update-pane', function () {
+    openUpdatePane();
+  }).catch(function (err) {
+    if (window.console) console.warn('open-update-pane listener unavailable', err);
+  });
+
   Promise.all([invoke('get_settings'), invoke('get_settings_meta')]).then(function (results) {
     state.settings = normalizeSettings(results[0]);
     state.meta = results[1] || {};
     renderAll();
     loadCustomIcons();
+    // A tray “Check for Updates…” can arrive before the first settings read.
+    if (state.pendingUpdatePane) openUpdatePane();
     var selected = sidebarEl.querySelector('.nav-item[aria-selected="true"]');
     if (selected && document.hasFocus()) {
       try { selected.focus({ preventScroll: true }); } catch (e) { /* best-effort */ }

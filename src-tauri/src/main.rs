@@ -2,6 +2,12 @@
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Headless updater check: prints {current_version, available, version, …}
+    // as JSON and exits. Honours AGENT_MONITOR_UPDATE_ENDPOINT (test/mirror).
+    if args.iter().any(|a| a == "--check-update") {
+        agent_monitor::update::check_update_headless();
+        return;
+    }
     if args.iter().any(|a| a == "--dump-tasks") {
         agent_monitor::dump_tasks();
         return;

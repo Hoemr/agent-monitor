@@ -229,3 +229,40 @@ silent.
 
 The expanded popup now shows `visible / total sessions` (e.g. `5 / 119 个会话`)
 instead of the raw total, matching the rows the window can display.
+
+
+## Round 3 — workspace auto-expand + verification polling (0.7.0, measured 2026-10-22)
+
+Two fixes for the "warning after a successful jump" and "DSH warns every time"
+reports:
+
+1. **DSH collapses non-active projects.** Only the active workspace renders its
+   session rows; a session in any other project was `session_row_not_found`, so
+   clicking it activated DSH and warned. The route now expands the target
+   project first: after activation and a failed selection it finds the workspace
+   row by `target.workspace_path` basename (normalised exact, then a unique
+   contains; ambiguity ⇒ no click), clicks it, polls up to 1.5 s for the session
+   row, then runs the usual stable select/click/verify. A genuinely missing
+   project reports the new `project_not_found`; an expanded-but-absent session
+   (e.g. subagent-only) still reports `session_row_not_found`.
+2. **Activation/title verification races.** Fixed sleeps + one read classified
+   slow-but-successful jumps as `focus_unconfirmed` / `deep_link_unverified` /
+   `session_click_unverified` (and therefore warned). Verification now polls
+   every 120 ms for up to 2 s (deep-link navigation 1.2 s; DSH title 1.5 s) in
+   all L1/L2/L3 paths and only reports a failure after the real timeout. Codex
+   skips the useless AI-title L2 probe after a deep-link attempt, cutting a
+   stale-thread failure from 7.1 s to 4.6 s.
+
+Measured on the live host (real release build):
+
+| Jump | Outcome | Time |
+|---|---|---|
+| DSH session in collapsed project 审稿 (`dsh:session-0c664f1d…`) | **success / L3**, logs `expanding workspace "审稿"`, detail `论文核心主张简要概述 — DeepSeek Harness` | 2.4 s |
+| DSH session in the active project / already visible | success / L3, no click | < 1 s |
+| Codex live thread (deep link navigates) | success / L3 | 0.6 s |
+| Codex deleted/old thread (app only comes forward) | degraded / L1 `deep_link_unverified` (one honest notice; the pet dedupes repeats) | 4.6 s |
+| VSCode project window (`code --reuse-window`) | success / L2 | 1.5 s |
+
+The pet UI additionally shows soft (`degraded`/`unconfirmed`) jump notices **once
+per task+reason per session**, so repeated clicks on the same stale target stay
+silent; hard failures are still always reported.

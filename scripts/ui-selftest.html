@@ -90,6 +90,77 @@ function questionFixture(n, attentionCount) {
     question_count: n, agents: [], tasks: tasks
   };
 }
+// Snapshot for the round-3 checks: a running session, an old completion and
+// optionally a freshly completed task (future activity = "new"), a failed task
+// and a session waiting on a question.
+function stateFixture(opts) {
+  opts = opts || {};
+  var now = Math.floor(Date.now() / 1000);
+  var newAt = typeof opts.newAt === 'number' ? opts.newAt : now + 5;
+  var tasks = [{
+    id: 'st:run', agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+    title: 'Running session', status: 'running', status_reason: 'fixture',
+    last_activity_secs: now - 5, collected_at_secs: now, summary: null,
+    origin: 'index', target: {}, target_validity: 'valid', invalid_reason: null,
+    capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false
+  }];
+  if (opts.newCompleted !== false) {
+    tasks.push({
+      id: 'st:new', agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+      title: 'Freshly completed session', status: 'completed', status_reason: 'fixture',
+      last_activity_secs: newAt, collected_at_secs: now, summary: 'done',
+      origin: 'event', target: {}, target_validity: 'valid', invalid_reason: null,
+      capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false
+    });
+  }
+  tasks.push({
+    id: 'st:old', agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+    title: 'Old completion', status: 'completed', status_reason: 'fixture',
+    last_activity_secs: now - 3600, collected_at_secs: now, summary: null,
+    origin: 'index', target: {}, target_validity: 'valid', invalid_reason: null,
+    capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false
+  });
+  if (opts.failed) {
+    tasks.push({
+      id: 'st:fail', agent_key: 'dsh', agent_name: 'DSH', host: 'desktop',
+      title: 'Interrupted run', status: 'failed', status_reason: 'turn aborted',
+      last_activity_secs: now - 120, collected_at_secs: now, summary: null,
+      origin: 'cache', target: {}, target_validity: 'valid', invalid_reason: null,
+      capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L1', pinned: false
+    });
+  }
+  if (opts.question) {
+    tasks.push({
+      id: 'st:ask', agent_key: 'dsh', agent_name: 'DSH', host: 'desktop',
+      title: 'Waiting for an answer', status: 'waiting_input',
+      status_reason: 'ask user question', last_activity_secs: now - 30,
+      collected_at_secs: now, summary: null, origin: 'event', target: {},
+      target_validity: 'valid', invalid_reason: null,
+      capability: { max_level: 'L3', notes: '', requires: [] }, level: 'L3', pinned: false
+    });
+  }
+  return {
+    collected_at_secs: now,
+    attention_count: (opts.question ? 1 : 0) + (opts.failed ? 1 : 0),
+    question_count: opts.question ? 1 : 0,
+    agents: [], tasks: tasks
+  };
+}
+function rectOf(el) {
+  var r = el.getBoundingClientRect();
+  return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+}
+function rectInside(outer, inner) {
+  return inner.left >= outer.left - 0.5 && inner.top >= outer.top - 0.5 &&
+    inner.right <= outer.right + 0.5 && inner.bottom <= outer.bottom + 0.5;
+}
+function rectsOverlap(a, b) {
+  return a.width > 0 && b.width > 0 && a.left < b.right - 0.01 && b.left < a.right - 0.01 &&
+    a.top < b.bottom - 0.01 && b.top < a.bottom - 0.01;
+}
+function sameColor(a, b) {
+  return !!a && !!b && a.r === b.r && a.g === b.g && a.b === b.b;
+}
 // Plain `n`-session snapshot for the footer count checks (no attention).
 function sessionFixture(n) {
   var now = Math.floor(Date.now() / 1000);
@@ -662,6 +733,9 @@ frame.addEventListener('load', async function () {
     T.applyPetState({ mode: 'expanded', edge: 'right' });
     await sleep(20);
     T.setNoticeExpiry({ collapsed: 150 });
+    // This check is about the notice surface lifetime, not the once-per-session
+    // soft-warning dedupe (fx:valid:opened_window was already reported above).
+    T.clearSoftOutcomeNotices();
     fire(win, doc.querySelector('[data-task-id="fx:valid"]'), 'click');
     await sleep(40);
     T.applyPetState({ mode: 'collapsed', edge: 'right' });
@@ -902,6 +976,413 @@ frame.addEventListener('load', async function () {
 
     // Restore a normal state after the footer checks.
     await T.setSettings({ max_visible_rows: 5, language: 'en' });
+    T.setMockSnapshot(fixture());
+    T.applyPetState({ mode: 'collapsed', edge: 'none' });
+    await sleep(20);
+
+    // ── Round 3: new-row markers, semantic status dots, update notice ──
+    await T.setSettings({
+      language: 'en', new_badge: true, animations: 'system',
+      auto_dismiss_invalid: false, toast_on_degraded: true,
+      collapsed_size: 72, max_visible_rows: 5
+    });
+    T.clearNotice();
+    T.clearSoftOutcomeNotices();
+    var statusDots = doc.getElementById('status-dots');
+    var dotQuestion = doc.getElementById('status-dot-question');
+    var dotNew = doc.getElementById('status-dot-new');
+    var dotFailed = doc.getElementById('status-dot-failed');
+    var noticeDotR3 = doc.getElementById('notice-dot');
+    var markedIds = function () {
+      return Array.prototype.map.call(doc.querySelectorAll('.task.new-completed'), function (row) {
+        return row.dataset.taskId;
+      });
+    };
+
+    // 38. the new jump reason key stays localized in both dictionaries
+    var enProject = T.t('toast.project_not_found');
+    await T.setSettings({ language: 'zh' });
+    await sleep(20);
+    var zhProject = T.t('toast.project_not_found');
+    await T.setSettings({ language: 'en' });
+    await sleep(20);
+    check('project_not_found reason is localized in both dictionaries',
+      /project/i.test(enProject) && /项目/.test(zhProject),
+      'en=' + enProject + ' zh=' + zhProject);
+
+    // 39. newly completed rows are marked while the panel is open
+    T.setMockSnapshot(stateFixture({ newCompleted: true }));
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(30);
+    var newRowEl = doc.querySelector('[data-task-id="st:new"]');
+    var markerEl = newRowEl && newRowEl.querySelector('.new-dot');
+    check('newly completed row carries a labelled green marker',
+      !!markerEl && newRowEl.classList.contains('new-completed') &&
+      markerEl.title === 'Newly completed' &&
+      markerEl.getAttribute('aria-label') === 'Newly completed' &&
+      /Newly completed/.test(newRowEl.getAttribute('aria-label') || ''),
+      'class=' + (newRowEl && newRowEl.className) +
+      ' title=' + (markerEl && markerEl.title));
+    check('only newly completed ids are marked',
+      markedIds().join(',') === 'st:new' &&
+      !!doc.querySelector('[data-task-id="st:old"]') &&
+      !doc.querySelector('[data-task-id="st:old"] .new-dot') &&
+      !doc.querySelector('[data-task-id="st:run"] .new-dot') &&
+      T.pendingNewIds.join(',') === 'st:new',
+      'marked=' + markedIds().join(',') + ' pending=' + T.pendingNewIds.join(','));
+
+    // 40. a completion while open joins the set without clearing the first
+    var openSnapshot = stateFixture({ newCompleted: true });
+    openSnapshot.tasks.push({
+      id: 'st:new2', agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+      title: 'Completed while open', status: 'completed', status_reason: 'fixture',
+      last_activity_secs: Math.floor(Date.now() / 1000) + 6, collected_at_secs: 0,
+      summary: null, origin: 'event', target: {}, target_validity: 'valid',
+      invalid_reason: null, capability: { max_level: 'L2', notes: '', requires: [] },
+      level: 'L2', pinned: false
+    });
+    T.setMockSnapshot(openSnapshot);
+    await sleep(20);
+    check('a completion while open joins the marked set without flicker',
+      markedIds().join(',') === 'st:new,st:new2' &&
+      headerNew.hidden === false && /^2 new$/.test(headerNew.textContent.trim()),
+      'marked=' + markedIds().join(',') + ' header=' + headerNew.textContent);
+
+    // 41. markers clear when the panel closes and the next open starts fresh
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(20);
+    var clearedOnCollapse = T.pendingNewIds.length === 0 && headerNew.hidden === true;
+    T.setMockSnapshot(stateFixture({ newCompleted: true, newAt: Math.floor(Date.now() / 1000) - 120 }));
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(30);
+    check('row markers clear when the panel closes and reopens',
+      clearedOnCollapse && markedIds().length === 0 && headerNew.hidden === true,
+      'cleared=' + clearedOnCollapse + ' marked=' + markedIds().join(',') +
+      ' headerHidden=' + headerNew.hidden);
+
+    // 42. collapsed cluster: all three semantic dots can coexist
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    T.setMockSnapshot(stateFixture({ newCompleted: true, failed: true, question: true }));
+    await sleep(30);
+    var qBg = rgbaParts(win.getComputedStyle(dotQuestion).backgroundColor);
+    var nBg = rgbaParts(win.getComputedStyle(dotNew).backgroundColor);
+    var fBg = rgbaParts(win.getComputedStyle(dotFailed).backgroundColor);
+    var tokQuestion = tokenColor(win, doc, '--status-waiting');
+    var tokRunning = tokenColor(win, doc, '--status-running');
+    var tokFailed = tokenColor(win, doc, '--status-failed');
+    check('collapsed cluster shows all three semantic dots',
+      statusDots.hidden === false &&
+      [dotQuestion, dotNew, dotFailed].every(function (dot) {
+        var style = win.getComputedStyle(dot);
+        return dot.hidden === false && style.display !== 'none' &&
+          Math.round(parseFloat(style.width)) === 6;
+      }) &&
+      sameColor(qBg, tokQuestion) && sameColor(nBg, tokRunning) && sameColor(fBg, tokFailed),
+      'q=' + win.getComputedStyle(dotQuestion).backgroundColor +
+      ' n=' + win.getComputedStyle(dotNew).backgroundColor +
+      ' f=' + win.getComputedStyle(dotFailed).backgroundColor);
+    check('cluster aria-label lists all three active states',
+      /1 waiting/.test(statusDots.getAttribute('aria-label') || '') &&
+      /1 newly completed/.test(statusDots.getAttribute('aria-label') || '') &&
+      /1 interrupted/.test(statusDots.getAttribute('aria-label') || ''),
+      'aria=' + statusDots.getAttribute('aria-label'));
+    check('each status dot carries a localized title',
+      dotQuestion.title === '1 waiting for an answer' &&
+      dotNew.title === '1 newly completed' &&
+      dotFailed.title === '1 interrupted or failed',
+      'q=' + dotQuestion.title + ' n=' + dotNew.title + ' f=' + dotFailed.title);
+
+    // 43. each dot is independently absent
+    T.setMockSnapshot(stateFixture({ newCompleted: false, failed: false, question: true }));
+    await sleep(20);
+    check('only the question dot shows when questions are the only state',
+      statusDots.hidden === false && dotQuestion.hidden === false &&
+      dotNew.hidden === true && dotFailed.hidden === true,
+      'q=' + dotQuestion.hidden + ' n=' + dotNew.hidden + ' f=' + dotFailed.hidden);
+    T.setMockSnapshot(stateFixture({ newCompleted: true, failed: false, question: false }));
+    await sleep(20);
+    check('only the new-completion dot shows when that is the only state',
+      dotNew.hidden === false && dotQuestion.hidden === true && dotFailed.hidden === true,
+      'q=' + dotQuestion.hidden + ' n=' + dotNew.hidden + ' f=' + dotFailed.hidden);
+    T.setMockSnapshot(stateFixture({ newCompleted: false, failed: true, question: false }));
+    await sleep(20);
+    check('only the failed dot shows when that is the only state',
+      dotFailed.hidden === false && dotQuestion.hidden === true && dotNew.hidden === true,
+      'q=' + dotQuestion.hidden + ' n=' + dotNew.hidden + ' f=' + dotFailed.hidden);
+
+    // 44. cluster hidden while the panel is open
+    T.setMockSnapshot(stateFixture({ newCompleted: true, failed: true, question: true }));
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(30);
+    check('status cluster is hidden while the panel is open',
+      statusDots.hidden === true && win.getComputedStyle(statusDots).display === 'none',
+      'hidden=' + statusDots.hidden + ' display=' + win.getComputedStyle(statusDots).display);
+
+    // 45. cluster fits inside the collapsed pet at 48 and 72 px, clear of the
+    //     attention badge, the green completion ring and the glyph
+    var sizesR3 = [48, 72];
+    var fitResults = [];
+    for (var siR3 = 0; siR3 < sizesR3.length; siR3++) {
+      await T.setSettings({ collapsed_size: sizesR3[siR3] });
+      T.applyPetState({ mode: 'collapsed', edge: 'right' });
+      await sleep(30);
+      var petRectR3 = rectOf(pet);
+      var clusterRectR3 = rectOf(statusDots);
+      fitResults.push({
+        size: sizesR3[siR3],
+        inside: rectInside(petRectR3, clusterRectR3),
+        dotsInside: [dotQuestion, dotNew, dotFailed].every(function (dot) {
+          return rectInside(petRectR3, rectOf(dot));
+        }),
+        noBadge: !rectsOverlap(clusterRectR3, rectOf(badge)),
+        noRing: !rectsOverlap(clusterRectR3, rectOf(newBadge)),
+        noGlyph: !rectsOverlap(clusterRectR3, rectOf(glyph))
+      });
+    }
+    check('cluster fits the collapsed pet at 48 and 72 px without collisions',
+      fitResults.every(function (result) {
+        return result.inside && result.dotsInside && result.noBadge &&
+          result.noRing && result.noGlyph;
+      }),
+      JSON.stringify(fitResults));
+
+    // 46. 14 px edge tab: one compact highest-priority dot that stays inside
+    await T.setSettings({ collapsed_size: 72 });
+    T.setMockSnapshot(stateFixture({ newCompleted: true, failed: true, question: true }));
+    T.applyPetState({ mode: 'edge_hidden', edge: 'right' });
+    await sleep(30);
+    var tabRectR3 = rectOf(app);
+    var visibleDotsR3 = [dotQuestion, dotNew, dotFailed].filter(function (dot) {
+      return dot.hidden === false && win.getComputedStyle(dot).display !== 'none';
+    });
+    check('14 px tab shows one compact highest-priority dot',
+      Math.round(tabRectR3.width) === 14 && Math.round(tabRectR3.height) === 14 &&
+      visibleDotsR3.length === 1 && visibleDotsR3[0] === dotQuestion &&
+      rectInside(rectOf(pet), rectOf(statusDots)) &&
+      rectInside(tabRectR3, rectOf(visibleDotsR3[0])) &&
+      parseFloat(win.getComputedStyle(dotQuestion).width) <= 3.5,
+      'tab=' + Math.round(tabRectR3.width) + 'x' + Math.round(tabRectR3.height) +
+      ' dots=' + visibleDotsR3.length +
+      ' lead=' + (visibleDotsR3[0] && visibleDotsR3[0].id));
+    T.setMockSnapshot(stateFixture({ newCompleted: true, failed: true, question: false }));
+    await sleep(20);
+    var visibleDotsR3b = [dotQuestion, dotNew, dotFailed].filter(function (dot) {
+      return dot.hidden === false && win.getComputedStyle(dot).display !== 'none';
+    });
+    check('14 px tab falls back to the failed dot when no question waits',
+      visibleDotsR3b.length === 1 && visibleDotsR3b[0] === dotFailed,
+      'dots=' + visibleDotsR3b.map(function (dot) { return dot.id; }).join(','));
+
+    // 47. jump-notice dot moved to the bottom-right, clear of the status cluster
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(20);
+    T.clearSoftOutcomeNotices();
+    var noticeSnapshotR3 = stateFixture({ newCompleted: true, failed: true, question: true });
+    noticeSnapshotR3.tasks.push({
+      id: 'nd:jump', agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+      title: 'Jump target', status: 'running', status_reason: 'fixture',
+      last_activity_secs: Math.floor(Date.now() / 1000) - 5, collected_at_secs: 0,
+      summary: null, origin: 'index', target: {}, target_validity: 'valid',
+      invalid_reason: null, capability: { max_level: 'L2', notes: '', requires: [] },
+      level: 'L2', pinned: false
+    });
+    T.setMockSnapshot(noticeSnapshotR3);
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(20);
+    fire(win, doc.querySelector('[data-task-id="nd:jump"]'), 'click');
+    await sleep(40);
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(30);
+    var noticeRectR3 = rectOf(noticeDotR3);
+    var petRectR3b = rectOf(pet);
+    check('jump notice dot sits bottom-right, clear of the status cluster',
+      noticeDotR3.hidden === false &&
+      noticeRectR3.left > petRectR3b.left + petRectR3b.width / 2 &&
+      noticeRectR3.top > petRectR3b.top + petRectR3b.height / 2 &&
+      !rectsOverlap(noticeRectR3, rectOf(statusDots)) &&
+      !rectsOverlap(noticeRectR3, rectOf(badge)) &&
+      !rectsOverlap(noticeRectR3, rectOf(newBadge)),
+      'dot=' + JSON.stringify(noticeRectR3) + ' pet=' + JSON.stringify(petRectR3b));
+
+    // 48. 14 px tab: notice dot bottom-right, no collision with any other dot
+    T.applyPetState({ mode: 'edge_hidden', edge: 'right' });
+    await sleep(30);
+    var tabRectR3b = rectOf(app);
+    var noticeRectTabR3 = rectOf(noticeDotR3);
+    check('14 px tab notice dot sits bottom-right without collisions',
+      Math.round(noticeRectTabR3.width) === 4 &&
+      rectInside(tabRectR3b, noticeRectTabR3) &&
+      noticeRectTabR3.left > tabRectR3b.left + tabRectR3b.width / 2 &&
+      noticeRectTabR3.top > tabRectR3b.top + tabRectR3b.height / 2 &&
+      !rectsOverlap(noticeRectTabR3, rectOf(statusDots)) &&
+      !rectsOverlap(noticeRectTabR3, rectOf(badge)) &&
+      !rectsOverlap(noticeRectTabR3, rectOf(newBadge)),
+      'notice=' + JSON.stringify(noticeRectTabR3) + ' tab=' + JSON.stringify(tabRectR3b));
+
+    // 49. animations=off keeps the static status dots visible
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await T.setSettings({ animations: 'off' });
+    T.setMockSnapshot(stateFixture({ newCompleted: true, failed: true, question: true }));
+    await sleep(30);
+    check('animations=off still shows the static status dots',
+      statusDots.hidden === false &&
+      [dotQuestion, dotNew, dotFailed].every(function (dot) {
+        return dot.hidden === false && win.getComputedStyle(dot).display !== 'none' &&
+          win.getComputedStyle(dot).animationName === 'none';
+      }),
+      'hidden=' + statusDots.hidden +
+      ' qAnim=' + win.getComputedStyle(dotQuestion).animationName);
+    await T.setSettings({ animations: 'system' });
+
+    // ── Update-available notice (new) ───────────────────────────────
+    T.clearNotice();
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    T.setMockSnapshot(fixture());
+    await sleep(30);
+    var openBeforeUpdate = T.openSettingsCalls;
+    T.emitUpdate({
+      current_version: '0.6.0', available: true, version: '0.7.0',
+      notes: 'notes', pub_date: '2026-10-22'
+    });
+    await sleep(40);
+    var updateActionR3 = doc.getElementById('toast-action');
+    check('update-available paints a localized notice',
+      toast.hidden === false && /0\.7\.0/.test(toast.textContent) &&
+      /available|可用/.test(toast.textContent) &&
+      !!T.notice && T.notice.messageKey === 'updateAvailable',
+      'text=' + toast.textContent.trim().slice(0, 60) + ' hidden=' + toast.hidden);
+    check('update notice offers an Update action',
+      updateActionR3.hidden === false &&
+      /^(Update|更新)$/.test(updateActionR3.textContent.trim()),
+      'action=' + updateActionR3.textContent + ' hidden=' + updateActionR3.hidden);
+    T.emitUpdate({ current_version: '0.6.0', available: true, version: '0.7.0' });
+    await sleep(20);
+    check('duplicate update-available delivery is ignored',
+      toast.hidden === false &&
+      (toast.textContent.match(/0\.7\.0/g) || []).length === 1,
+      'text=' + toast.textContent.trim().slice(0, 60));
+    fire(win, updateActionR3, 'click');
+    await sleep(30);
+    check('Update action opens Settings',
+      T.openSettingsCalls === openBeforeUpdate + 1 && toast.hidden === true,
+      'calls=' + (T.openSettingsCalls - openBeforeUpdate) +
+      ' toastHidden=' + toast.hidden);
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(20);
+    T.emitUpdate({ current_version: '0.7.0', available: true, version: '0.8.0' });
+    await sleep(40);
+    var updateDotR3 = doc.getElementById('notice-dot');
+    check('collapsed update notice becomes an info dot',
+      updateDotR3.hidden === false && updateDotR3.className.indexOf('info') !== -1 &&
+      !!T.notice && T.notice.surface === 'dot',
+      'class=' + updateDotR3.className + ' hidden=' + updateDotR3.hidden);
+    T.clearNotice();
+    T.emitUpdate({ current_version: '0.8.0', available: false, version: null });
+    await sleep(20);
+    check('update-available available=false shows no notice',
+      T.notice === null && updateDotR3.hidden === true,
+      'notice=' + JSON.stringify(T.notice) + ' dotHidden=' + updateDotR3.hidden);
+
+    // ── Soft jump-feedback dedupe (lead request) ───────────────────
+    T.clearNotice();
+    T.clearSoftOutcomeNotices();
+    T.setMockSnapshot(fixture());
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(30);
+    T.emitJumpFeedback({ task_id: 'fx:valid', kind: 'degraded', reason_key: 'opened_window' });
+    await sleep(30);
+    var firstSoftShown = toast.hidden === false;
+    T.clearNotice();
+    T.emitJumpFeedback({ task_id: 'fx:valid', kind: 'degraded', reason_key: 'opened_window' });
+    await sleep(30);
+    check('identical soft jump outcome is reported only once per session',
+      firstSoftShown && toast.hidden === true,
+      'first=' + firstSoftShown + ' secondHidden=' + toast.hidden);
+    T.emitJumpFeedback({ task_id: 'fx:valid', kind: 'degraded', reason_key: 'window_not_found' });
+    await sleep(30);
+    check('a different degradation reason still shows once',
+      toast.hidden === false && !!T.notice,
+      'hidden=' + toast.hidden + ' reason=' + (T.notice && T.notice.messageKey));
+    T.clearNotice();
+    T.emitJumpFeedback({ task_id: 'fx:valid', kind: 'failed', reason_key: 'opened_window' });
+    await sleep(30);
+    var failShown1 = toast.hidden === false && toast.classList.contains('error');
+    T.clearNotice();
+    T.emitJumpFeedback({ task_id: 'fx:valid', kind: 'failed', reason_key: 'opened_window' });
+    await sleep(30);
+    check('failed outcomes are always reported (never deduped)',
+      failShown1 && toast.hidden === false && toast.classList.contains('error'),
+      'first=' + failShown1 + ' secondShown=' + (toast.hidden === false));
+
+    // soft dedupe must not break the auto-dismiss Undo path (fresh task id: the
+    // fixture's fx:invalid was already auto-dismissed by an earlier check)
+    T.clearNotice();
+    await T.setSettings({ auto_dismiss_invalid: true });
+    T.clearSoftOutcomeNotices();
+    var autoDismissSnapshot = stateFixture({ newCompleted: false });
+    autoDismissSnapshot.tasks.push({
+      id: 'ad:invalid', agent_key: 'dsh', agent_name: 'DSH', host: 'desktop',
+      title: 'Invalid auto-dismiss target', status: 'running', status_reason: 'fixture',
+      last_activity_secs: Math.floor(Date.now() / 1000) - 10, collected_at_secs: 0,
+      summary: null, origin: 'index', target: {}, target_validity: 'invalid',
+      invalid_reason: 'workspace_missing',
+      capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L0', pinned: false
+    });
+    T.setMockSnapshot(autoDismissSnapshot);
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(20);
+    var restoreBeforeR3 = T.restoreCalls.length;
+    T.emitJumpFeedback({ task_id: 'ad:invalid', kind: 'degraded', reason_key: 'workspace_missing' });
+    await sleep(60);
+    var undoBtnR3 = doc.getElementById('toast-action');
+    var autoDismissedSoft = !T.snapshot.tasks.some(function (task) { return task.id === 'ad:invalid'; });
+    var undoWasVisible = toast.hidden === false && undoBtnR3.hidden === false &&
+      /Undo|撤销/.test(undoBtnR3.textContent);
+    T.emitJumpFeedback({ task_id: 'ad:invalid', kind: 'degraded', reason_key: 'workspace_missing' });
+    await sleep(40);
+    check('soft dedupe keeps the auto-dismiss Undo path intact',
+      autoDismissedSoft && undoWasVisible && toast.hidden === false &&
+      undoBtnR3.hidden === false && T.restoreCalls.length === restoreBeforeR3,
+      'dismissed=' + autoDismissedSoft + ' undo=' + undoWasVisible +
+      ' toastHidden=' + toast.hidden +
+      ' restores=' + (T.restoreCalls.length - restoreBeforeR3));
+    fire(win, undoBtnR3, 'click');
+    await sleep(60);
+    check('Undo still restores after a deduped soft outcome',
+      T.restoreCalls.length === restoreBeforeR3 + 1 &&
+      T.snapshot.tasks.some(function (task) { return task.id === 'ad:invalid'; }),
+      'restores=' + (T.restoreCalls.length - restoreBeforeR3));
+    await T.setSettings({ auto_dismiss_invalid: false });
+    T.clearNotice();
+
+    // the first soft outcome keeps its permission action
+    T.clearSoftOutcomeNotices();
+    var permissionBeforeR3 = T.permissionCalls;
+    T.emitJumpFeedback({
+      task_id: 'fx:valid', kind: 'degraded', reason_key: 'needs_accessibility',
+      permission_needed: 'accessibility'
+    });
+    await sleep(30);
+    var grantBtnR3 = doc.getElementById('toast-action');
+    check('soft outcome keeps the grant-permission action',
+      toast.hidden === false && grantBtnR3.hidden === false &&
+      /Grant|去授权/.test(grantBtnR3.textContent),
+      'toastHidden=' + toast.hidden + ' action=' + grantBtnR3.textContent);
+    fire(win, grantBtnR3, 'click');
+    await sleep(30);
+    check('grant action opens the permission pane once',
+      T.permissionCalls === permissionBeforeR3 + 1 && toast.hidden === true,
+      'calls=' + (T.permissionCalls - permissionBeforeR3) +
+      ' toastHidden=' + toast.hidden);
+
+    // Restore a normal state after the round-3 checks.
+    T.clearNotice();
+    T.clearSoftOutcomeNotices();
+    await T.setSettings({
+      animations: 'system', language: 'en', auto_dismiss_invalid: false,
+      toast_on_degraded: true, collapsed_size: 72, new_badge: true,
+      max_visible_rows: 5
+    });
     T.setMockSnapshot(fixture());
     T.applyPetState({ mode: 'collapsed', edge: 'none' });
     await sleep(20);

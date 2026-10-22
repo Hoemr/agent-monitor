@@ -246,6 +246,11 @@ pub struct Settings {
     pub toast_on_degraded: bool,
     pub auto_dismiss_invalid: bool,
 
+    // Updates
+    /// Check GitHub Releases once ~4 s after launch (silent when up to date or
+    /// offline). Manual checks in Settings → Updates are always allowed.
+    pub auto_check_updates: bool,
+
     // Migration bookkeeping
     pub legacy_imported: bool,
 }
@@ -277,6 +282,7 @@ impl Default for Settings {
             icon_style: IconStyle::Builtin,
             toast_on_degraded: true,
             auto_dismiss_invalid: false,
+            auto_check_updates: true,
             legacy_imported: false,
         }
     }
@@ -361,6 +367,9 @@ impl Settings {
                 self.toast_on_degraded = d.toast_on_degraded;
                 self.auto_dismiss_invalid = d.auto_dismiss_invalid;
             }
+            SettingsGroup::Update => {
+                self.auto_check_updates = d.auto_check_updates;
+            }
         }
         self.normalize();
     }
@@ -374,6 +383,7 @@ pub enum SettingsGroup {
     Monitor,
     Pet,
     Jump,
+    Update,
 }
 
 impl SettingsGroup {
@@ -385,6 +395,7 @@ impl SettingsGroup {
             "monitor" => Some(SettingsGroup::Monitor),
             "pet" => Some(SettingsGroup::Pet),
             "jump" => Some(SettingsGroup::Jump),
+            "update" => Some(SettingsGroup::Update),
             _ => None,
         }
     }
@@ -560,6 +571,7 @@ mod tests {
         assert_eq!(s.icon_style, IconStyle::Builtin);
         assert!(s.toast_on_degraded);
         assert!(!s.auto_dismiss_invalid);
+        assert!(s.auto_check_updates);
         assert!(!s.legacy_imported);
     }
 
@@ -776,6 +788,7 @@ mod tests {
             "icon_style",
             "toast_on_degraded",
             "auto_dismiss_invalid",
+            "auto_check_updates",
             "legacy_imported",
         ] {
             assert!(json.get(key).is_some(), "missing key {key} in {json}");
@@ -791,6 +804,7 @@ mod tests {
         assert_eq!(SettingsGroup::parse("all"), Some(SettingsGroup::All));
         assert_eq!(SettingsGroup::parse("attention"), Some(SettingsGroup::Attention));
         assert_eq!(SettingsGroup::parse("pet"), Some(SettingsGroup::Pet));
+        assert_eq!(SettingsGroup::parse("update"), Some(SettingsGroup::Update));
         assert_eq!(SettingsGroup::parse("nope"), None);
     }
 
@@ -806,6 +820,38 @@ mod tests {
         assert!(s.auto_show_on_question);
         // A non-boolean value is rejected, not silently coerced.
         assert!(serde_json::from_str::<Settings>(r#"{"alert_sound":"no"}"#).is_err());
+    }
+
+    #[test]
+    fn auto_check_updates_defaults_true_and_accepts_partial_json() {
+        // An older settings.json has no key: it must default to on.
+        let s: Settings = serde_json::from_str(r#"{"retention_hours":24}"#).unwrap();
+        assert!(s.auto_check_updates);
+        // Partial JSON only overrides what it carries.
+        let s: Settings = serde_json::from_str(r#"{"auto_check_updates":false}"#).unwrap();
+        assert!(!s.auto_check_updates);
+        // A non-boolean value is rejected, not silently coerced.
+        assert!(serde_json::from_str::<Settings>(r#"{"auto_check_updates":"no"}"#).is_err());
+    }
+
+    #[test]
+    fn update_group_reset_restores_only_the_update_flag() {
+        let mut s = Settings {
+            auto_check_updates: false,
+            language: Language::Zh,
+            notify_on_question: false,
+            toast_on_degraded: false,
+            ..Default::default()
+        };
+        s.reset_group(SettingsGroup::Update);
+        assert!(s.auto_check_updates);
+        assert_eq!(s.language, Language::Zh);
+        assert!(!s.notify_on_question);
+        assert!(!s.toast_on_degraded);
+        // "all" still restores everything.
+        s.auto_check_updates = false;
+        s.reset_group(SettingsGroup::All);
+        assert_eq!(s, Settings::default());
     }
 
     #[test]

@@ -91,7 +91,7 @@ frame.addEventListener('load', async function () {
     doc = win.document;
     T = await waitForBoot();
     check('mock hooks expose the live settings state and invoke log',
-      !!T && !!T.settings && Array.isArray(T.invokeLog) && T.groups.length === 6,
+      !!T && !!T.settings && Array.isArray(T.invokeLog) && T.groups.length === 7,
       T ? 'groups=' + T.groups.join(',') : 'hooks missing');
     if (!T) { finish(); return; }
     await sleep(60);
@@ -119,17 +119,17 @@ frame.addEventListener('load', async function () {
       ' scroll=' + scrollEl.scrollWidth + '/' + scrollEl.clientWidth +
       ' sidebar=' + Math.round(sidebar.getBoundingClientRect().width));
 
-    // 3. six sections, localised
+    // 3. seven sections, localised
     var navs = qa('#sidebar .nav-item');
     var navLabels = navs.map(function (n) { return n.querySelector('.nav-label').textContent; });
-    check('six sections render in the sidebar with English labels',
-      navs.length === 6 &&
-      navLabels.join('|') === 'General|Attention|Monitoring|Desktop Pet|Jump|Data',
+    check('seven sections render in the sidebar with English labels',
+      navs.length === 7 &&
+      navLabels.join('|') === 'General|Attention|Monitoring|Desktop Pet|Jump|Updates|Data',
       navLabels.join('|'));
 
     // 4. every Settings key is editable somewhere in the window
     var expected = ['language', 'appearance', 'show_summary', 'show_jump_level', 'new_badge',
-      'notify_on_question', 'alert_sound', 'auto_show_on_question',
+      'notify_on_question', 'alert_sound', 'auto_show_on_question', 'auto_check_updates',
       'refresh_interval', 'retention_hours', 'enabled_agents.codex',
       'enabled_agents.dsh', 'enabled_agents.zcode', 'enabled_agents.claude_code',
       'max_visible_rows', 'hover_expand_ms', 'collapse_delay_ms', 'snap_distance',
@@ -160,6 +160,11 @@ frame.addEventListener('load', async function () {
       count('get_jump_diagnostics') === 1,
       'calls=' + count('get_jump_diagnostics'));
 
+    // 4c. the updater is never polled: no check at boot, no implicit install
+    check('update checks are never automatic in the UI: nothing runs at boot',
+      count('check_for_update') === 0 && count('install_update') === 0,
+      'check=' + count('check_for_update') + ' install=' + count('install_update'));
+
     // 5. fixture settings paint into their controls
     T.selectGroup('general');
     check('fixture settings paint into their controls',
@@ -175,7 +180,7 @@ frame.addEventListener('load', async function () {
     var payload = lastSetPayload();
     var requiredTop = ['version', 'language', 'appearance', 'show_summary',
       'show_jump_level', 'new_badge', 'notify_on_question', 'alert_sound',
-      'auto_show_on_question', 'refresh_interval', 'retention_hours',
+      'auto_show_on_question', 'auto_check_updates', 'refresh_interval', 'retention_hours',
       'enabled_agents', 'max_visible_rows', 'hover_expand_ms', 'collapse_delay_ms',
       'snap_distance', 'hidden_sliver', 'collapsed_size', 'auto_hide_after_s',
       'edge_hide_enabled', 'animations', 'icon_style', 'toast_on_degraded',
@@ -622,6 +627,189 @@ frame.addEventListener('load', async function () {
     check('jump pane fits the 620×560 window in English too',
       paneFits() && count('get_jump_diagnostics') === callsBeforeLang,
       'scroll=' + q('#pane-scroll').scrollWidth + '/' + q('#pane-scroll').clientWidth);
+
+    // ── Updates pane (7th group, in-app updater) ───────────────────
+    // 22j. version row, releases URL, auto-check switch
+    T.selectGroup('update');
+    await sleep(90);
+    var versionRow = q('[data-row="update-version"] .info-value');
+    var releasesRow = q('[data-row="path-update-releases"] .path-value');
+    var autoSwitch = q('input[data-setting="auto_check_updates"]');
+    check('Updates pane shows the current version and the releases URL',
+      !!versionRow && versionRow.textContent.trim() === String(T.meta.app_version) &&
+      !!releasesRow && /github\.com\/Hoemr\/agent-monitor\/releases/.test(releasesRow.textContent) &&
+      releasesRow.tagName === 'CODE' && releasesRow.getAttribute('tabindex') === '0' &&
+      !!releasesRow.getAttribute('aria-label'),
+      'version=' + (versionRow && versionRow.textContent) +
+      ' url=' + (releasesRow && releasesRow.textContent));
+    check('auto-check switch is on by default with an explanation',
+      !!autoSwitch && autoSwitch.checked === true &&
+      /launch|启动/i.test(q('#pane-body').textContent));
+
+    // 22k. the switch saves into the full Settings payload
+    autoSwitch.click();
+    await sleep(90);
+    check('auto-check switch saves into the full Settings object',
+      lastSetPayload().auto_check_updates === false &&
+      q('input[data-setting="auto_check_updates"]').checked === false,
+      'auto_check_updates=' + lastSetPayload().auto_check_updates);
+
+    // 22l. idle state, then update-available paints without invoking a command
+    var updateChecks = count('check_for_update');
+    var idleTitle = q('[data-update-title]');
+    check('Updates pane starts in the “not checked” state',
+      !!q('[data-update-phase="idle"]') &&
+      /Not checked|尚未检查/.test(idleTitle ? idleTitle.textContent : ''),
+      'phase=' + (q('[data-update-phase]') && q('[data-update-phase]').getAttribute('data-update-phase')));
+    T.emitUpdateAvailable();
+    await sleep(90);
+    check('update-available paints the available state without a check',
+      count('check_for_update') === updateChecks &&
+      !!q('[data-update-phase="available"]') &&
+      /0\.7\.1/.test(q('[data-update-title]').textContent),
+      'calls=' + count('check_for_update'));
+
+    // 22l2. real manifests carry an RFC 3339 pub_date; show the calendar date
+    T.emitUpdateAvailable({
+      current_version: '0.7.0', available: true, version: '0.7.2',
+      notes: 'Fixture note.', pub_date: '2026-10-22T08:30:00Z'
+    });
+    await sleep(70);
+    var dateMeta = q('[data-update-meta]');
+    check('RFC 3339 release dates are shown as a calendar date',
+      !!dateMeta && /2026-10-22/.test(dateMeta.textContent) &&
+      !/T08:30/.test(dateMeta.textContent),
+      dateMeta ? dateMeta.textContent : 'n/a');
+    T.emitUpdateAvailable();
+    await sleep(70);
+
+    // 22m. Check for Updates invokes once and paints version, date and notes
+    q('[data-action="update-check"]').click();
+    var checkedAvailable = await waitFor(function () {
+      return count('check_for_update') === updateChecks + 1 &&
+        !!q('[data-update-phase="available"]');
+    }, 100);
+    var notesEl = q('[data-update-notes]');
+    check('Check for Updates invokes check_for_update once and paints version + notes',
+      !!checkedAvailable &&
+      count('check_for_update') === updateChecks + 1 &&
+      /0\.7\.1/.test(q('[data-update-title]').textContent) &&
+      /2026-10-21/.test(q('#pane-body').textContent) &&
+      !!notesEl && notesEl.getAttribute('tabindex') === '0' &&
+      /Updates pane/.test(notesEl.textContent),
+      'calls=' + count('check_for_update'));
+    var notesStyle = notesEl ? win.getComputedStyle(notesEl) : null;
+    check('release notes are multi-line, wrapped and capped with a scrollbar',
+      !!notesStyle && parseFloat(notesStyle.maxHeight) > 0 &&
+      notesStyle.overflowY === 'auto' && notesStyle.whiteSpace === 'pre-wrap',
+      notesStyle ? 'max-height=' + notesStyle.maxHeight + ' overflow=' + notesStyle.overflowY : 'no notes');
+
+    // 22n. Download & Install invokes install_update; progress comes from events
+    var installsBefore = count('install_update');
+    var installBtn = q('[data-action="update-install"]');
+    check('available state offers Download & Install', !!installBtn);
+    installBtn.click();
+    await sleep(12);
+    check('buttons are disabled while installing',
+      !!q('[data-update-phase="installing"]') &&
+      q('[data-action="update-check"]').disabled === true);
+    var progressSeen = await waitFor(function () {
+      var text = q('[data-update-progress-text]');
+      return !!q('[data-update-progress]') && !!text && /\d+%/.test(text.textContent);
+    }, 80);
+    var progressTextEl = q('[data-update-progress-text]');
+    check('install_update runs and progress text comes from update-progress events',
+      count('install_update') === installsBefore + 1 && !!progressSeen &&
+      /Downloading|正在下载/.test(progressTextEl ? progressTextEl.textContent : ''),
+      'calls=' + count('install_update') + ' text=' + (progressTextEl ? progressTextEl.textContent : 'n/a'));
+    var installedPhase = await waitFor(function () {
+      return !!q('[data-update-phase="installed"]') && !!q('[data-action="update-restart"]');
+    }, 120);
+    check('update-installed shows “restart to finish” and a Restart Now button',
+      !!installedPhase &&
+      /installed|已安装/.test(q('[data-update-title]').textContent) &&
+      /restart/i.test(q('#pane-body').textContent));
+    q('[data-action="update-restart"]').click();
+    await sleep(70);
+    check('Restart Now invokes restart_app', !!last('restart_app'));
+
+    // 22o. tray open-update-pane selects the pane and runs exactly one check
+    T.selectGroup('data');
+    await sleep(80);
+    var paneChecks = count('check_for_update');
+    T.emitOpenUpdatePane();
+    await sleep(10);
+    T.emitOpenUpdatePane();   // in flight: must be ignored
+    var reopened = await waitFor(function () {
+      return T.group === 'update' && count('check_for_update') === paneChecks + 1 &&
+        !!q('[data-update-phase="available"]');
+    }, 120);
+    check('open-update-pane selects Updates and triggers exactly one check',
+      !!reopened, 'group=' + T.group + ' calls=' + (count('check_for_update') - paneChecks));
+
+    // 22p. up-to-date and error states, then recovery
+    T.setUpdateCheckMode('uptodate');
+    q('[data-action="update-check"]').click();
+    var upToDate = await waitFor(function () { return !!q('[data-update-phase="uptodate"]'); }, 100);
+    check('up-to-date state paints the current version and no install button',
+      !!upToDate &&
+      /0\.7\.0/.test(q('[data-update-title]').textContent) &&
+      /Up to date|已是最新/.test(q('[data-update-title]').textContent) &&
+      !q('[data-action="update-install"]'),
+      'title=' + (upToDate ? q('[data-update-title]').textContent : 'n/a'));
+
+    T.setUpdateCheckMode('error');
+    q('[data-action="update-check"]').click();
+    var errorPhase = await waitFor(function () { return !!q('[data-update-phase="error"]'); }, 100);
+    var errorTextEl = q('[data-update-error]');
+    check('check failures paint an error state with the backend reason',
+      !!errorPhase && /Could not|无法/.test(q('[data-update-title]').textContent) &&
+      !!errorTextEl && /mock/.test(errorTextEl.textContent),
+      'error=' + (errorTextEl ? errorTextEl.textContent : 'n/a'));
+    T.setUpdateCheckMode('available');
+    q('[data-action="update-check"]').click();
+    var recovered = await waitFor(function () { return !!q('[data-update-phase="available"]'); }, 100);
+    check('the error state recovers on a retry', !!recovered);
+
+    // 22q2. unknown total → byte progress instead of a percentage
+    T.emitUpdateProgress({ downloaded: 3072 * 1024, total: null });
+    await sleep(80);
+    var bytesText = q('[data-update-progress-text]');
+    check('progress without a total shows downloaded bytes',
+      !!q('[data-update-progress][data-indeterminate="true"]') &&
+      !!bytesText && /3072 KB/.test(bytesText.textContent) &&
+      !/%/.test(bytesText.textContent),
+      bytesText ? bytesText.textContent : 'n/a');
+
+    // 22q. both language widths fit the 620×560 window
+    var updatePaneFits = function () {
+      var sc = q('#pane-scroll');
+      return sc.scrollWidth <= sc.clientWidth + 1;
+    };
+    T.setSettings(Object.assign({}, T.settings, { language: 'zh' }));
+    await sleep(120);
+    var zhUpdateText = q('#pane-body').textContent;
+    check('Updates pane renders Chinese labels and fits without horizontal overflow',
+      /更新/.test(q('#sidebar').textContent) &&
+      /当前版本/.test(zhUpdateText) && /检查更新/.test(zhUpdateText) &&
+      updatePaneFits(),
+      'scroll=' + q('#pane-scroll').scrollWidth + '/' + q('#pane-scroll').clientWidth);
+    T.setSettings(Object.assign({}, T.settings, { language: 'en' }));
+    await sleep(120);
+
+    // 22r. reset update restores only auto_check_updates
+    var resetsBeforeUpdate = count('reset_settings');
+    q('[data-action="reset-update"]').click();
+    await sleep(60);
+    var updateConfirmOpen = !!q('[data-focus="confirm-ok"]');
+    q('[data-focus="confirm-ok"]').click();
+    await sleep(120);
+    var updateResetEntry = last('reset_settings');
+    check('reset update restores only the update scope',
+      updateConfirmOpen && count('reset_settings') === resetsBeforeUpdate + 1 &&
+      !!updateResetEntry && updateResetEntry.args.scope === 'update' &&
+      T.settings.auto_check_updates === true,
+      updateResetEntry ? 'scope=' + updateResetEntry.args.scope : 'not called');
 
     // 23. data paths come from get_settings_meta, read-only and focusable
     T.selectGroup('data');

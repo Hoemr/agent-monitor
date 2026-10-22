@@ -36,11 +36,22 @@ const VSCODE_PROCESS_NEEDLE: &str = "Visual Studio Code.app/Contents/MacOS/";
 const MIN_TITLE_PREFIX_CHARS: usize = 6;
 /// Click/verify timings (real macOS app switches are asynchronous).
 const DSH_FORWARD_SETTLE_MS: u64 = 350;
-const DSH_CLICK_VERIFY_MS: u64 = 900;
 /// First click + at most one retry from a freshly re-read row (re-layout can
 /// make a single synthetic click a no-op).
 const DSH_CLICK_ATTEMPTS: u32 = 2;
-const VSCODE_SETTLE_MS: u64 = 800;
+/// Bounded-verification polling: probe every 120 ms for up to ~2 s instead of
+/// sleeping once and declaring failure. macOS activation and Electron session
+/// switches are asynchronous; a single short sleep produced false
+/// `focus_unconfirmed` / `deep_link_unverified` / `session_click_unverified`.
+const POLL_INTERVAL_MS: u64 = 120;
+const VERIFY_TIMEOUT_MS: u64 = 2_000;
+/// Deep-link navigation is the longest part of a successful Codex jump; if the
+/// host never navigates (deleted thread) there is no point waiting the full
+/// general timeout before reporting the honest degradation.
+const DEEP_LINK_NAV_TIMEOUT_MS: u64 = 1_200;
+/// DSH session switch after a click, and workspace-group expansion render.
+const DSH_TITLE_TIMEOUT_MS: u64 = 1_500;
+const DSH_EXPAND_TIMEOUT_MS: u64 = 1_500;
 
 pub fn open_permission_settings(kind: PermissionKind) {
     let pane = match kind {
@@ -530,22 +541,30 @@ fn try_session_level(task: &TaskRecord) -> Attempt {
         Ok(()) => {}
         Err(reason) => return Attempt::NotPossible(reason),
     }
-    std::thread::sleep(Duration::from_millis(900));
-    let front = frontmost_app();
-    if front.as_deref() != Some(process.as_str()) {
+    // Slow activations are normal: poll for the host to come forward instead of
+    // one fixed sleep (the old code warned `deep_link_unverified` on slow hosts).
+    let activated = poll_until(DEEP_LINK_NAV_TIMEOUT_MS, || {
+        (frontmost_app().as_deref() == Some(process.as_str())).then_some(())
+    });
+    if activated.is_none() {
         return Attempt::NotPossible("deep_link_unverified".into());
     }
-    let after_titles = match ax_window_titles(&process) {
-        Some(t) => t,
-        None => return Attempt::NotPossible(ax_failure_reason().to_string()),
-    };
-    let mut navigated = after_titles
-        .iter()
-        .find(|t| !before_titles.contains(t))
-        .cloned();
-    if navigated.is_none() && !expected_title.is_empty() {
-        navigated = best_title_match(&after_titles, expected_title);
-    }
+    // Wait for real navigation evidence: a new window title, or the expected
+    // title becoming visible. Report only after the bounded timeout expires.
+    let navigated = poll_until(DEEP_LINK_NAV_TIMEOUT_MS, || {
+        let titles = ax_window_titles(&process)?;
+        let newly_visible = titles
+            .iter()
+            .find(|title| !before_titles.contains(title))
+            .cloned();
+        if newly_visible.is_some() {
+            return newly_visible;
+        }
+        if expected_title.is_empty() {
+            return None;
+        }
+        best_title_match(&titles, expected_title)
+    });
     if let Some(detail) = navigated {
         return Attempt::Done(JumpOutcome {
             task_id: task.id.clone(),
@@ -557,6 +576,19 @@ fn try_session_level(task: &TaskRecord) -> Attempt {
             next_step: None,
             permission_needed: None,
         });
+    }
+    // The title poll expired: if AX itself is denied, say so instead of a vague
+    // "deep link unverified"; the grant hint is attached by the L1 outcome.
+    match ax_failure_reason() {
+        "needs_accessibility" => return Attempt::NotPossible("needs_accessibility".into()),
+        "needs_automation" => return Attempt::NotPossible("needs_automation".into()),
+        _ => {}
+    }
+    // Codex window titles are AI-generated and never match the stored prompt,
+    // so L2 title matching is a guaranteed 2 s timeout for this host. Skip it
+    // and let the honest L1 outcome carry `deep_link_unverified`.
+    if task.target.bundle_id.as_deref() == Some("com.openai.codex") {
+        return Attempt::NotPossible("deep_link_unverified".into());
     }
     // The app came forward, but we cannot prove which session is visible.
     // Never claim L3 on "command sent": degrade to the window/app ladder.
@@ -589,23 +621,44 @@ fn try_window_level(task: &TaskRecord) -> Attempt {
     let Some(expected) = task.target.window_title.as_deref().filter(|s| !s.is_empty()) else {
         return Attempt::NotPossible("no_window_hint".into());
     };
-    let Some(titles) = ax_window_titles(&process) else {
-        return Attempt::NotPossible(ax_failure_reason().to_string());
+    // Bounded poll: AX may still be building the window list right after an
+    // activation. Ambiguity is only accepted once the matching list has been
+    // stable across two reads (or the timeout has really expired).
+    let mut last_matches: Option<Vec<String>> = None;
+    let mut previous: Option<Vec<String>> = None;
+    let matched = poll_until(VERIFY_TIMEOUT_MS, || {
+        let titles = ax_window_titles(&process)?;
+        let matches = matching_windows(&titles, expected);
+        if matches.is_empty() {
+            previous = None;
+            return None;
+        }
+        if previous.as_ref() == Some(&matches) {
+            return Some(matches.clone());
+        }
+        previous = Some(matches.clone());
+        last_matches = Some(matches);
+        None
+    });
+    let Some(matches) = matched.or(last_matches) else {
+        return Attempt::NotPossible(match ax_failure_reason() {
+            "needs_accessibility" => "needs_accessibility",
+            "needs_automation" => "needs_automation",
+            _ => "window_not_found",
+        }
+        .into());
     };
-    let matches = matching_windows(&titles, expected);
-    if matches.is_empty() {
-        return Attempt::NotPossible("window_not_found".into());
-    }
     let ambiguous = matches.len() > 1;
     let chosen = matches[0].clone();
     match raise_window(&process, &chosen) {
         Ok(()) => {}
         Err(reason) => return Attempt::NotPossible(reason),
     }
-    std::thread::sleep(Duration::from_millis(350));
-    let front = frontmost_app();
+    let verified = poll_until(VERIFY_TIMEOUT_MS, || {
+        (frontmost_app().as_deref() == Some(process.as_str())).then_some(())
+    })
+    .is_some();
     let achieved = JumpLevel::L2;
-    let verified = front.as_deref() == Some(process.as_str());
     if !verified {
         return Attempt::NotPossible("focus_unconfirmed".into());
     }
@@ -654,19 +707,23 @@ fn try_vscode_reuse_window(task: &TaskRecord, workspace: &str) -> Attempt {
     if !launched.map(|status| status.success()).unwrap_or(false) {
         return Attempt::NotPossible("window_not_found".into());
     }
-    std::thread::sleep(Duration::from_millis(VSCODE_SETTLE_MS));
-    if frontmost_app().as_deref() != Some(VSCODE_APP_NAME) {
+    // The CLI returns before the window is focused; poll instead of one sleep.
+    let focused = poll_until(VERIFY_TIMEOUT_MS, || {
+        (frontmost_app().as_deref() == Some(VSCODE_APP_NAME)).then_some(())
+    });
+    if focused.is_none() {
         return Attempt::NotPossible("focus_unconfirmed".into());
     }
     let Some(pid) = app_pid(VSCODE_PROCESS_NEEDLE) else {
         return Attempt::NotPossible("focus_unconfirmed".into());
     };
-    let Some(title) = crate::ax::focused_window_title(pid) else {
-        return Attempt::NotPossible("window_state_unavailable".into());
-    };
-    if !window_title_contains_workspace(&title, &basename) {
+    let title = poll_until(VERIFY_TIMEOUT_MS, || {
+        let title = crate::ax::focused_window_title(pid)?;
+        window_title_contains_workspace(&title, &basename).then_some(title)
+    });
+    let Some(title) = title else {
         return Attempt::NotPossible("window_not_found".into());
-    }
+    };
     Attempt::Done(JumpOutcome {
         task_id: task.id.clone(),
         kind: JumpOutcomeKind::Success,
@@ -729,36 +786,67 @@ fn try_dsh_sidebar(task: &TaskRecord) -> Attempt {
     let debug = std::env::var_os("AGENT_MONITOR_DEBUG_JUMP").is_some();
     // Activation makes Chromium re-layout the sidebar (transient 1 px AX
     // frames even after a short settle), so wait for a sane, stable row.
-    let (session, target_rect) =
+    let (_session, target_rect) =
         match stable_session_target(pid, task, crate::model::now_secs(), debug) {
             Ok(target) => target,
+            Err(reason) if reason == "session_row_not_found" => {
+                // DSH renders sessions only for the ACTIVE workspace; sessions in
+                // other projects live behind collapsed workspace rows. Expand the
+                // task's project group once, then retry the normal selection.
+                match expand_workspace_for_task(pid, task, debug) {
+                    Ok(()) => {
+                        match stable_session_target(pid, task, crate::model::now_secs(), debug) {
+                            Ok(target) => target,
+                            Err(reason) => return Attempt::NotPossible(reason),
+                        }
+                    }
+                    Err(reason) => return Attempt::NotPossible(reason),
+                }
+            }
             // Never click a guessed row: an ambiguous match degrades honestly.
             Err(reason) => return Attempt::NotPossible(reason),
         };
     if debug {
         eprintln!(
             "dsh-jump: selected={:?} frame={:?} focused_before={:?}",
-            session.title,
+            _session.title,
             target_rect,
             crate::ax::focused_window_title(pid)
         );
     }
-    let mut target_rect = target_rect;
+    click_dsh_session(pid, task, app_name, expected_title, target_rect, debug)
+}
+
+/// Click one DSH session row and verify the focused window title, polling for
+/// the asynchronous session switch. One retry from a freshly re-read frame is
+/// allowed; `session_click_unverified` is only reported after that.
+fn click_dsh_session(
+    pid: u32,
+    task: &TaskRecord,
+    app_name: &str,
+    expected_title: &str,
+    mut target_rect: crate::ax::Rect,
+    debug: bool,
+) -> Attempt {
     for attempt in 1..=DSH_CLICK_ATTEMPTS {
         // Click immediately: frames are only valid for the state just observed.
         if !crate::ax::click(target_rect) {
             return Attempt::NotPossible("session_click_unverified".into());
         }
-        std::thread::sleep(Duration::from_millis(DSH_CLICK_VERIFY_MS));
-        let focused_after = crate::ax::focused_window_title(pid);
+        // Electron session switches are asynchronous; poll the focused title
+        // instead of one fixed sleep (old code warned on slow switches).
+        let verified = poll_until(DSH_TITLE_TIMEOUT_MS, || {
+            crate::ax::focused_window_title(pid)
+                .filter(|focused| session_title_matches(focused, app_name, expected_title))
+        });
         if debug {
-            eprintln!("dsh-jump: attempt {attempt} focused_after={focused_after:?}");
+            eprintln!(
+                "dsh-jump: attempt {attempt} focused_after={:?}",
+                crate::ax::focused_window_title(pid)
+            );
         }
-        match focused_after {
-            Some(focused) if session_title_matches(&focused, app_name, expected_title) => {
-                return Attempt::Done(session_jump_outcome(task, focused));
-            }
-            _ => {}
+        if let Some(focused) = verified {
+            return Attempt::Done(session_jump_outcome(task, focused));
         }
         if attempt >= DSH_CLICK_ATTEMPTS {
             return Attempt::NotPossible("session_click_unverified".into());
@@ -777,6 +865,143 @@ fn try_dsh_sidebar(task: &TaskRecord) -> Attempt {
         }
     }
     Attempt::NotPossible("session_click_unverified".into())
+}
+
+/// Workspace/project group row of the DSH sidebar (one-text row).
+#[derive(Clone, Debug, PartialEq)]
+struct SidebarWorkspace {
+    title: String,
+    title_frame: Option<crate::ax::Rect>,
+    row_frame: Option<crate::ax::Rect>,
+    /// True when session rows follow this workspace row before the next
+    /// workspace (the group is rendered open). Clicking an open group would
+    /// collapse it, so it is never used for expansion.
+    expanded: bool,
+}
+
+/// A one-text sidebar row is a workspace/project group row; the following
+/// multi-text rows are that workspace's sessions.
+fn parse_sidebar_workspaces(rows: &[crate::ax::Row]) -> Vec<SidebarWorkspace> {
+    let mut workspaces: Vec<SidebarWorkspace> = Vec::new();
+    for row in rows {
+        let texts: Vec<&crate::ax::TextRun> = row
+            .texts
+            .iter()
+            .filter(|run| !run.text.trim().is_empty())
+            .collect();
+        if texts.is_empty() {
+            continue;
+        }
+        if texts.len() == 1 {
+            workspaces.push(SidebarWorkspace {
+                title: texts[0].text.trim().to_string(),
+                title_frame: texts[0].frame,
+                row_frame: row.frame,
+                expanded: false,
+            });
+        } else if let Some(current) = workspaces.last_mut() {
+            current.expanded = true;
+        }
+    }
+    workspaces
+}
+
+/// Pick the workspace row to expand: exact normalised match first, then a
+/// unique "contains" match (both directions). More than one candidate at the
+/// winning level is ambiguous and yields `None` — a guessed row is never
+/// clicked. Expanded groups are excluded: clicking them would collapse them.
+fn choose_workspace<'a>(
+    workspaces: &'a [SidebarWorkspace],
+    project_basename: &str,
+) -> Option<&'a SidebarWorkspace> {
+    let expected = normalize_title(project_basename);
+    if expected.is_empty() {
+        return None;
+    }
+    let collapsed: Vec<&SidebarWorkspace> = workspaces
+        .iter()
+        .filter(|workspace| !workspace.expanded)
+        .collect();
+    let exact: Vec<&SidebarWorkspace> = collapsed
+        .iter()
+        .copied()
+        .filter(|workspace| normalize_title(&workspace.title) == expected)
+        .collect();
+    match exact.len() {
+        1 => return Some(exact[0]),
+        // Duplicate project names: do not guess.
+        n if n > 1 => return None,
+        _ => {}
+    }
+    let contains: Vec<&SidebarWorkspace> = collapsed
+        .iter()
+        .copied()
+        .filter(|workspace| {
+            let actual = normalize_title(&workspace.title);
+            !actual.is_empty() && (actual.contains(&expected) || expected.contains(&actual))
+        })
+        .collect();
+    if contains.len() == 1 {
+        Some(contains[0])
+    } else {
+        None
+    }
+}
+
+/// Expand the collapsed workspace group that owns the task's project, then wait
+/// for the target session row to be rendered. Returns `project_not_found` when
+/// no unique workspace row can be picked, and `session_row_not_found` when the
+/// group expands but the session is still absent from the root sidebar.
+fn expand_workspace_for_task(pid: u32, task: &TaskRecord, debug: bool) -> Result<(), String> {
+    let Some(basename) = task
+        .target
+        .workspace_path
+        .as_deref()
+        .and_then(workspace_basename)
+    else {
+        return Err("project_not_found".into());
+    };
+    let rows = crate::ax::rows(pid);
+    if rows.is_empty() {
+        return Err("ax_unavailable".into());
+    }
+    let workspaces = parse_sidebar_workspaces(&rows);
+    let Some(workspace) = choose_workspace(&workspaces, &basename) else {
+        return Err("project_not_found".into());
+    };
+    // The workspace was already open, so the target session is genuinely not in
+    // the rendered list (e.g. a subagent session): never collapse the group.
+    if workspace.expanded {
+        return Err("session_row_not_found".into());
+    }
+    let Some(rect) = workspace.title_frame.or(workspace.row_frame) else {
+        return Err("project_not_found".into());
+    };
+    if !rect.is_sane() || rect.h < 10.0 || rect.w < 10.0 {
+        return Err("project_not_found".into());
+    }
+    if debug {
+        eprintln!(
+            "dsh-jump: expanding workspace {:?} at {:?}",
+            workspace.title, rect
+        );
+    }
+    if !crate::ax::click(rect) {
+        return Err("session_row_not_found".into());
+    }
+    // Expanding selects the workspace's last session and re-renders the group;
+    // poll until the target session row exists before trying to click it.
+    let now = crate::model::now_secs();
+    match poll_until(DSH_EXPAND_TIMEOUT_MS, || {
+        match read_fresh_selection(pid, task, now) {
+            FreshSelection::Match { .. } => Some(Ok(())),
+            FreshSelection::Ambiguous => Some(Err("session_ambiguous".to_string())),
+            FreshSelection::None => None,
+        }
+    }) {
+        Some(result) => result,
+        None => Err("session_row_not_found".into()),
+    }
 }
 
 /// Snapshot of a fresh post-miss read used by [`plan_retry`].
@@ -961,9 +1186,13 @@ fn try_app_level(task: &TaskRecord) -> Attempt {
             }
         }
     }
-    std::thread::sleep(Duration::from_millis(500));
-    let front = frontmost_app();
-    if front.as_deref() == Some(process.as_str()) {
+    // Slow launch/activation: bound the wait instead of one fixed sleep, and
+    // only report `unconfirmed` after the poll really expires.
+    let confirmed = poll_until(VERIFY_TIMEOUT_MS, || {
+        (frontmost_app().as_deref() == Some(process.as_str())).then_some(())
+    })
+    .is_some();
+    if confirmed {
         Attempt::Done(JumpOutcome {
             task_id: task.id.clone(),
             kind: JumpOutcomeKind::Success,
@@ -1275,6 +1504,30 @@ fn process_cwd(pid: u32) -> Option<String> {
     let text = String::from_utf8_lossy(&out.stdout);
     text.lines()
         .find_map(|l| l.strip_prefix('n').map(|s| s.to_string()))
+}
+
+// ── Bounded verification polling ────────────────────────────────
+
+/// Probe `probe` immediately and then every [`POLL_INTERVAL_MS`] until it
+/// returns `Some` or `timeout_ms` expires. Used for every asynchronous macOS
+/// signal (frontmost app, window title, AX window list, DSH session switch) so
+/// a slow-but-successful jump is never reported as unconfirmed.
+fn poll_until<T>(timeout_ms: u64, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    loop {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= timeout {
+            return None;
+        }
+        let remaining_ms = timeout.saturating_sub(elapsed).as_millis() as u64;
+        std::thread::sleep(Duration::from_millis(
+            POLL_INTERVAL_MS.min(remaining_ms.max(1)),
+        ));
+    }
 }
 
 // ── Pure helpers (unit tested) ──────────────────────────────────
@@ -2405,6 +2658,104 @@ mod tests {
             ),
             RetryPlan::GiveUp("session_click_unverified")
         );
+    }
+
+    #[test]
+    fn poll_until_respects_its_timeout_and_returns_early() {
+        // timeout 0: exactly one probe, then an honest timeout.
+        let mut calls = 0;
+        let none = poll_until(0, || {
+            calls += 1;
+            None::<u8>
+        });
+        assert_eq!(none, None);
+        assert_eq!(calls, 1);
+
+        // A later probe wins immediately (no full timeout wait).
+        let mut calls = 0;
+        let some = poll_until(1_000, || {
+            calls += 1;
+            (calls >= 2).then_some(7u8)
+        });
+        assert_eq!(some, Some(7));
+        assert_eq!(calls, 2);
+    }
+
+    fn workspace(title: &str, expanded: bool, y: f64) -> SidebarWorkspace {
+        SidebarWorkspace {
+            title: title.into(),
+            title_frame: Some(sample_rect(y)),
+            row_frame: Some(sample_rect(y)),
+            expanded,
+        }
+    }
+
+    #[test]
+    fn sidebar_workspace_rows_mark_group_expansion() {
+        // Real DSH shape: workspace row, its sessions, then collapsed projects.
+        let rows = vec![
+            ax_row(
+                &[("AgentMonitor", Some(sample_rect(354.0)))],
+                Some(sample_rect(346.0)),
+            ),
+            ax_row(
+                &[("进行中", None), ("多窗口询问提醒与跳转", None), ("23分钟", None)],
+                Some(sample_rect(382.0)),
+            ),
+            ax_row(
+                &[("审稿", Some(sample_rect(730.0)))],
+                Some(sample_rect(722.0)),
+            ),
+            ax_row(
+                &[("博士毕业论文", Some(sample_rect(768.0)))],
+                Some(sample_rect(760.0)),
+            ),
+            ax_row(
+                &[("DropDPO-Confidence", Some(sample_rect(806.0)))],
+                Some(sample_rect(798.0)),
+            ),
+        ];
+        let workspaces = parse_sidebar_workspaces(&rows);
+        assert_eq!(workspaces.len(), 4);
+        assert_eq!(workspaces[0].title, "AgentMonitor");
+        assert!(workspaces[0].expanded, "sessions follow this workspace row");
+        assert_eq!(workspaces[0].title_frame, Some(sample_rect(354.0)));
+        assert!(!workspaces[1].expanded, "审稿 has no rendered sessions");
+        assert!(!workspaces[2].expanded);
+        assert!(!workspaces[3].expanded);
+        // A session row alone never becomes a workspace.
+        assert!(parse_sidebar_workspaces(&rows[1..2]).is_empty());
+    }
+
+    #[test]
+    fn choose_workspace_prefers_exact_and_never_guesses() {
+        let rows = vec![
+            workspace("AgentMonitor", true, 346.0),
+            workspace("审稿", false, 722.0),
+            workspace("Paper-A", false, 760.0),
+            workspace("Paper-B", false, 798.0),
+        ];
+        // Exact normalised match wins (and an expanded exact group is skipped).
+        assert_eq!(choose_workspace(&rows, "审稿").map(|w| w.title.as_str()), Some("审稿"));
+        // Unique "contains" fallback (project basename is a prefix).
+        assert_eq!(
+            choose_workspace(&[workspace("DropDPO-Confidence", false, 1.0)], "DropDPO")
+                .map(|w| w.title.as_str()),
+            Some("DropDPO-Confidence")
+        );
+        // Ambiguous contains -> no click.
+        assert_eq!(choose_workspace(&rows, "Paper"), None);
+        // Exact duplicate project names -> no click.
+        let duplicates = vec![
+            workspace("审稿", false, 1.0),
+            workspace("审稿", false, 2.0),
+        ];
+        assert_eq!(choose_workspace(&duplicates, "审稿"), None);
+        // No match / empty basename / already-expanded-only -> no click.
+        assert_eq!(choose_workspace(&rows, "unrelated"), None);
+        assert_eq!(choose_workspace(&rows, ""), None);
+        let expanded = vec![workspace("AgentMonitor", true, 346.0)];
+        assert_eq!(choose_workspace(&expanded, "AgentMonitor"), None);
     }
 
     #[test]

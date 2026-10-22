@@ -105,14 +105,20 @@ var I18N = {
     collapse: 'Collapse',
     settings: 'Settings',
     undo: 'Undo',
+    update: 'Update',
+    updateAvailable: 'Version {v} is available',
     dismissed: 'Removed from the list.',
     dragHint: 'Drag to move',
     notice: 'Notice: ',
     newBadge: '{n} new',
     newAria: '{n} newly completed',
+    newRowAria: 'Newly completed',
     questionChip: '{n} waiting',
     questionChipAria: '{n} sessions waiting for your answer',
     questionAria: '{n} waiting for your answer',
+    dotQuestion: '{n} waiting for an answer',
+    dotNew: '{n} newly completed',
+    dotFailed: '{n} interrupted or failed',
     collapsedAria: 'Agent Monitor, {n} sessions, {a} need attention, click to expand',
     emptyAria: 'Agent Monitor, no active sessions, click to expand',
     status: {
@@ -145,6 +151,7 @@ var I18N = {
       session_row_not_found: 'The session is not visible in the DSH sidebar — expand its project or scroll it into view.',
       session_ambiguous: 'Several sessions share this title; project/time evidence could not tell them apart.',
       session_click_unverified: 'Clicked the session row, but the window did not switch.',
+      project_not_found: 'The project was not found in the DSH sidebar.',
       task_gone: 'The task no longer exists.',
       grant: 'Grant permission'
     }
@@ -160,14 +167,20 @@ var I18N = {
     collapse: '收起',
     settings: '设置',
     undo: '撤销',
+    update: '更新',
+    updateAvailable: '新版本 {v} 可用',
     dismissed: '已从列表移除。',
     dragHint: '拖动以移动',
     notice: '提示：',
     newBadge: '{n} 个新完成',
     newAria: '{n} 个新完成',
+    newRowAria: '新完成',
     questionChip: '{n} 待回答',
     questionChipAria: '{n} 个会话等待你的回答',
     questionAria: '{n} 个会话等待你的回答',
+    dotQuestion: '{n} 个会话等待回答',
+    dotNew: '{n} 个新完成',
+    dotFailed: '{n} 个已中断或失败',
     collapsedAria: 'Agent Monitor，{n} 个会话，{a} 个待处理，点击展开',
     emptyAria: 'Agent Monitor，暂无活跃会话，点击展开',
     status: {
@@ -200,6 +213,7 @@ var I18N = {
       session_row_not_found: 'DSH 侧栏中没有该会话——请展开所属项目或滚动到可见位置。',
       session_ambiguous: '存在同名会话，项目/时间信息不足以区分。',
       session_click_unverified: '已点击会话行，但窗口没有切换。',
+      project_not_found: 'DSH 侧栏中找不到该项目。',
       task_gone: '任务已不存在。',
       grant: '去授权'
     }
@@ -226,6 +240,10 @@ var glyphEl = petEl.querySelector('.pet-glyph');
 var badgeEl = document.getElementById('badge');
 var newBadgeEl = document.getElementById('new-badge');
 var noticeDotEl = document.getElementById('notice-dot');
+var statusDotsEl = document.getElementById('status-dots');
+var statusDotQuestionEl = document.getElementById('status-dot-question');
+var statusDotNewEl = document.getElementById('status-dot-new');
+var statusDotFailedEl = document.getElementById('status-dot-failed');
 var panelEl = document.getElementById('panel');
 var listEl = document.getElementById('list');
 var dragbarEl = document.getElementById('dragbar');
@@ -280,6 +298,19 @@ var seenAtSecs = Math.floor(Date.now() / 1000);
 // (the pet badge itself resets to 0 at that moment because the user now sees
 // the list).
 var pendingHeaderNew = 0;
+// Completed task ids captured when the panel opens (same frozen baseline as the
+// header count), so the rows themselves can carry a "new" marker while it stays
+// open. Completions arriving during the session join the set.
+var openSeenAtSecs = 0;
+var pendingNewIds = [];
+// Rust emits `jump-feedback` for every jump *and* returns the outcome, so one
+// click can deliver the same soft result twice. `degraded` / `unconfirmed`
+// outcomes are therefore reported at most once per task+reason per app session
+// (in memory only); failures always report.
+var softOutcomeNotified = {};
+// Last update version announced; a repeated delivery of the same version is
+// ignored for the rest of the session (in memory only).
+var lastUpdateVersion = null;
 var customIcons = { collapsed: null, hidden: null };
 
 var STATUS_GLYPH = {
@@ -332,15 +363,26 @@ function isPanelOpen() {
   return petState.mode === 'expanded' || petState.mode === 'dragging';
 }
 
+function isNewCompletedTask(task, baseline) {
+  return task.status === 'completed' && (task.last_activity_secs || 0) > baseline;
+}
+
 function countNewCompleted() {
   var tasks = snapshot.tasks || [];
   var count = 0;
   for (var i = 0; i < tasks.length; i++) {
-    if (tasks[i].status === 'completed' && (tasks[i].last_activity_secs || 0) > seenAtSecs) {
-      count++;
-    }
+    if (isNewCompletedTask(tasks[i], seenAtSecs)) count++;
   }
   return count;
+}
+
+function completedIdsSince(baseline) {
+  var tasks = snapshot.tasks || [];
+  var ids = [];
+  for (var i = 0; i < tasks.length; i++) {
+    if (isNewCompletedTask(tasks[i], baseline)) ids.push(tasks[i].id);
+  }
+  return ids;
 }
 
 function updatePetAria() {
@@ -374,11 +416,35 @@ function updatePetAria() {
 
 function updateNewIndicators() {
   var open = isPanelOpen();
+  var enabled = settings.new_badge !== false;
+
+  if (open && enabled) {
+    // Keep the batch revealed on open stable while the panel stays open: rows
+    // that left the snapshot drop out, tasks that complete during the session
+    // join it. Recomputing from `seenAtSecs` here would flicker because the
+    // baseline advances on every open render below.
+    var present = {};
+    var tasks = snapshot.tasks || [];
+    for (var i = 0; i < tasks.length; i++) present[tasks[i].id] = true;
+    var kept = [];
+    for (var k = 0; k < pendingNewIds.length; k++) {
+      if (present[pendingNewIds[k]]) kept.push(pendingNewIds[k]);
+    }
+    var fresh = completedIdsSince(openSeenAtSecs);
+    for (var f = 0; f < fresh.length; f++) {
+      if (kept.indexOf(fresh[f]) === -1) kept.push(fresh[f]);
+    }
+    pendingNewIds = kept;
+    pendingHeaderNew = kept.length;
+  } else {
+    pendingNewIds = [];
+    pendingHeaderNew = 0;
+  }
+
   // While the panel is open the user is looking: advance the baseline. The
   // counts painted below therefore reflect what was waiting *before* opening.
   if (open) seenAtSecs = nowSecs();
 
-  var enabled = settings.new_badge !== false;
   var count = open ? 0 : countNewCompleted();
   var showBadge = enabled && count > 0;
   newBadgeEl.hidden = !showBadge;
@@ -476,6 +542,7 @@ function updateQuestionSurfaces() {
     headerQuestionEl.removeAttribute('aria-label');
   }
   updatePetAria();
+  syncStatusDots();
 }
 
 function clearAttentionState() {
@@ -519,6 +586,61 @@ function handleAttentionPending(payload) {
   // flight. Deliberately no focus()/set_expanded(): Rust owns auto_show.
   updateQuestionSurfaces();
   startAttentionPulse();
+}
+
+// ── Collapsed semantic status cluster ──────────────────────────
+//
+// Three independent dots, painted only while the pet is collapsed /
+// edge-hidden / tray-hidden: amber = a session is waiting on a question,
+// green = a task completed since the last look, red = a session failed or was
+// interrupted. The data comes from the existing snapshot/question state only
+// (no Rust duplication, no timers); `updateQuestionSurfaces` is the common
+// repaint point for render, settings changes and `attention-pending`.
+function failedTaskCount() {
+  var tasks = snapshot.tasks || [];
+  var count = 0;
+  for (var i = 0; i < tasks.length; i++) {
+    if (tasks[i].status === 'failed') count++;
+  }
+  return count;
+}
+
+function paintStatusDot(dotEl, active, count, labelKey, parts) {
+  dotEl.hidden = !active;
+  if (!active) {
+    dotEl.removeAttribute('title');
+    dotEl.removeAttribute('aria-label');
+    return;
+  }
+  var label = t(labelKey).replace('{n}', count);
+  dotEl.title = label;
+  dotEl.setAttribute('aria-label', label);
+  parts.push(label);
+}
+
+function syncStatusDots() {
+  var open = isPanelOpen();
+  var questionCount = effectiveQuestionCount();
+  var newCount = settings.new_badge !== false ? countNewCompleted() : 0;
+  var failedCount = failedTaskCount();
+  var active = !open && (questionCount > 0 || newCount > 0 || failedCount > 0);
+  statusDotsEl.hidden = !active;
+
+  var parts = [];
+  paintStatusDot(statusDotQuestionEl, questionCount > 0, questionCount, 'dotQuestion', parts);
+  paintStatusDot(statusDotNewEl, newCount > 0, newCount, 'dotNew', parts);
+  paintStatusDot(statusDotFailedEl, failedCount > 0, failedCount, 'dotFailed', parts);
+
+  var separator = lang === 'zh' ? '，' : ', ';
+  if (active) statusDotsEl.setAttribute('aria-label', parts.join(separator));
+  else statusDotsEl.removeAttribute('aria-label');
+
+  // The 14 px tab only fits one dot: highest priority wins (question > failed >
+  // new) and that dot carries `.lead` for the compact CSS variant.
+  statusDotQuestionEl.classList.toggle('lead', questionCount > 0);
+  statusDotFailedEl.classList.toggle('lead', questionCount === 0 && failedCount > 0);
+  statusDotNewEl.classList.toggle('lead',
+    questionCount === 0 && failedCount === 0 && newCount > 0);
 }
 
 // ── Custom icon slots ───────────────────────────────────────────
@@ -750,14 +872,27 @@ function renderTask(task) {
   var showSummary = settings.show_summary !== false;
   var statusLabel = t('status.' + task.status) || task.status;
   var levelText = showLevel ? (task.level || 'L0') : '';
+  // Rows that completed since the user last looked carry a labelled green dot,
+  // so "which one is new" is visible on the row itself, not only as a count.
+  var isNewRow = settings.new_badge !== false && pendingNewIds.indexOf(task.id) !== -1;
+  if (isNewRow) row.classList.add('new-completed');
   row.setAttribute('aria-label',
+    (isNewRow ? t('newRowAria') + ', ' : '') +
     task.agent_name + ', ' + task.title + ', ' + statusLabel +
     (levelText ? ', ' + levelText : '') + ', ' + t('jumpHint'));
   row.title = task.title + '\n' + statusLabel + ' · ' +
     (task.status_reason || '') + '\n' + t('jumpHint') +
+    (isNewRow ? '\n' + t('newRowAria') : '') +
     (levelText ? ' (' + levelText + ')' : '');
 
   var top = el('div', 'task-top');
+  if (isNewRow) {
+    var newMarker = el('span', 'new-dot');
+    newMarker.setAttribute('role', 'img');
+    newMarker.setAttribute('aria-label', t('newRowAria'));
+    newMarker.title = t('newRowAria');
+    top.appendChild(newMarker);
+  }
   var title = el('span', 'title', task.title);
   title.title = task.title;
   top.appendChild(title);
@@ -831,10 +966,18 @@ function handleOutcome(outcome) {
   var message = t(key);
   if (!message || message === key) message = reason;
   var kind = outcome.kind === 'failed' ? 'error' : 'warn';
+  var soft = outcome.kind === 'degraded' || outcome.kind === 'unconfirmed';
   // `toast_on_degraded=false` may silence only the softer notices; failures
   // are always reported.
-  var suppressed = settings.toast_on_degraded === false &&
-    (outcome.kind === 'degraded' || outcome.kind === 'unconfirmed');
+  var suppressed = settings.toast_on_degraded === false && soft;
+  // A repeated jump at an old/unconfirmed target must not nag again: soft
+  // outcomes are reported at most once per task+reason per app session
+  // (in memory only). Failures bypass this entirely and always report.
+  var dedupeKey = soft && outcome.task_id ? outcome.task_id + ':' + reason : null;
+  if (dedupeKey && softOutcomeNotified[dedupeKey]) return;
+  var markReported = function () {
+    if (dedupeKey) softOutcomeNotified[dedupeKey] = true;
+  };
 
   if (settings.auto_dismiss_invalid &&
       (outcome.kind === 'failed' || outcome.kind === 'degraded') &&
@@ -845,20 +988,28 @@ function handleOutcome(outcome) {
     invoke('dismiss_task', { taskId: taskId }).then(function (removed) {
       if (!removed) {
         delete autoDismissing[taskId];
-        if (!suppressed) showNotice(message, kind, outcome.permission_needed, null, key);
+        if (!suppressed) {
+          markReported();
+          showNotice(message, kind, outcome.permission_needed, null, key);
+        }
         return;
       }
       // Auto-dismiss always keeps an Undo affordance, even for degraded
       // outcomes that would otherwise be silent.
+      markReported();
       showNotice(message, kind, null, { type: 'undo', taskId: taskId }, key, 'dismissed');
     }).catch(function () {
       delete autoDismissing[taskId];
-      if (!suppressed) showNotice(message, kind, outcome.permission_needed, null, key);
+      if (!suppressed) {
+        markReported();
+        showNotice(message, kind, outcome.permission_needed, null, key);
+      }
     });
     return;
   }
 
   if (suppressed) return;
+  markReported();
   showNotice(message, kind, outcome.permission_needed, null, key);
 }
 
@@ -867,6 +1018,13 @@ function noticeMessage() {
   if (!notice.messageKey) return notice.message || '';
   var message = t(notice.messageKey);
   if (message === notice.messageKey) message = notice.message || '';
+  if (notice.vars) {
+    for (var name in notice.vars) {
+      if (Object.prototype.hasOwnProperty.call(notice.vars, name)) {
+        message = message.split('{' + name + '}').join(notice.vars[name]);
+      }
+    }
+  }
   if (notice.suffixKey) message = message + ' ' + t(notice.suffixKey);
   return message;
 }
@@ -887,6 +1045,14 @@ function paintNoticeToast() {
     toastActionEl.onclick = function (event) {
       event.stopPropagation();
       invoke('open_permission_settings', { kind: permissionNeeded }).catch(function () {});
+      dismissNotice();
+    };
+  } else if (action && action.type === 'open_settings') {
+    toastActionEl.hidden = false;
+    toastActionEl.textContent = t('update');
+    toastActionEl.onclick = function (event) {
+      event.stopPropagation();
+      openSettings();
       dismissNotice();
     };
   } else if (action && action.type === 'undo') {
@@ -945,7 +1111,7 @@ function syncNotice() {
   updatePetAria();
 }
 
-function showNotice(message, kind, permissionNeeded, action, messageKey, suffixKey) {
+function showNotice(message, kind, permissionNeeded, action, messageKey, suffixKey, vars) {
   if (!message && !messageKey) return;
   notice = {
     message: message || '',
@@ -953,7 +1119,8 @@ function showNotice(message, kind, permissionNeeded, action, messageKey, suffixK
     permissionNeeded: permissionNeeded || null,
     action: action || null,
     messageKey: messageKey || null,
-    suffixKey: suffixKey || null
+    suffixKey: suffixKey || null,
+    vars: vars || null
   };
   noticeSurface = null; // a fresh notice always gets a fresh lifetime
   syncNotice();
@@ -975,6 +1142,24 @@ function undoDismiss(taskId) {
   dismissNotice();
 }
 
+// ── In-app update notification ──────────────────────────────────
+//
+// Rust emits `update-available` ({current_version, available, version, notes,
+// pub_date}) when the updater finds a newer build. One notice is painted (toast
+// while expanded, info dot while collapsed) whose action opens the Settings
+// window (Updates pane). Repeated delivery of the same version is ignored for
+// the rest of the session; in-memory only, no timer.
+function handleUpdateAvailable(payload) {
+  payload = payload || {};
+  if (payload.available === false) return;
+  var version = payload.version || null;
+  if (!version) return;
+  if (lastUpdateVersion === version) return;
+  lastUpdateVersion = version;
+  showNotice('', 'info', null, { type: 'open_settings' }, 'updateAvailable',
+    null, { v: String(version) });
+}
+
 // ── Pet state machine (visual side) ─────────────────────────────
 
 function applyPetState(next) {
@@ -983,10 +1168,14 @@ function applyPetState(next) {
   var nextMode = next.mode || petState.mode || 'collapsed';
   var willOpen = nextMode === 'expanded' || nextMode === 'dragging';
   if (willOpen && !wasOpen) {
-    // Remember what accumulated before the baseline is advanced below, so the
-    // header can announce "N new" while the user reads the list.
-    pendingHeaderNew = settings.new_badge !== false ? countNewCompleted() : 0;
+    // Freeze the "since you last looked" baseline for this open session and
+    // capture the completed ids it covers: the header announces "N new" and the
+    // rows themselves get a green marker while the panel stays open.
+    openSeenAtSecs = seenAtSecs;
+    pendingNewIds = settings.new_badge !== false ? completedIdsSince(openSeenAtSecs) : [];
+    pendingHeaderNew = pendingNewIds.length;
   } else if (!willOpen) {
+    pendingNewIds = [];
     pendingHeaderNew = 0;
   }
 
@@ -1249,6 +1438,7 @@ function mockSnapshot() {
 
 var mockDismissed = {};
 var openSettingsCalls = 0;
+var permissionCalls = 0;
 var restoreCalls = [];
 var hidePetCalls = 0;
 var expandCalls = [];
@@ -1310,6 +1500,10 @@ function mockInvoke(cmd, args) {
   }
   if (cmd === 'open_settings') {
     openSettingsCalls++;
+    return true;
+  }
+  if (cmd === 'open_permission_settings') {
+    permissionCalls++;
     return true;
   }
   if (cmd === 'hide_pet') {
@@ -1397,6 +1591,25 @@ if (MOCK) {
     get restoreCalls() { return restoreCalls.slice(); },
     get customIcons() { return { collapsed: customIcons.collapsed, hidden: customIcons.hidden }; },
     get seenAtSecs() { return seenAtSecs; },
+    // Completed ids currently marked as "new" on rows (while the panel is open).
+    get pendingNewIds() { return pendingNewIds.slice(); },
+    get permissionCalls() { return permissionCalls; },
+    get notifiedSoftOutcomes() { return Object.keys(softOutcomeNotified); },
+    // Drive the Tauri `update-available` event exactly like the updater would.
+    emitUpdate: function (payload) {
+      var next = payload || {};
+      mockEmit('update-available', next);
+      return next;
+    },
+    // Drive a `jump-feedback` payload (also used for reasons the mock command
+    // cannot produce, e.g. a second degradation reason for the same task).
+    emitJumpFeedback: function (outcome) {
+      mockEmit('jump-feedback', outcome);
+      return outcome;
+    },
+    // Test-only: forget the once-per-task+reason soft-warning memory (the real
+    // app only forgets it when the process ends).
+    clearSoftOutcomeNotices: function () { softOutcomeNotified = {}; },
     // Pending-question attention state (badge variant / pulse / header chip).
     get attention() {
       return {
@@ -1517,6 +1730,7 @@ function boot() {
     listen('jump-feedback', function (event) { handleOutcome(event.payload); });
     listen('settings-changed', function (event) { applySettings(event.payload); });
     listen('attention-pending', function (event) { handleAttentionPending(event.payload); });
+    listen('update-available', function (event) { handleUpdateAvailable(event.payload); });
     applySettings(mockSettings());
     render(mockSnapshot());
     var collapsed = location.search.indexOf('mock=collapsed') !== -1;
@@ -1540,6 +1754,15 @@ function boot() {
       };
       showNotice(t(noticeKeys[noticeKind]), noticeKind, null, null, noticeKeys[noticeKind]);
     }
+    // Design-preview helper: `?mock=1&update=0.7.0` paints the in-app update
+    // notice exactly as the `update-available` event does.
+    var previewUpdate = (location.search.match(/[?&]update=([0-9][^&]*)/) || [])[1];
+    if (previewUpdate) {
+      handleUpdateAvailable({
+        current_version: '0.6.0', available: true,
+        version: decodeURIComponent(previewUpdate), notes: null, pub_date: null
+      });
+    }
     return;
   }
 
@@ -1561,6 +1784,7 @@ function boot() {
   listen('jump-feedback', function (event) { handleOutcome(event.payload); });
   listen('settings-changed', function (event) { applySettings(event.payload); });
   listen('attention-pending', function (event) { handleAttentionPending(event.payload); });
+  listen('update-available', function (event) { handleUpdateAvailable(event.payload); });
   initCustomIcons();
 
   // One shared timer: only relative-time labels change, no re-render.

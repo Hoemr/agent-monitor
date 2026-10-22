@@ -374,6 +374,76 @@ checks in the pet suite.
 
 ---
 
+## Phase 8 — in-app updates, visible new completions, status dots (0.7.0, 2026-10-22)
+
+### Automated gates
+
+| Gate | Command | Result |
+|---|---|---|
+| Rust unit tests | `cargo test --manifest-path src-tauri/Cargo.toml` | **151 passed, 0 failed** (142 baseline + updater/settings tests) |
+| Pet UI (real DOM) | `scripts/ui-selftest.html` | **ALL PASS, 129 checks** (96 → 129: row markers, status dots, update notice, soft-warning dedupe) |
+| Settings UI (real DOM) | `scripts/ui-selftest-settings.html` | **ALL PASS, 81 checks** (60 → 81: Updates pane, events, progress, restart) |
+| Release build | `cargo build --release` | 0 warnings / 0 errors |
+| Bundle | `bash scripts/bundle-mac.sh` | `dist/Agent Monitor.app` 0.7.0, ad-hoc |
+
+### In-app updater — real end-to-end swap (signed with the repo test key)
+
+A copied 0.7.0 `.app` was pointed at a local `latest.json` (signed 0.7.1
+artifact) and launched with the debug auto-install path:
+
+```text
+$ …/--check-update   (old 0.7.0 bundle, local endpoint)
+{"current_version":"0.7.0","available":true,"version":"0.7.1",
+ "notes":"Round-4 local updater verification","pub_date":"2026-10-22T09:45:31Z"}
+
+$ AGENT_MONITOR_UPDATE_AUTO_INSTALL=1 … (old bundle)
+update: installed 0.7.1; restarting
+update: auto-install: already at 0.7.1 (nothing to do)
+
+$ plutil -p "/private/tmp/am-final/old/Agent Monitor.app/Contents/Info.plist"
+  "CFBundleShortVersionString" => "0.7.1"
+```
+
+The tarball was signed with `tauri signer` (minisign) and the plugin verified
+the signature before swapping the bundle in place; the restart re-executed the
+new binary and the follow-up check reported up to date. The real GitHub endpoint
+correctly reports a readable error until a published release carries
+`latest.json` (remote latest is still v0.3.1).
+
+### Pet: identify new completions + three status dots
+
+* On open, rows completed since the last look get a green “Newly completed”
+  marker; the set is frozen for the open session (late completions join without
+  flicker) and cleared on collapse. The header chip and collapsed ring still show
+  the count.
+* Collapsed top-left status cluster: yellow (waiting question), green (new
+  completions), red (failed/interrupted) can be visible simultaneously; the
+  jump-notice dot moved to the bottom-right. Rect-based selftests prove no
+  collisions at collapsed sizes 48/72 and in the 14 px edge tab (single
+  highest-priority dot).
+* Soft jump notices are deduped per `task_id:reason_key` (one per session);
+  failures always report; update warnings are unaffected.
+
+### Jump reliability (round 3, see `docs/JUMP.md`)
+
+* DSH sessions in collapsed projects now succeed at L3 (workspace auto-expand,
+  verified: 2.4 s, window title read-back).
+* Verification polling removes false `focus_unconfirmed` / `deep_link_unverified`
+  warnings for slow-but-successful jumps (normal Codex 0.6 s, VSCode 1.5 s).
+* Codex deleted-thread fallback is honest (`degraded / L1`) and 35 % faster
+  (7.1 s → 4.6 s); the pet shows the soft notice only once per task.
+
+### Deferred
+
+* macOS first-run TCC prompts and Notification Center appearance still require a
+  graphical session (documented in earlier phases).
+* The updater downloads the full ~9 MB signed artifact (no binary deltas), and
+  the app must be restarted after install (the UI offers “Restart Now”).
+* Updating replaces an ad-hoc-signed bundle, so macOS may ask for
+  Accessibility/Automation again; Settings → Jump shows the live state.
+
+---
+
 ## Unexecuted items and reproduction steps
 
 1. **Second physical display / hot-plug**

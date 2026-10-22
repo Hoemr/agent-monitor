@@ -6,6 +6,7 @@
 //!   * `jump`      — graded, verified jump execution (L3→L0)
 //!   * `pet`       — pure geometry + placement persistence
 //!   * `settings`  — user configuration: defaults, validation, atomic storage
+//!   * `update`    — in-app updates (tauri-plugin-updater) commands/events
 //!   * this file   — Tauri window/tray/command plumbing only
 
 pub mod agents;
@@ -16,6 +17,7 @@ pub mod model;
 pub mod monitor;
 pub mod pet;
 pub mod settings;
+pub mod update;
 
 use model::{
     now_millis, AgentDescriptor, Edge, JumpLevel, JumpOutcome, PermissionKind, PetMode, PetPrefs,
@@ -689,6 +691,25 @@ fn show_settings_window(app: &AppHandle) {
 fn hide_settings_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.hide();
+    }
+}
+
+/// Tray → "Check for Updates…": open Settings on the Updates pane.
+///
+/// No network work happens here (the menu must never block); the frontend pane
+/// runs `check_for_update` itself when it becomes visible. A freshly created
+/// window has no listener yet, so the event is repeated once its local page has
+/// loaded — `open-update-pane` is idempotent for the UI.
+fn open_update_pane(app: &AppHandle) {
+    let existed = app.get_webview_window("settings").is_some();
+    show_settings_window(app);
+    let _ = app.emit("open-update-pane", ());
+    if !existed {
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1200));
+            let _ = handle.emit("open-update-pane", ());
+        });
     }
 }
 
@@ -1368,6 +1389,15 @@ fn tray_menu(
             .build(app)?;
     let refresh_item =
         MenuItemBuilder::with_id("refresh", if zh { "刷新" } else { "Refresh" }).build(app)?;
+    let update_item = MenuItemBuilder::with_id(
+        "check-update",
+        if zh {
+            "检查更新…"
+        } else {
+            "Check for Updates…"
+        },
+    )
+    .build(app)?;
     let quit_item = MenuItemBuilder::with_id("quit", if zh { "退出" } else { "Quit" }).build(app)?;
     MenuBuilder::new(app)
         .item(&settings_item)
@@ -1377,6 +1407,7 @@ fn tray_menu(
         .item(&reset_item)
         .separator()
         .item(&refresh_item)
+        .item(&update_item)
         .separator()
         .item(&quit_item)
         .build()
@@ -1424,6 +1455,7 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     tray.on_menu_event(move |app, event| match event.id().as_ref() {
         "settings" => show_settings_window(app),
+        "check-update" => open_update_pane(app),
         "show" => show_pet(app),
         "hide" => hide_pet_now(app),
         "reset" => reset_pet_position(app),
@@ -1629,6 +1661,7 @@ pub fn dump_ax_rows(pid: u32) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_pet(app);
         }))
@@ -1662,6 +1695,9 @@ pub fn run() {
             open_settings,
             close_settings,
             open_data_dir,
+            update::check_for_update,
+            update::install_update,
+            update::restart_app,
         ])
         .setup(|app| {
             // Menu-bar/tray-only app: no Dock icon, no app switcher entry.
@@ -1789,6 +1825,12 @@ pub fn run() {
                     show_settings_window(&h);
                 });
             }
+
+            // In-app updater: one silent background check ~4 s after launch
+            // (`auto_check_updates`), or the debug-only auto install path used
+            // by the acceptance run (docs/UPDATING.md). Both never block setup.
+            update::spawn_startup_check(&handle);
+            update::spawn_auto_install_if_requested(&handle);
 
             // Scheduler: file events + settings changes share one wake channel.
             let rx = app

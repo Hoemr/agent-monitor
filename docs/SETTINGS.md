@@ -46,6 +46,14 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 > 通知是 best-effort：若 macOS 在“通知”设置里禁止了 Agent Monitor（或通知由
 > `osascript` 的宿主终端归属），横幅可能不显示；贴边展开、角标脉冲和声音仍然有效。
 
+### 更新（update）
+
+应用内更新（GitHub Releases + minisign 签名清单），详见 [`docs/UPDATING.md`](UPDATING.md)。
+
+| key | 类型 | 默认 | 范围 | 生效 |
+|---|---|---|---|---|
+| `auto_check_updates` | bool | `true` | — | 即时/下次启动：启动约 4 秒后在后台检查一次；已是最新或离线时静默。手动检查在“设置 → 更新” |
+
 ### 监控
 
 | key | 类型 | 默认 | 范围 | 生效 |
@@ -102,7 +110,7 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 |---|---|---|---|
 | `get_settings` | — | Settings | 设置窗口/桌宠启动时读取 |
 | `set_settings` | `settings: Settings` | Settings（已夹取） | 全量保存并应用；服务端再次 clamp |
-| `reset_settings` | `scope: all\|general\|attention\|monitor\|pet\|jump` | Settings | 分组恢复默认 |
+| `reset_settings` | `scope: all\|general\|attention\|monitor\|pet\|jump\|update` | Settings | 分组恢复默认 |
 | `get_settings_meta` | — | 见下 | 数据页只读信息 |
 | `clear_dismissed` | — | number | 清除已忽略任务数量 |
 | `get_custom_icons` | — | `{collapsed, hidden}` | 自定义图标 data URL；见 [`docs/ICONS.md`](ICONS.md) |
@@ -114,12 +122,17 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 | `open_data_dir` | — | `Result<(), String>` | Finder 打开数据目录 |
 | `get_jump_diagnostics` | — | 见 [`docs/JUMP.md`](JUMP.md) | 跳转自检：辅助功能/自动化/窗口读取 + 各 Agent 安装/运行/最高等级 |
 | `reveal_app_in_finder` | — | `Result<(), String>` | 在访达中显示 Agent Monitor.app（方便拖入辅助功能列表） |
+| `check_for_update` | — | `{current_version, available, version?, notes?, pub_date?}` | 应用内更新检查 |
+| `install_update` | — | `Result<(), String>` | 下载、校验签名并就地安装；过程中发 `update-progress` |
+| `restart_app` | — | — | 重启以完成已安装的更新 |
 | `reset_pet_position_command` | — | — | 复用桌宠 reset |
 
 事件 `settings-changed` payload 为完整 `Settings`，广播到全部窗口；`pet-state` payload
 中的 `settings` 也内嵌完整设置，保证首次渲染不闪默认值。新问题提醒另发 `attention-pending`
 （payload `{alerts, question_count, auto_show}`，只在新问题出现时发送），见
-[`docs/ATTENTION.md`](ATTENTION.md)。
+[`docs/ATTENTION.md`](ATTENTION.md)；更新流程另有 `update-available` /
+`update-progress` / `update-installed` / `open-update-pane` 事件，见
+[`docs/UPDATING.md`](UPDATING.md)。
 
 `get_settings_meta`:
 
@@ -130,7 +143,7 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
   "pet_path": "…/pet.json",
   "dismissed_path": "…/dismissed.json",
   "version": 1,
-  "app_version": "0.6.0",
+  "app_version": "0.7.0",
   "system_language": "zh",
   "legacy_imported": true,
   "corrupt_backup": null
@@ -174,10 +187,11 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 source ~/.cargo/env
 cargo test --release --manifest-path src-tauri/Cargo.toml      # 含 settings/pet/monitor 单测
 cargo build --release --manifest-path src-tauri/Cargo.toml
-bash scripts/ui-test.sh              # 桌宠（96 项）+ 设置窗口（60 项），聚合退出码
+bash scripts/ui-test.sh              # 桌宠（129 项）+ 设置窗口（81 项），聚合退出码
 bash scripts/ui-test-settings.sh     # 只跑设置窗口
 src-tauri/target/release/agent-monitor --dump-tasks   # 打印生效的 enabled/retention/rows
 src-tauri/target/release/agent-monitor --jump-diagnostics  # 跳转权限/应用自检 JSON
+src-tauri/target/release/agent-monitor --check-update      # 更新检查 JSON（可配合 AGENT_MONITOR_UPDATE_ENDPOINT）
 AGENT_MONITOR_DEBUG_GEOMETRY=1 src-tauri/target/release/agent-monitor
 swift scripts/wins-probe.swift <pid>  # 真实窗口 bounds + activationPolicy
 ```

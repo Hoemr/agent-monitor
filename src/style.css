@@ -139,6 +139,38 @@ body {
 .no-tasks #pet { opacity: 0.62; }
 .no-tasks #pet:hover { opacity: 0.9; }
 
+/* ── Collapsed semantic status cluster ────────────────────── *
+ * Three independent dots in the top-left corner: amber = a session is waiting
+ * on a question, green = a task completed since the last look, red = a session
+ * failed/interrupted. A vertical stack keeps them clear of the blue attention
+ * badge (top-right), the green completion ring (bottom-left) and the glyph,
+ * even at collapsed_size 48. The jump-notice dot now lives bottom-right. */
+.status-dots {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  pointer-events: none;
+}
+.status-dots[hidden] { display: none; }
+
+.status-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dot-color, var(--text-tertiary));
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28),
+    0 0 0 2px rgba(255, 255, 255, 0.14);
+}
+.status-dot[hidden] { display: none; }
+.status-dot.question { --dot-color: var(--status-waiting); }
+.status-dot.new { --dot-color: var(--status-running); }
+.status-dot.failed { --dot-color: var(--status-failed); }
+
 #badge {
   position: absolute;
   top: 4px;
@@ -237,12 +269,13 @@ body {
 }
 .new-badge[hidden] { display: none; }
 
-/* Jump-feedback notice while the panel is closed: a text-free dot in the last
- * free corner (top-left). It stays until the notice expires or is acted on. */
+/* Jump-feedback notice while the panel is closed: a text-free dot in the
+ * bottom-right corner (the top-left corner is the semantic status cluster). It
+ * stays until the notice expires or is acted on. */
 .notice-dot {
   position: absolute;
-  top: 4px;
-  left: 4px;
+  bottom: 4px;
+  right: 4px;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -454,6 +487,19 @@ body {
   min-width: 0;
 }
 
+/* "Newly completed" row marker: a 6 px green dot before the title. It carries
+ * its own aria-label/title (`Newly completed` / `新完成`), so the state is never
+ * colour-only, and the fixed 64 px row height keeps the list layout stable. */
+.new-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--status-running);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--status-running) 40%, transparent);
+}
+
 .status {
   grid-column: 1;
   display: flex;
@@ -645,6 +691,25 @@ body {
   padding: 0;
 }
 
+/* 14 px edge/tray tab: a single 3 px highest-priority dot (question > failed >
+ * new, marked `.lead` in main.js) so the cluster never overflows the tab. */
+#app.mode-edge_hidden .status-dots,
+#app.mode-tray_hidden .status-dots {
+  top: 1px;
+  left: 1px;
+  gap: 0;
+}
+#app.mode-edge_hidden .status-dot,
+#app.mode-tray_hidden .status-dot {
+  width: 3px;
+  height: 3px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
+}
+#app.mode-edge_hidden .status-dots .status-dot,
+#app.mode-tray_hidden .status-dots .status-dot { display: none; }
+#app.mode-edge_hidden .status-dots .status-dot.lead,
+#app.mode-tray_hidden .status-dots .status-dot.lead { display: block; }
+
 #app.mode-edge_hidden .pet-grip {
   display: block;
   position: absolute;
@@ -691,8 +756,10 @@ body {
 }
 #app.mode-edge_hidden .notice-dot,
 #app.mode-tray_hidden .notice-dot {
-  top: 1px;
-  left: 1px;
+  top: auto;
+  left: auto;
+  bottom: 1px;
+  right: 1px;
   width: 4px;
   height: 4px;
   z-index: 1;
