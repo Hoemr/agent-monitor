@@ -109,6 +109,9 @@ var I18N = {
     notice: 'Notice: ',
     newBadge: '{n} new',
     newAria: '{n} newly completed',
+    questionChip: '{n} waiting',
+    questionChipAria: '{n} sessions waiting for your answer',
+    questionAria: '{n} waiting for your answer',
     collapsedAria: 'Agent Monitor, {n} sessions, {a} need attention, click to expand',
     emptyAria: 'Agent Monitor, no active sessions, click to expand',
     status: {
@@ -156,6 +159,9 @@ var I18N = {
     notice: '提示：',
     newBadge: '{n} 个新完成',
     newAria: '{n} 个新完成',
+    questionChip: '{n} 待回答',
+    questionChipAria: '{n} 个会话等待你的回答',
+    questionAria: '{n} 个会话等待你的回答',
     collapsedAria: 'Agent Monitor，{n} 个会话，{a} 个待处理，点击展开',
     emptyAria: 'Agent Monitor，暂无活跃会话，点击展开',
     status: {
@@ -215,6 +221,7 @@ var listEl = document.getElementById('list');
 var dragbarEl = document.getElementById('dragbar');
 var collapseBtn = document.getElementById('collapse-btn');
 var headerMetaEl = document.getElementById('header-meta');
+var headerQuestionEl = document.getElementById('header-question');
 var headerNewEl = document.getElementById('header-new');
 var panelTitleEl = document.getElementById('panel-title');
 var footerCountEl = document.getElementById('footer-count');
@@ -226,7 +233,7 @@ var toastActionEl = document.getElementById('toast-action');
 
 // ── State ───────────────────────────────────────────────────────
 
-var snapshot = { tasks: [], attention_count: 0, agents: [] };
+var snapshot = { tasks: [], attention_count: 0, question_count: 0, agents: [] };
 var petState = {
   mode: 'collapsed', edge: 'none', hidden: false, hidden_to_tray: false,
   max_visible_rows: 5, hover_expand_ms: 150, collapse_delay_ms: 800
@@ -333,6 +340,13 @@ function updatePetAria() {
     ? t('collapsedAria').replace('{n}', tasks.length).replace('{a}', attention)
     : t('emptyAria');
   var separator = lang === 'zh' ? '，' : ', ';
+  // A blocking question is the strongest signal the collapsed pet can carry,
+  // so it is announced before the softer "new completions" count.
+  var questions = effectiveQuestionCount();
+  var questionText = questions > 0
+    ? t('questionAria').replace('{n}', questions)
+    : '';
+  if (questionText) label += separator + questionText;
   var newCount = countNewCompleted();
   if (newCount > 0 && settings.new_badge !== false) {
     label += separator + t('newAria').replace('{n}', newCount);
@@ -341,7 +355,10 @@ function updatePetAria() {
   var noticeText = notice && !isPanelOpen() ? noticeMessage() : '';
   if (noticeText) label += separator + t('notice') + noticeText;
   petEl.setAttribute('aria-label', label);
-  if (noticeText) petEl.title = noticeText;
+  var titleParts = [];
+  if (questionText) titleParts.push(questionText);
+  if (noticeText) titleParts.push(noticeText);
+  if (titleParts.length) petEl.title = titleParts.join(separator);
   else petEl.removeAttribute('title');
 }
 
@@ -365,7 +382,133 @@ function updateNewIndicators() {
     ? t('newBadge').replace('{n}', pendingHeaderNew)
     : '';
 
+  updateQuestionSurfaces();
+}
+
+// ── Pending-question attention ──────────────────────────────────
+//
+// Rust counts the tasks that block on a question (`waiting_input` /
+// `waiting_approval`), exposes the total as `question_count` on every snapshot
+// and emits `attention-pending` when NEW questions appear. The page only paints
+// that state:
+//
+//   * collapsed/hidden: `#badge` gets the amber `.question` variant,
+//   * a one-shot `.alerting` pulse for ~4 s (one timer, only while active),
+//   * expanded header: the amber `#header-question` chip,
+//   * the collapsed pet's aria-label/title announce the count.
+//
+// macOS notification, sound and auto-expansion belong to Rust: the page never
+// calls focus() and never expands itself on this event.
+
+var attentionState = {
+  holdMs: 4000,   // how long the one-shot pulse stays on screen
+  timer: null,    // at most one timer, and only while alerting
+  active: false,  // an attention-pending event is being surfaced
+  alerts: [],     // pending alert list from the last event
+  eventCount: 0   // question_count carried by the event (snapshot may lag)
+};
+// Last question_count painted; a rise pulses even without an event.
+var questionBaseline = null;
+
+function countWaitingQuestions(tasks) {
+  var list = tasks || [];
+  var count = 0;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].status === 'waiting_input' || list[i].status === 'waiting_approval') count++;
+  }
+  return count;
+}
+
+function snapshotQuestionCount(data) {
+  if (!data) return 0;
+  if (typeof data.question_count === 'number' && isFinite(data.question_count)) {
+    return Math.max(0, Math.floor(data.question_count));
+  }
+  // Older snapshots (and hand-written fixtures) may omit the field; deriving it
+  // from the waiting statuses keeps the surfaces honest either way.
+  return countWaitingQuestions(data.tasks);
+}
+
+function effectiveQuestionCount() {
+  var base = snapshotQuestionCount(snapshot);
+  // The event is fresher than the snapshot for the moment it arrives, so it may
+  // raise the painted count; the snapshot stays authoritative afterwards.
+  if (attentionState.active && attentionState.eventCount > base) {
+    return attentionState.eventCount;
+  }
+  return base;
+}
+
+function animationsOff() {
+  var mode = settings.animations || 'system';
+  if (mode === 'off') return true;
+  if (mode === 'always') return false;
+  try {
+    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch (e) {
+    return false;
+  }
+}
+
+function updateQuestionSurfaces() {
+  var count = effectiveQuestionCount();
+  var visible = count > 0;
+  badgeEl.classList.toggle('question', visible);
+  headerQuestionEl.hidden = !visible;
+  if (visible) {
+    var aria = t('questionChipAria').replace('{n}', count);
+    headerQuestionEl.textContent = t('questionChip').replace('{n}', count);
+    headerQuestionEl.title = aria;
+    headerQuestionEl.setAttribute('aria-label', aria);
+  } else {
+    headerQuestionEl.textContent = '';
+    headerQuestionEl.removeAttribute('title');
+    headerQuestionEl.removeAttribute('aria-label');
+  }
   updatePetAria();
+}
+
+function clearAttentionState() {
+  if (attentionState.timer) {
+    clearTimeout(attentionState.timer);
+    attentionState.timer = null;
+  }
+  attentionState.active = false;
+  attentionState.alerts = [];
+  attentionState.eventCount = 0;
+  petEl.classList.remove('alerting');
+  badgeEl.classList.remove('alerting');
+  updateQuestionSurfaces();
+}
+
+// Exactly one timer exists while alerting; a second event restarts it instead
+// of stacking pulses. `animations=off` / Reduce Motion keeps the amber state but
+// never adds the animated class.
+function startAttentionPulse() {
+  if (attentionState.timer) clearTimeout(attentionState.timer);
+  attentionState.timer = setTimeout(clearAttentionState, attentionState.holdMs);
+  if (animationsOff()) {
+    petEl.classList.remove('alerting');
+    badgeEl.classList.remove('alerting');
+    return;
+  }
+  petEl.classList.add('alerting');
+  badgeEl.classList.add('alerting');
+}
+
+function handleAttentionPending(payload) {
+  payload = payload || {};
+  var alerts = Array.isArray(payload.alerts) ? payload.alerts : [];
+  var count = typeof payload.question_count === 'number' && isFinite(payload.question_count)
+    ? Math.max(0, Math.floor(payload.question_count))
+    : alerts.length;
+  attentionState.active = true;
+  attentionState.alerts = alerts.slice(0, 8);
+  attentionState.eventCount = count;
+  // Paint the amber variant right away; the confirming snapshot may still be in
+  // flight. Deliberately no focus()/set_expanded(): Rust owns auto_show.
+  updateQuestionSurfaces();
+  startAttentionPulse();
 }
 
 // ── Custom icon slots ───────────────────────────────────────────
@@ -445,6 +588,12 @@ function applySettings(next) {
   applyStaticStrings();
   applyCustomIcon();
   updateNewIndicators();
+  // Turning animations off while a pulse is running drops the class immediately;
+  // the state timer still clears itself normally.
+  if (animationsOff()) {
+    petEl.classList.remove('alerting');
+    badgeEl.classList.remove('alerting');
+  }
   syncNotice();
   refreshAutoHide();
 }
@@ -499,7 +648,8 @@ function openSettings() {
 
 function render(snapshotData) {
   if (!snapshotData) return;
-  var hash = JSON.stringify(snapshotData.tasks) + '|' + snapshotData.attention_count;
+  var hash = JSON.stringify(snapshotData.tasks) + '|' + snapshotData.attention_count +
+    '|' + snapshotData.question_count;
   snapshot = snapshotData;
   if (hash === lastRenderedHash) return;
   lastRenderedHash = hash;
@@ -512,6 +662,12 @@ function render(snapshotData) {
 
   badgeEl.hidden = attention === 0;
   badgeEl.textContent = attention > 99 ? '99+' : String(attention);
+
+  // A rising waiting-question count pulses exactly like an event. The first
+  // render only seeds the baseline (existing questions at boot must not pulse).
+  var questions = snapshotQuestionCount(snapshot);
+  if (questionBaseline !== null && questions > questionBaseline) startAttentionPulse();
+  questionBaseline = questions;
 
   updatePetAria();
 
@@ -1046,6 +1202,9 @@ function mockSnapshot() {
   return {
     collected_at_secs: now,
     attention_count: 2,
+    // The default fixture has two blocking questions (dsh:2 waiting_approval,
+    // claude-code:4 waiting_input); keep the count derived so it cannot drift.
+    question_count: countWaitingQuestions(tasks),
     agents: [
       { key: 'codex', name: 'Codex' }, { key: 'dsh', name: 'DSH' },
       { key: 'zcode', name: 'ZCode' }, { key: 'claude-code', name: 'Claude Code' }
@@ -1071,6 +1230,30 @@ function mockTaskById(taskId) {
   var tasks = snapshot.tasks || [];
   for (var i = 0; i < tasks.length; i++) if (tasks[i].id === taskId) return tasks[i];
   return null;
+}
+
+// Default `attention-pending` payload for the browser preview/selftest: mirrors
+// what Rust emits after a scan that found new questions.
+function mockAttentionPayload() {
+  var tasks = snapshot.tasks || [];
+  var alerts = [];
+  for (var i = 0; i < tasks.length; i++) {
+    var task = tasks[i];
+    if (task.status !== 'waiting_input' && task.status !== 'waiting_approval') continue;
+    alerts.push({
+      task_id: task.id,
+      agent_key: task.agent_key,
+      agent_name: task.agent_name,
+      title: task.title,
+      status: task.status,
+      status_reason: task.status_reason
+    });
+  }
+  return {
+    alerts: alerts.slice(0, 8),
+    question_count: alerts.length,
+    auto_show: true
+  };
 }
 
 function mockInvoke(cmd, args) {
@@ -1110,6 +1293,7 @@ function mockInvoke(cmd, args) {
       snapshot.attention_count = snapshot.tasks.filter(function (task) {
         return task.status === 'waiting_input' || task.status === 'waiting_approval' || task.status === 'failed';
       }).length;
+      snapshot.question_count = countWaitingQuestions(snapshot.tasks);
       lastRenderedHash = '';
       render(snapshot);
     }
@@ -1132,6 +1316,7 @@ function mockInvoke(cmd, args) {
     snapshot.attention_count = snapshot.tasks.filter(function (task) {
       return task.status === 'waiting_input' || task.status === 'waiting_approval' || task.status === 'failed';
     }).length;
+    snapshot.question_count = countWaitingQuestions(snapshot.tasks);
     lastRenderedHash = '';
     render(snapshot);
     return !!removed;
@@ -1178,6 +1363,30 @@ if (MOCK) {
     get restoreCalls() { return restoreCalls.slice(); },
     get customIcons() { return { collapsed: customIcons.collapsed, hidden: customIcons.hidden }; },
     get seenAtSecs() { return seenAtSecs; },
+    // Pending-question attention state (badge variant / pulse / header chip).
+    get attention() {
+      return {
+        active: attentionState.active,
+        holdMs: attentionState.holdMs,
+        alerts: attentionState.alerts.slice(),
+        eventCount: attentionState.eventCount,
+        timerActive: !!attentionState.timer,
+        pulsing: petEl.classList.contains('alerting'),
+        questionCount: effectiveQuestionCount()
+      };
+    },
+    // Shorten the ~4 s pulse hold so the selftest can watch it clear.
+    setAttentionHold: function (ms) {
+      var next = Number(ms);
+      attentionState.holdMs = isFinite(next) && next > 0 ? next : 4000;
+      return attentionState.holdMs;
+    },
+    // Drive the Tauri `attention-pending` event exactly like Rust would.
+    emitAttention: function (payload) {
+      var next = payload || mockAttentionPayload();
+      mockEmit('attention-pending', next);
+      return next;
+    },
     emitIconsChanged: function (payload) {
       mockIcons = {
         collapsed: (payload && payload.collapsed) || null,
@@ -1273,6 +1482,7 @@ function boot() {
     listen('pet-state', function (event) { applyPetState(event.payload); });
     listen('jump-feedback', function (event) { handleOutcome(event.payload); });
     listen('settings-changed', function (event) { applySettings(event.payload); });
+    listen('attention-pending', function (event) { handleAttentionPending(event.payload); });
     applySettings(mockSettings());
     render(mockSnapshot());
     var collapsed = location.search.indexOf('mock=collapsed') !== -1;
@@ -1316,6 +1526,7 @@ function boot() {
   listen('pet-state', function (event) { applyPetState(event.payload); });
   listen('jump-feedback', function (event) { handleOutcome(event.payload); });
   listen('settings-changed', function (event) { applySettings(event.payload); });
+  listen('attention-pending', function (event) { handleAttentionPending(event.payload); });
   initCustomIcons();
 
   // One shared timer: only relative-time labels change, no re-render.

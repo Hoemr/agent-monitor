@@ -69,6 +69,26 @@
   --btn-bg: light-dark(#ffffff, rgba(255, 255, 255, 0.08));
   --btn-border: rgba(255, 255, 255, 0.14);
   --btn-border: light-dark(rgba(0, 0, 0, 0.14), rgba(255, 255, 255, 0.14));
+
+  /* Status (jump self-check pills) */
+  --ok-fg: #4ade80;
+  --ok-fg: light-dark(#137a37, #4ade80);
+  --ok-bg: rgba(48, 209, 88, 0.16);
+  --ok-bg: light-dark(rgba(52, 199, 89, 0.16), rgba(48, 209, 88, 0.18));
+  --ok-border: rgba(74, 222, 128, 0.28);
+  --ok-border: light-dark(rgba(19, 122, 55, 0.24), rgba(74, 222, 128, 0.30));
+  --warn-fg: #ffb340;
+  --warn-fg: light-dark(#965400, #ffb340);
+  --warn-bg: rgba(255, 159, 10, 0.18);
+  --warn-bg: light-dark(rgba(255, 149, 0, 0.15), rgba(255, 159, 10, 0.18));
+  --warn-border: rgba(255, 179, 64, 0.30);
+  --warn-border: light-dark(rgba(150, 84, 0, 0.22), rgba(255, 179, 64, 0.30));
+  --unknown-fg: rgba(235, 235, 245, 0.62);
+  --unknown-fg: light-dark(rgba(60, 60, 67, 0.62), rgba(235, 235, 245, 0.62));
+  --unknown-bg: rgba(118, 118, 128, 0.22);
+  --unknown-bg: light-dark(rgba(118, 118, 128, 0.14), rgba(118, 118, 128, 0.24));
+  --unknown-border: rgba(255, 255, 255, 0.16);
+  --unknown-border: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.16));
 }
 
 /* Explicit appearance override from Settings → Appearance. */
@@ -292,6 +312,7 @@ body {
   font-size: 11px;
   line-height: 1.4;
   color: var(--text-tertiary);
+  overflow-wrap: anywhere;
 }
 .note.warn { color: var(--danger); }
 
@@ -634,6 +655,200 @@ body {
 .btn.plain.danger { color: var(--danger); }
 
 .pane-actions { margin-top: 14px; padding: 0 4px; }
+
+/* ── Jump: permissions & setup ────────────────────────────────── */
+
+.status-row {
+  align-items: flex-start;
+  gap: 12px;
+}
+.status-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.status-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+.status-head .row-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.status-row > .btn {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+.status-detail {
+  font-size: 10.5px;
+  line-height: 1.36;
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.status-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 7px;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: inset 0 0 0 0.5px transparent;
+}
+.status-pill.ok {
+  color: var(--ok-fg);
+  background: var(--ok-bg);
+  box-shadow: inset 0 0 0 0.5px var(--ok-border);
+}
+.status-pill.warn {
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  box-shadow: inset 0 0 0 0.5px var(--warn-border);
+}
+.status-pill.unknown {
+  color: var(--unknown-fg);
+  background: var(--unknown-bg);
+  box-shadow: inset 0 0 0 0.5px var(--unknown-border);
+}
+
+/* Numbered first-run guide (real <ol>, counter-drawn badges). */
+.guide-intro {
+  padding: 11px 14px 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+.guide-intro + .steps { padding-top: 9px; }
+.steps {
+  list-style: none;
+  counter-reset: step;
+  margin: 0;
+  padding: 11px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.step {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+.step::before {
+  content: counter(step);
+  counter-increment: step;
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  background: var(--icon-well);
+}
+.step-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.42;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* Per-agent capability rows. */
+.agent-row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 14px;
+  min-width: 0;
+}
+.agent-row + .agent-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 14px;
+  right: 0;
+  height: 1px;
+  background: var(--row-sep);
+}
+.agent-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.agent-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.agent-level {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  background: var(--icon-well);
+}
+.agent-state {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.agent-notes {
+  font-size: 11px;
+  line-height: 1.36;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.agent-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 1px;
+}
+.agent-flag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-tertiary);
+  background: var(--unknown-bg);
+  box-shadow: inset 0 0 0 0.5px var(--unknown-border);
+}
+.agent-flag.on {
+  color: var(--ok-fg);
+  background: var(--ok-bg);
+  box-shadow: inset 0 0 0 0.5px var(--ok-border);
+}
 
 /* ── Inline confirmation (no window.confirm, never modal) ─────── */
 

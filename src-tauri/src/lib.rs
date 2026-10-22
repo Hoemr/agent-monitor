@@ -20,7 +20,7 @@ use model::{
     now_millis, AgentDescriptor, Edge, JumpLevel, JumpOutcome, PermissionKind, PetMode, PetPrefs,
     PetState, Snapshot,
 };
-use monitor::Monitor;
+use monitor::{Monitor, PendingAlert};
 use pet::{
     anchored_resize, constrain, expanded_height_logical, finish_drag_with, hide_tab_rect,
     nearest_edge,
@@ -549,6 +549,9 @@ fn apply_settings(app: &AppHandle, previous: &Settings) {
                 rt.monitor.snapshot().clone()
             };
             let _ = app.emit("tasks-updated", &snapshot);
+            // A registry rebuild re-seeds the question detector, so this is
+            // normally empty; draining keeps the invariant "scan → drain".
+            drain_attention(app);
         }
     }
 
@@ -715,6 +718,7 @@ fn refresh(app: AppHandle, state: State<'_, AppState>) -> Snapshot {
     };
     let _ = app.emit("tasks-updated", &snapshot);
     update_tray_tooltip(&app, &snapshot);
+    drain_attention(&app);
     snapshot
 }
 
@@ -847,6 +851,23 @@ fn open_permission_settings(kind: String) {
         PermissionKind::Accessibility
     };
     jump::open_permission_settings(kind);
+}
+
+/// Jump self-check (docs/JUMP.md): permission grants + per-agent capability
+/// table. Blocking probes (`osascript`/`mdfind`/`ps`) run off the main thread;
+/// the settings window calls this from its "Check again" button.
+#[tauri::command]
+async fn get_jump_diagnostics() -> jump::JumpDiagnostics {
+    tauri::async_runtime::spawn_blocking(jump::collect_jump_diagnostics)
+        .await
+        .unwrap_or_else(|_| jump::JumpDiagnostics::unavailable())
+}
+
+/// Reveal the app bundle in Finder so it can be dragged into the Accessibility
+/// list. Never opens System Settings by itself.
+#[tauri::command]
+fn reveal_app_in_finder() -> Result<(), String> {
+    jump::reveal_app_in_finder()
 }
 
 #[tauri::command]
@@ -995,6 +1016,183 @@ fn open_data_dir() -> Result<(), String> {
         .map_err(|e| format!("failed to open data directory: {e}"))
 }
 
+// ── Pending-question attention ──────────────────────────────────
+
+/// Payload of the `attention-pending` event (see `docs/ATTENTION.md`).
+#[derive(Clone, serde::Serialize)]
+struct AttentionPayload {
+    alerts: Vec<PendingAlert>,
+    question_count: usize,
+    auto_show: bool,
+}
+
+/// Localised notification title/body for one batch of new questions.
+///
+/// A single question names the agent and title; a batch collapses to a count so
+/// the user gets exactly one banner (`docs/ATTENTION.md`).
+fn attention_alert_text(alerts: &[PendingAlert], zh: bool) -> (String, String) {
+    let title = if zh {
+        "等待你的回答"
+    } else {
+        "Waiting for your answer"
+    };
+    let body = if alerts.len() == 1 {
+        format!("{} · {}", alerts[0].agent_name, alerts[0].title)
+    } else if zh {
+        format!("{} 个会话在等你回答", alerts.len())
+    } else {
+        format!("{} sessions are waiting for you", alerts.len())
+    };
+    (title.to_string(), body.to_string())
+}
+
+/// Escape a Rust string for an AppleScript string literal. Quotes/backslashes
+/// must not break out of the literal, and control characters (newlines from
+/// task titles) would make the script invalid.
+fn escape_osascript(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' | '\r' | '\t' => out.push(' '),
+            c if (c as u32) < 0x20 => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `osascript -e` script for one notification, with an optional "Glass" sound.
+fn question_notification_script(title: &str, body: &str, sound: bool) -> String {
+    let mut script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        escape_osascript(body),
+        escape_osascript(title)
+    );
+    if sound {
+        script.push_str(" sound name \"Glass\"");
+    }
+    script
+}
+
+/// Play the alert on a detached thread: a missing helper binary, a denied
+/// notification banner or a slow `osascript` can never block a scan.
+fn spawn_question_alert(alerts: Vec<PendingAlert>, notify: bool, sound: bool, zh: bool) {
+    if alerts.is_empty() || (!notify && !sound) {
+        return;
+    }
+    std::thread::spawn(move || {
+        if notify {
+            let (title, body) = attention_alert_text(&alerts, zh);
+            let script = question_notification_script(&title, &body, sound);
+            let _ = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(script)
+                .output();
+        } else if sound {
+            // `alert_sound=true` with notifications off: an unsilenced alert is
+            // still possible without a banner.
+            let _ = std::process::Command::new("afplay")
+                .arg("/System/Library/Sounds/Glass.aiff")
+                .output();
+        }
+    });
+}
+
+/// `auto_show_on_question`: reveal a collapsed/edge-hidden/tray-hidden pet as an
+/// expanded panel **without focusing it** (the user may be typing elsewhere).
+/// An already expanded/dragging panel is left alone.
+fn auto_reveal_for_questions(app: &AppHandle) {
+    let mode = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        rt.state.mode
+    };
+    if matches!(
+        mode,
+        PetMode::Collapsed | PetMode::EdgeHidden | PetMode::TrayHidden
+    ) {
+        show_pet(app);
+        enter_mode(app, PetMode::Expanded, true);
+    }
+}
+
+/// Drain the new questions from the last scan and surface them on every
+/// channel: UI event, notification/sound, auto-reveal. Must be called *after*
+/// the snapshot event so the UI can paint the new `question_count`.
+fn drain_attention(app: &AppHandle) {
+    let (alerts, question_count, auto_show, notify, sound, settings) = {
+        let state = app.state::<AppState>();
+        let mut rt = state.inner.lock().unwrap();
+        let alerts = rt.monitor.take_new_questions();
+        if alerts.is_empty() {
+            return;
+        }
+        let settings = rt.settings.clone();
+        let question_count = rt.monitor.snapshot().question_count;
+        (
+            alerts,
+            question_count,
+            settings.auto_show_on_question,
+            settings.notify_on_question,
+            settings.alert_sound,
+            settings,
+        )
+    };
+    // Language resolution may run `defaults` once: keep it outside the lock.
+    let zh = is_zh(&settings);
+    let payload = AttentionPayload {
+        alerts: alerts.clone(),
+        question_count,
+        auto_show,
+    };
+    let _ = app.emit("attention-pending", &payload);
+    if auto_show {
+        auto_reveal_for_questions(app);
+    }
+    spawn_question_alert(alerts, notify, sound, zh);
+}
+
+/// Menu-bar tooltip text. Waiting questions get their own wording because
+/// "N waiting for you" is more actionable than the generic attention count.
+fn tray_tooltip_label(total: usize, waiting: usize, questions: usize, zh: bool) -> String {
+    if total == 0 {
+        return if zh {
+            "Agent Monitor — 暂无会话".to_string()
+        } else {
+            "Agent Monitor — no sessions".to_string()
+        };
+    }
+    if questions > 0 {
+        let mut label = if zh {
+            format!("Agent Monitor — {total} 个会话，{questions} 个待回答")
+        } else {
+            format!("Agent Monitor — {total} session(s), {questions} waiting for you")
+        };
+        // Keep the general attention count visible when it also covers failures.
+        if waiting > questions {
+            if zh {
+                label.push_str(&format!("，{waiting} 个待处理"));
+            } else {
+                label.push_str(&format!(", {waiting} need attention"));
+            }
+        }
+        return label;
+    }
+    if waiting > 0 {
+        if zh {
+            format!("Agent Monitor — {total} 个会话，{waiting} 个待处理")
+        } else {
+            format!("Agent Monitor — {total} session(s), {waiting} need attention")
+        }
+    } else if zh {
+        format!("Agent Monitor — {total} 个会话")
+    } else {
+        format!("Agent Monitor — {total} session(s)")
+    }
+}
+
 // ── Watcher + scheduler ─────────────────────────────────────────
 
 fn watch_roots() -> Vec<PathBuf> {
@@ -1089,6 +1287,9 @@ fn start_worker(app: AppHandle, rx: Receiver<()>) {
             let _ = app.emit("tasks-updated", &snapshot);
             update_tray_tooltip(&app, &snapshot);
         }
+        // New blocking questions are surfaced on every channel (UI event,
+        // notification/sound, auto-reveal) — only when a scan produced some.
+        drain_attention(&app);
         if !(hidden && empty) {
             reconcile_screens(&app);
         }
@@ -1115,27 +1316,12 @@ fn system_is_chinese() -> bool {
 fn update_tray_tooltip(app: &AppHandle, snapshot: &Snapshot) {
     // Single source of truth: the snapshot already applies the failure
     // freshness/cancellation rules (old or user-interrupted failures must not
-    // keep the menu-bar alert dot alive).
+    // keep the menu-bar alert dot alive) and counts blocking questions.
     let waiting = snapshot.attention_count;
+    let questions = snapshot.question_count;
     let total = snapshot.tasks.len();
     let zh = is_zh(&settings_snapshot(app));
-    let label = if total == 0 {
-        if zh {
-            "Agent Monitor — 暂无会话".to_string()
-        } else {
-            "Agent Monitor — no sessions".to_string()
-        }
-    } else if waiting > 0 {
-        if zh {
-            format!("Agent Monitor — {total} 个会话，{waiting} 个待处理")
-        } else {
-            format!("Agent Monitor — {total} session(s), {waiting} need attention")
-        }
-    } else if zh {
-        format!("Agent Monitor — {total} 个会话")
-    } else {
-        format!("Agent Monitor — {total} session(s)")
-    };
+    let label = tray_tooltip_label(total, waiting, questions, zh);
     if let Some(tray) = app.tray_by_id("main-tray") {
         let _ = tray.set_tooltip(Some(&label));
         let alert = waiting > 0;
@@ -1250,6 +1436,7 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             };
             let _ = app.emit("tasks-updated", &snapshot);
             update_tray_tooltip(app, &snapshot);
+            drain_attention(app);
         }
         "quit" => {
             {
@@ -1402,6 +1589,15 @@ pub fn dump_agents() {
     }
 }
 
+/// `agent-monitor --jump-diagnostics`: print the same JSON as the
+/// `get_jump_diagnostics` command without starting the GUI (support tickets).
+pub fn dump_jump_diagnostics() {
+    match serde_json::to_string_pretty(&jump::collect_jump_diagnostics()) {
+        Ok(json) => println!("{json}"),
+        Err(e) => eprintln!("failed to serialise jump diagnostics: {e}"),
+    }
+}
+
 // ── Entry ───────────────────────────────────────────────────────
 
 pub fn run() {
@@ -1427,6 +1623,8 @@ pub fn run() {
             show_pet_command,
             reset_pet_position_command,
             open_permission_settings,
+            get_jump_diagnostics,
+            reveal_app_in_finder,
             get_settings,
             set_settings,
             reset_settings,
@@ -1585,4 +1783,92 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ── Unit tests (pure helpers only; Tauri plumbing needs a real app) ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alert(agent: &str, title: &str, status: &str) -> PendingAlert {
+        PendingAlert {
+            task_id: format!("{agent}:1"),
+            agent_key: agent.to_lowercase(),
+            agent_name: agent.into(),
+            title: title.into(),
+            status: status.into(),
+            status_reason: "1 active user question(s)".into(),
+        }
+    }
+
+    #[test]
+    fn attention_alert_text_names_the_agent_for_one_question() {
+        let alerts = vec![alert("DSH", "多窗口询问提醒与跳转", "waiting_input")];
+        let (title, body) = attention_alert_text(&alerts, true);
+        assert_eq!(title, "等待你的回答");
+        assert_eq!(body, "DSH · 多窗口询问提醒与跳转");
+        let (title, body) = attention_alert_text(&alerts, false);
+        assert_eq!(title, "Waiting for your answer");
+        assert_eq!(body, "DSH · 多窗口询问提醒与跳转");
+    }
+
+    #[test]
+    fn attention_alert_text_collapses_a_batch_into_one_message() {
+        let alerts = vec![
+            alert("DSH", "q1", "waiting_input"),
+            alert("Codex", "q2", "waiting_approval"),
+            alert("ZCode", "q3", "waiting_input"),
+        ];
+        assert_eq!(attention_alert_text(&alerts, true).1, "3 个会话在等你回答");
+        assert_eq!(
+            attention_alert_text(&alerts, false).1,
+            "3 sessions are waiting for you"
+        );
+    }
+
+    #[test]
+    fn notification_script_escapes_strings_and_controls_the_sound() {
+        let script = question_notification_script(
+            "等待你的回答",
+            "a\"b\\c\nd",
+            true,
+        );
+        assert_eq!(
+            script,
+            "display notification \"a\\\"b\\\\c d\" with title \"等待你的回答\" sound name \"Glass\""
+        );
+        let silent = question_notification_script("t", "b", false);
+        assert!(!silent.contains("sound name"));
+        assert!(silent.contains("display notification \"b\" with title \"t\""));
+    }
+
+    #[test]
+    fn tray_tooltip_mentions_waiting_questions() {
+        assert_eq!(
+            tray_tooltip_label(0, 0, 0, true),
+            "Agent Monitor — 暂无会话"
+        );
+        assert_eq!(
+            tray_tooltip_label(3, 1, 1, false),
+            "Agent Monitor — 3 session(s), 1 waiting for you"
+        );
+        assert_eq!(
+            tray_tooltip_label(3, 1, 1, true),
+            "Agent Monitor — 3 个会话，1 个待回答"
+        );
+        // Failures still count as attention even when questions are present.
+        assert_eq!(
+            tray_tooltip_label(3, 2, 1, false),
+            "Agent Monitor — 3 session(s), 1 waiting for you, 2 need attention"
+        );
+        assert_eq!(
+            tray_tooltip_label(3, 0, 0, false),
+            "Agent Monitor — 3 session(s)"
+        );
+        assert_eq!(
+            tray_tooltip_label(3, 2, 0, true),
+            "Agent Monitor — 3 个会话，2 个待处理"
+        );
+    }
 }

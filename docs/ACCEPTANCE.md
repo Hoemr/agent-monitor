@@ -243,6 +243,69 @@ with exact reproduction steps; everything else in this table was executed.
 
 ---
 
+## Phase 6 — pending-question attention + jump setup (0.5.0)
+
+Everything below was executed on the test Mac with the release binary / bundled
+app; no GUI-pointer TCC interaction was required.
+
+### Automated gates
+
+| Gate | Command | Result |
+|---|---|---|
+| Rust unit tests | `cargo test --manifest-path src-tauri/Cargo.toml` | **120 passed, 0 failed** (88 baseline + 32 attention/jump) |
+| Pet UI (real DOM) | `scripts/ui-selftest.html` via `bash scripts/ui-test.sh` | **ALL PASS, 88 checks** |
+| Settings UI (real DOM) | `scripts/ui-selftest-settings.html` | **ALL PASS, 60 checks** |
+| Release build | `cargo build --release` | 0 warnings/errors |
+| Bundle | `bash scripts/bundle-mac.sh` | `dist/Agent Monitor.app` 0.5.0, ad-hoc |
+
+### Pending-question attention (real end-to-end, isolated data dir)
+
+A synthetic DSH projection file was used under a temporary `HOME` (the real
+`~/.dsh` was not touched): first a running turn, then the same file was rewritten
+with one active `userQuestions.questions.active[]` entry while the app was
+collapsed. The file watcher woke the scheduler and the new question was detected:
+
+```text
+# before (collapsed)                      # after the question appeared
+window#1 owner=agent-monitor w=72  h=72    window#1 owner=agent-monitor w=360 h=134
+activationPolicy=accessory                 activationPolicy=accessory
+```
+
+The panel auto-expanded (`auto_show_on_question`) without focusing, exactly the
+documented `44 + 1×64 + 26 = 134` height. The same fixture proves the detector
+seeds at launch (no alert for pre-existing questions) and deduplicates repeats.
+
+### Jump self-check + outcome fix (real output)
+
+`dist/Agent Monitor.app/Contents/MacOS/agent-monitor --jump-diagnostics`:
+
+```jsonc
+{
+  "accessibility": { "granted": true,  "detail": null },
+  "automation":    { "granted": true,  "detail": null },
+  "window_access": { "granted": true,  "detail": null },
+  "system_events": true,
+  "app_bundle_path": "…/dist/Agent Monitor.app",
+  "agents": [/* codex L3 running, dsh L1 running, zcode L1 stopped, claude-code L2 running */]
+}
+```
+
+`--jump dsh:<session>` now reports `kind: success, requested: L1, achieved: L1,
+reason_key: activated_app` (previously a permanent `degraded` toast); Codex and
+VSCode window jumps still report L3/L2 with read-back verification. A denied
+L2/L3 attempt now carries `permission_needed` + `next_step: "grant_permission"`.
+
+### Deferred
+
+* Clicking a macOS notification cannot deep-link into the task: `osascript
+  display notification` has no click action. The banner is an attention channel;
+  the auto-revealed pet is the actionable surface.
+* Real Notification Center appearance/denial is a system-level toggle; the
+  command is unit-tested and executed with `osascript` but a denied banner cannot
+  be asserted headlessly.
+
+---
+
 ## Unexecuted items and reproduction steps
 
 1. **Second physical display / hot-plug**

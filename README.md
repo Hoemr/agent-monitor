@@ -42,6 +42,29 @@ Chinese UI (language setting updates the pet, this window and the menu bar):
 
 ![settings in Chinese](screenshots/settings-zh.png)
 
+### Pending questions & jump setup (0.5.0)
+
+A session that **newly** blocks on a question turns the collapsed badge amber and
+pulses it. Settings → Attention can additionally send a macOS notification, play
+the Glass sound and auto-reveal the always-on-top panel without stealing keyboard
+focus (see [`docs/ATTENTION.md`](docs/ATTENTION.md)).
+
+| Collapsed: waiting-question badge | Expanded: “N waiting” chip |
+|---|---|
+| ![collapsed waiting badge](screenshots/pet-collapsed-question-dark.png) | ![expanded waiting chip](screenshots/pet-expanded-question-dark.png) |
+
+Settings → Jump is now a setup page: live Accessibility / Automation / window-read
+status, buttons that open the exact System Settings pane or reveal the app for the
+Accessibility list, a self-check, the ad-hoc re-grant note and a per-agent
+capability table (see [`docs/JUMP.md`](docs/JUMP.md)).
+
+| Attention alerts | Jump permissions & self-check |
+|---|---|
+| ![attention settings](screenshots/settings-attention-dark.png) | ![jump setup](screenshots/settings-jump-dark.png) |
+| ![attention settings light](screenshots/settings-attention-light.png) | ![jump setup light](screenshots/settings-jump-light.png) |
+
+![jump setup in Chinese](screenshots/settings-jump-zh.png)
+
 ### Menu-bar icon
 
 ![tray icons](screenshots/tray-icons.png)
@@ -75,9 +98,23 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
 * **Honest attention state**: waiting-for-input/approval always counts, failures
   only while recent (<30 min) and not deliberately interrupted/cancelled, so a
   turn you stopped long ago never keeps the badge or menu-bar alert alive.
+* **Never miss a pending question**: when a session *newly* blocks on
+  `ask user question` / approval, the pet pulses its amber question badge, sends
+  a localised macOS notification, optionally plays the Glass sound and can
+  auto-reveal the always-on-top panel **without stealing focus** — so the
+  blocked session is one click away even with many windows open. Only new
+  questions alert (repeats are deduplicated; old questions at launch stay
+  quiet). See [`docs/ATTENTION.md`](docs/ATTENTION.md).
 * **Jump with honest degradation**: session → window → app → nothing. A level is
   reported only after a read-back check; failures/degradations show a short toast
-  with a “Grant permission” action when needed.
+  with a “Grant permission” action when needed. A declared-max app-level jump
+  (DSH) now reports success instead of a permanent “degraded” toast.
+* **Jump setup & self-check in Settings → Jump**: live Accessibility /
+  Automation / window-read status, one-click buttons to open the exact System
+  Settings pane or reveal the app for dragging into Accessibility, a first-run
+  guide, re-check, ad-hoc re-grant note, and a per-agent capability table
+  (max level, installed/running, deep-link support). Headless equivalent:
+  `--jump-diagnostics`. Details in [`docs/JUMP.md`](docs/JUMP.md).
 * **Desktop pet**: drag anywhere, snap to the nearest screen edge, hide to a
   small square tab (8–24 px) whose snapped side is fully off-screen (or to the
   menu bar when edge-hiding is disabled), hover/click to expand inward, 3/5/8
@@ -95,9 +132,10 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
   The collapsed/snapped pet size is adjustable (48–96 px) and it can hide itself
   after an idle delay once snapped (“hide after snapping”, off by default).
 * **Native Settings window** (Cmd+, · menu-bar menu · footer gear): language
-  (System/English/中文), appearance (System/Light/Dark), monitoring refresh
-  interval, retention, per-agent collection switches, visible rows, pet timing
-  and snapping, jump feedback, data/recovery actions. Everything saves
+  (System/English/中文), appearance (System/Light/Dark), pending-question alerts
+  (notification/sound/auto-reveal), monitoring refresh interval, retention,
+  per-agent collection switches, visible rows, pet timing and snapping, jump
+  setup + feedback, data/recovery actions. Everything saves
   instantly, applies without a restart and persists across launches —
   see [`docs/SETTINGS.md`](docs/SETTINGS.md).
 * **Multi-display aware**: placement uses each screen's *visible frame* (menu bar +
@@ -164,8 +202,8 @@ System Settings pane. It never resets or forces permissions.
 ## Development
 
 ```bash
-npm test          # cargo test (88 unit tests: model/monitor/agents/pet/settings/icons)
-npm run ui-test   # 114 headless UI checks (pet 69 + settings 45, real DOM events)
+npm test          # cargo test (120 unit tests: model/monitor/attention/agents/pet/settings/icons/jump)
+npm run ui-test   # 148 headless UI checks (pet 88 + settings 60, real DOM events)
 npm run perf      # 5 min × hidden / idle / expanded sampling of the release app
 npm run jump-probe
 ```
@@ -199,6 +237,10 @@ AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
 * Settings P1 items (click-through in collapsed state, tint strength, launch at
   login, global shortcut, diagnostic export) are intentionally **not** in this
   release; reasons and the safe follow-up path are listed in `docs/SETTINGS.md`.
+* The packaged app is **ad-hoc signed**; macOS ties Accessibility/Automation
+  grants to the code signature, so after rebuilding/replacing
+  `Agent Monitor.app` the grants may need to be repeated once (Settings → Jump
+  shows the live status and the exact panes).
 * `retention_hours` now applies uniformly: completing an IDE-hosted Claude Code
   session older than the configured window (default 6 h, previously fixed 24 h
   for IDE sessions) hides it; ZCode's newest-3 fallback is unchanged.

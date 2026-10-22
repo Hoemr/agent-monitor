@@ -17,6 +17,10 @@ var win = null;
 var doc = null;
 var T = null;
 
+// The mock remembers the last section in localStorage; pin the boot section so
+// repeated headless runs start on General (the lazy-load checks depend on it).
+try { localStorage.removeItem('am-settings-group'); } catch (e) { /* private mode */ }
+
 function check(name, ok, detail) {
   results.push((ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' :: ' + detail : ''));
   if (!ok) failures++;
@@ -87,7 +91,7 @@ frame.addEventListener('load', async function () {
     doc = win.document;
     T = await waitForBoot();
     check('mock hooks expose the live settings state and invoke log',
-      !!T && !!T.settings && Array.isArray(T.invokeLog) && T.groups.length === 5,
+      !!T && !!T.settings && Array.isArray(T.invokeLog) && T.groups.length === 6,
       T ? 'groups=' + T.groups.join(',') : 'hooks missing');
     if (!T) { finish(); return; }
     await sleep(60);
@@ -98,6 +102,11 @@ frame.addEventListener('load', async function () {
     check('settings are read once at startup and never polled',
       getsBefore === 1 && count('get_settings') === 1,
       'get_settings=' + getsBefore + '->' + count('get_settings'));
+
+    // 1b. the jump self-check is lazy: the pane was never opened yet
+    check('jump diagnostics are not requested at boot',
+      count('get_jump_diagnostics') === 0 && T.group === 'general',
+      'calls=' + count('get_jump_diagnostics') + ' group=' + T.group);
 
     // 2. layout fits the 620×560 window without horizontal scrolling
     var scrollEl = q('#pane-scroll');
@@ -110,16 +119,17 @@ frame.addEventListener('load', async function () {
       ' scroll=' + scrollEl.scrollWidth + '/' + scrollEl.clientWidth +
       ' sidebar=' + Math.round(sidebar.getBoundingClientRect().width));
 
-    // 3. five sections, localised
+    // 3. six sections, localised
     var navs = qa('#sidebar .nav-item');
     var navLabels = navs.map(function (n) { return n.querySelector('.nav-label').textContent; });
-    check('five sections render in the sidebar with English labels',
-      navs.length === 5 &&
-      navLabels.join('|') === 'General|Monitoring|Desktop Pet|Jump|Data',
+    check('six sections render in the sidebar with English labels',
+      navs.length === 6 &&
+      navLabels.join('|') === 'General|Attention|Monitoring|Desktop Pet|Jump|Data',
       navLabels.join('|'));
 
     // 4. every Settings key is editable somewhere in the window
     var expected = ['language', 'appearance', 'show_summary', 'show_jump_level', 'new_badge',
+      'notify_on_question', 'alert_sound', 'auto_show_on_question',
       'refresh_interval', 'retention_hours', 'enabled_agents.codex',
       'enabled_agents.dsh', 'enabled_agents.zcode', 'enabled_agents.claude_code',
       'max_visible_rows', 'hover_expand_ms', 'collapse_delay_ms', 'snap_distance',
@@ -137,6 +147,19 @@ frame.addEventListener('load', async function () {
     check('every documented Settings key is editable', missingKeys.length === 0,
       'missing=' + (missingKeys.join(',') || 'none'));
 
+    // 4b. opening Jump the first time runs the self-check exactly once
+    var diagLoaded = await waitFor(function () {
+      return count('get_jump_diagnostics') === 1 && T.diagnosticsRequested === true;
+    });
+    check('Jump pane auto-loads diagnostics once on first open',
+      !!diagLoaded && count('get_jump_diagnostics') === 1 && !!T.diagnostics,
+      'calls=' + count('get_jump_diagnostics'));
+    T.selectGroup('jump');
+    await sleep(160);
+    check('re-opening the Jump pane does not re-run the self-check',
+      count('get_jump_diagnostics') === 1,
+      'calls=' + count('get_jump_diagnostics'));
+
     // 5. fixture settings paint into their controls
     T.selectGroup('general');
     check('fixture settings paint into their controls',
@@ -151,7 +174,8 @@ frame.addEventListener('load', async function () {
     await sleep(60);
     var payload = lastSetPayload();
     var requiredTop = ['version', 'language', 'appearance', 'show_summary',
-      'show_jump_level', 'new_badge', 'refresh_interval', 'retention_hours',
+      'show_jump_level', 'new_badge', 'notify_on_question', 'alert_sound',
+      'auto_show_on_question', 'refresh_interval', 'retention_hours',
       'enabled_agents', 'max_visible_rows', 'hover_expand_ms', 'collapse_delay_ms',
       'snap_distance', 'hidden_sliver', 'collapsed_size', 'auto_hide_after_s',
       'edge_hide_enabled', 'animations', 'icon_style', 'toast_on_degraded',
@@ -182,6 +206,46 @@ frame.addEventListener('load', async function () {
     var badgeRestore = q('input[data-setting="new_badge"]');
     if (badgeRestore) badgeRestore.click();
     await sleep(40);
+
+    // 7c. attention pane: three independent alert channels, defaults on
+    T.selectGroup('attention');
+    await sleep(50);
+    var attentionText = q('#pane-body').textContent;
+    var notifySwitch = q('input[data-setting="notify_on_question"]');
+    var soundSwitch = q('input[data-setting="alert_sound"]');
+    var revealSwitch = q('input[data-setting="auto_show_on_question"]');
+    check('attention pane has three channels, defaults on and a new-question note',
+      !!notifySwitch && notifySwitch.checked === true &&
+      !!soundSwitch && soundSwitch.checked === true &&
+      !!revealSwitch && revealSwitch.checked === true &&
+      /notification/i.test(attentionText) && /new questions/i.test(attentionText) &&
+      /sound/i.test(attentionText) && /focus/i.test(attentionText),
+      'pane=' + attentionText.slice(0, 100));
+
+    notifySwitch.click();
+    await sleep(80);
+    var attentionPayload = lastSetPayload();
+    check('attention switches save into the full Settings object',
+      attentionPayload.notify_on_question === false &&
+      attentionPayload.alert_sound === true &&
+      attentionPayload.auto_show_on_question === true,
+      'notify=' + attentionPayload.notify_on_question +
+      ' sound=' + attentionPayload.alert_sound);
+
+    // 7d. attention reset asks first and only touches its own scope
+    var resetsBeforeAttention = count('reset_settings');
+    q('[data-action="reset-attention"]').click();
+    await sleep(50);
+    var attentionConfirmOpen = !!q('[data-focus="confirm-ok"]');
+    q('[data-focus="confirm-ok"]').click();
+    await sleep(100);
+    var attentionResetEntry = last('reset_settings');
+    check('attention reset restores only the attention scope',
+      attentionConfirmOpen && count('reset_settings') === resetsBeforeAttention + 1 &&
+      !!attentionResetEntry && attentionResetEntry.args.scope === 'attention' &&
+      T.settings.notify_on_question === true && T.settings.alert_sound === true &&
+      T.settings.auto_show_on_question === true,
+      attentionResetEntry ? 'scope=' + attentionResetEntry.args.scope : 'not called');
 
     // 8. segmented control
     T.selectGroup('monitor');
@@ -441,9 +505,9 @@ frame.addEventListener('load', async function () {
     var remembered = null;
     try { remembered = win.localStorage.getItem('am-settings-group'); } catch (e) { /* ignore */ }
     check('arrow keys move between sections and the choice is remembered',
-      T.group === 'monitor' &&
-      !!q('.nav-item[aria-selected="true"][data-group="monitor"]') &&
-      remembered === 'monitor',
+      T.group === 'attention' &&
+      !!q('.nav-item[aria-selected="true"][data-group="attention"]') &&
+      remembered === 'attention',
       'group=' + T.group + ' stored=' + remembered);
 
     // 21. hide-to-edge off explains the menu bar fallback
@@ -464,6 +528,100 @@ frame.addEventListener('load', async function () {
     check('degraded-toast setting says failures are always reported',
       /always reported/i.test(jumpText), 'copy=' + jumpText.slice(0, 80));
     check('auto-dismiss explains the undo toast', /undo/i.test(jumpText));
+
+    // 22b. the lazily loaded diagnostics paint the three permission pills
+    var diagCalls = count('get_jump_diagnostics');
+    await waitFor(function () { return !!q('[data-pill="accessibility"]'); });
+    var accPill = q('[data-pill="accessibility"]');
+    var autPill = q('[data-pill="automation"]');
+    var winPill = q('[data-pill="window_access"]');
+    check('permission pills paint granted and not-granted states',
+      diagCalls === 1 &&
+      !!accPill && accPill.className.indexOf('warn') !== -1 &&
+      /Not granted/.test(accPill.textContent) &&
+      !!autPill && autPill.className.indexOf('ok') !== -1 &&
+      /Granted/.test(autPill.textContent) &&
+      !!winPill && winPill.className.indexOf('warn') !== -1,
+      'calls=' + diagCalls + ' acc=' + (accPill && accPill.textContent) +
+      ' aut=' + (autPill && autPill.textContent) +
+      ' win=' + (winPill && winPill.textContent));
+
+    // 22c. accessibility is the gating grant, and the copy says so
+    check('window-access row names the missing Accessibility grant',
+      /Grant Accessibility/i.test(q('#pane-body').textContent));
+
+    // 22d. three-step first-run guide + ad-hoc re-grant note
+    check('first-run guide has three numbered steps and a re-grant note',
+      qa('.steps .step').length === 3 &&
+      /ad-hoc/i.test(jumpText) && /Accessibility/.test(jumpText) &&
+      /Automation/.test(jumpText) && /update/i.test(jumpText) &&
+      /re-add|re-grant/i.test(jumpText));
+
+    // 22e. per-agent capability rows come from diagnostics.agents
+    var agentRows = qa('.agent-row[data-agent]');
+    var agentLevels = agentRows.map(function (row) {
+      var badge = row.querySelector('.agent-level');
+      return badge ? badge.textContent.trim() : '';
+    }).sort();
+    var agentStates = agentRows.map(function (row) {
+      var state = row.querySelector('.agent-state');
+      return state ? state.textContent : '';
+    }).join(' | ');
+    check('agent rows list levels, install/run state and deep-link support',
+      agentRows.length === 4 &&
+      agentLevels.join(',') === 'L1,L1,L2,L3' &&
+      /Installed/.test(agentStates) && /Not installed/.test(agentStates) &&
+      /Running/.test(agentStates) && /Stopped/.test(agentStates) &&
+      qa('.agent-flag[data-deep-link="yes"]').length === 1 &&
+      qa('.agent-flag[data-deep-link="no"]').length === 3,
+      'rows=' + agentRows.length + ' levels=' + agentLevels.join(','));
+
+    // 22f. “Check again” re-runs the self-check
+    q('[data-action="jump-check"]').click();
+    var rechecked = await waitFor(function () {
+      return count('get_jump_diagnostics') === diagCalls + 1;
+    });
+    check('“Check again” re-runs get_jump_diagnostics',
+      !!rechecked && count('get_jump_diagnostics') === diagCalls + 1,
+      'calls=' + count('get_jump_diagnostics'));
+
+    // 22g. the two system-pane buttons send the documented permission kinds
+    q('[data-action="open-permission-accessibility"]').click();
+    await sleep(60);
+    var openAcc = last('open_permission_settings');
+    q('[data-action="open-permission-automation"]').click();
+    await sleep(60);
+    var openAut = last('open_permission_settings');
+    check('Open System Settings sends the matching permission kind',
+      !!openAcc && openAcc.args.kind === 'accessibility' &&
+      !!openAut && openAut.args.kind === 'automation',
+      'kinds=' + (openAcc ? openAcc.args.kind : 'n/a') + ',' +
+      (openAut ? openAut.args.kind : 'n/a'));
+
+    // 22h. reveal the bundle in Finder
+    q('[data-action="reveal-app"]').click();
+    await sleep(60);
+    check('Reveal App in Finder invokes reveal_app_in_finder',
+      !!last('reveal_app_in_finder'));
+
+    // 22i. the dense pane (pills, steps, agent rows) fits both language widths
+    var paneFits = function () {
+      var sc = q('#pane-scroll');
+      return sc.scrollWidth <= sc.clientWidth + 1;
+    };
+    var callsBeforeLang = count('get_jump_diagnostics');
+    T.setSettings(Object.assign({}, T.settings, { language: 'zh' }));
+    await sleep(100);
+    var zhJumpText = q('#pane-body').textContent;
+    check('jump pane renders Chinese labels and fits without horizontal overflow',
+      /辅助功能/.test(zhJumpText) && /已授权/.test(zhJumpText) && /未授权/.test(zhJumpText) &&
+      paneFits() && count('get_jump_diagnostics') === callsBeforeLang,
+      'scope=' + zhJumpText.slice(0, 60));
+    T.setSettings(Object.assign({}, T.settings, { language: 'en' }));
+    await sleep(100);
+    check('jump pane fits the 620×560 window in English too',
+      paneFits() && count('get_jump_diagnostics') === callsBeforeLang,
+      'scroll=' + q('#pane-scroll').scrollWidth + '/' + q('#pane-scroll').clientWidth);
 
     // 23. data paths come from get_settings_meta, read-only and focusable
     T.selectGroup('data');

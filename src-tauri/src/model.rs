@@ -79,6 +79,13 @@ impl TaskStatus {
         )
     }
 
+    /// Whether this status means the agent is blocked waiting for the user
+    /// (a "pending question", see `docs/ATTENTION.md`). Failures are not
+    /// questions: they keep the normal attention rules.
+    pub fn is_pending_question(self) -> bool {
+        matches!(self, TaskStatus::WaitingInput | TaskStatus::WaitingApproval)
+    }
+
     /// Whether this status should count as "needs the user" at `now_secs`.
     ///
     /// * `waiting_input` / `waiting_approval` always count: the agent is blocked.
@@ -423,19 +430,37 @@ pub struct Snapshot {
     pub collected_at_secs: u64,
     /// Count of tasks that need user attention (precomputed for the collapsed badge).
     pub attention_count: usize,
+    /// Count of tasks blocked on a question (`waiting_input` + `waiting_approval`).
+    /// Always a subset of `attention_count` (failures are excluded here); the pet
+    /// uses it for the amber "waiting for you" chip even before an event arrives.
+    pub question_count: usize,
     pub agents: Vec<AgentDescriptor>,
 }
 
 impl Snapshot {
     pub fn new(tasks: Vec<TaskRecord>, agents: Vec<AgentDescriptor>) -> Self {
-        let now = now_secs();
-        let attention_count = tasks.iter().filter(|t| t.needs_attention_at(now)).count();
-        Self {
+        let mut snapshot = Self {
             tasks,
-            collected_at_secs: now,
-            attention_count,
+            collected_at_secs: now_secs(),
+            attention_count: 0,
+            question_count: 0,
             agents,
-        }
+        };
+        snapshot.recount();
+        snapshot
+    }
+
+    /// Recompute the derived counts after `tasks` changed in place (dismissal).
+    /// Both counters are derived from the task list, so they are deliberately
+    /// not part of [`Snapshot::render_hash`]: a status change already moves it.
+    pub fn recount(&mut self) {
+        let now = now_secs();
+        self.attention_count = self.tasks.iter().filter(|t| t.needs_attention_at(now)).count();
+        self.question_count = self
+            .tasks
+            .iter()
+            .filter(|t| t.status.is_pending_question())
+            .count();
     }
 
     /// Stable hash of everything that affects rendering, used to suppress
@@ -533,6 +558,61 @@ mod tests {
         recent_failed.last_activity_secs = now;
         let snapshot = Snapshot::new(vec![old_failed, cancelled, waiting, recent_failed], vec![]);
         assert_eq!(snapshot.attention_count, 2, "only waiting + recent failure");
+    }
+
+    #[test]
+    fn question_count_only_counts_blocking_questions() {
+        let now = now_secs();
+        let mut waiting_input = task("q-input", TaskStatus::WaitingInput, "input");
+        waiting_input.last_activity_secs = now;
+        let mut waiting_approval = task("q-approval", TaskStatus::WaitingApproval, "approval");
+        waiting_approval.last_activity_secs = now.saturating_sub(3600); // age never matters
+        let mut failed = task("failed", TaskStatus::Failed, "failed");
+        failed.last_activity_secs = now;
+        let mut running = task("running", TaskStatus::Running, "running");
+        running.last_activity_secs = now;
+        let mut completed = task("completed", TaskStatus::Completed, "completed");
+        completed.last_activity_secs = now;
+
+        let snapshot = Snapshot::new(
+            vec![waiting_input, waiting_approval, failed, running, completed],
+            vec![],
+        );
+        assert_eq!(snapshot.question_count, 2);
+        // Failures still need attention but are not questions.
+        assert_eq!(snapshot.attention_count, 3);
+
+        // Derived counter follows in-place dismissal-style changes.
+        let mut mutated = snapshot;
+        mutated.tasks.retain(|t| t.id != "q-input");
+        mutated.recount();
+        assert_eq!(mutated.question_count, 1);
+        assert_eq!(mutated.attention_count, 2);
+    }
+
+    #[test]
+    fn pending_question_status_helper_matches_the_contract() {
+        assert!(TaskStatus::WaitingInput.is_pending_question());
+        assert!(TaskStatus::WaitingApproval.is_pending_question());
+        for status in [
+            TaskStatus::Running,
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Idle,
+            TaskStatus::Unknown,
+        ] {
+            assert!(!status.is_pending_question());
+        }
+    }
+
+    #[test]
+    fn render_hash_ignores_derived_question_count() {
+        // The counter is derived from statuses (already hashed); changing it via
+        // recount must not change the hash on its own.
+        let mut a = Snapshot::new(vec![task("a", TaskStatus::Running, "t")], vec![]);
+        let before = a.render_hash();
+        a.question_count = 99;
+        assert_eq!(a.render_hash(), before);
     }
 
     #[test]

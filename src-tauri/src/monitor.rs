@@ -9,12 +9,39 @@
 //!     a restart does not resurrect rows the user already hid.
 
 use crate::agents::{self, ProcessTable, ScanCtx, Source};
-use crate::model::{now_millis, AgentDescriptor, Snapshot, TaskRecord, TargetValidity};
+use crate::model::{now_millis, AgentDescriptor, Snapshot, TaskRecord, TaskStatus, TargetValidity};
 use crate::settings::EnabledAgents;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// At most this many new questions are reported per batch (`docs/ATTENTION.md`);
+/// the notification text collapses a batch into one message anyway.
+pub const MAX_ALERTS: usize = 8;
+
+/// Minimum interval between two alerts for the **same** task. Some adapters can
+/// advance a waiting task's activity while it is still blocked (the synthetic
+/// fixture ticks every scan); without this guard the same question would notify
+/// on every scan. A task that newly becomes pending always alerts immediately.
+pub const ALERT_COOLDOWN_SECS: u64 = 60;
+
+/// One newly observed pending question. Serialised into the `attention-pending`
+/// Tauri event; the field names are part of the frontend contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAlert {
+    pub task_id: String,
+    pub agent_key: String,
+    pub agent_name: String,
+    pub title: String,
+    /// `waiting_input` / `waiting_approval` (snake_case, same as the snapshot).
+    pub status: String,
+    pub status_reason: String,
+}
+
+/// Fingerprint of a visible pending question: a question is "new" when its id is
+/// absent from the previous map or this tuple changed.
+type QuestionFingerprint = (TaskStatus, u64);
 
 /// On-disk shape of `dismissed.json`:
 /// `{"version":1,"entries":{"<task id>": <last_activity_secs at dismissal>}}`.
@@ -40,6 +67,19 @@ pub struct Monitor {
     /// The switches the current registry was built from, so a settings save
     /// that did not touch them cannot needlessly rebuild every adapter.
     enabled_agents: EnabledAgents,
+    /// Fingerprints of every *currently visible* pending question, keyed by task
+    /// id. Replaced on every scan; only the delta produces alerts.
+    question_fingerprints: HashMap<String, QuestionFingerprint>,
+    /// id -> unix secs of the last alert, used by [`ALERT_COOLDOWN_SECS`].
+    /// Entries are dropped together with the fingerprint (task no longer
+    /// visible as a pending question).
+    question_alert_at: HashMap<String, u64>,
+    /// `false` until the first scan has seeded the fingerprint map: existing old
+    /// questions at launch must not produce a burst of notifications.
+    question_seeded: bool,
+    /// New questions found by the latest scan, drained by the caller (lib.rs)
+    /// after it has emitted the snapshot. Replaced on every scan.
+    pending_questions: Vec<PendingAlert>,
 }
 
 impl Monitor {
@@ -63,6 +103,10 @@ impl Monitor {
             dismissed: HashMap::new(),
             dismissed_path: None,
             enabled_agents,
+            question_fingerprints: HashMap::new(),
+            question_alert_at: HashMap::new(),
+            question_seeded: false,
+            pending_questions: Vec::new(),
         }
     }
 
@@ -80,6 +124,13 @@ impl Monitor {
         self.sources = build_sources(enabled_agents);
         // Force the next scan to emit even if the remaining rows were unchanged.
         self.last_hash = 0;
+        // Re-seed the question detector: a disabled agent's rows are not
+        // collected (so they can never alert), and re-enabling it must not
+        // replay every old question as if it had just appeared.
+        self.question_fingerprints.clear();
+        self.question_alert_at.clear();
+        self.question_seeded = false;
+        self.pending_questions.clear();
         true
     }
 
@@ -147,6 +198,9 @@ impl Monitor {
 
         agents::sort_tasks(&mut tasks);
         let snapshot = Snapshot::new(tasks, self.descriptors());
+        // Detection runs on the *visible* rows only: dismissed tasks were
+        // filtered above and disabled agents were never collected.
+        self.detect_new_questions(&snapshot.tasks, now);
         let hash = snapshot.render_hash();
         self.snapshot = snapshot;
         if hash != self.last_hash {
@@ -157,10 +211,84 @@ impl Monitor {
         }
     }
 
+    /// Compare the visible pending questions with the previous scan and record
+    /// the new/changed ones for the caller to surface.
+    ///
+    /// Rules (docs/ATTENTION.md):
+    /// * the first scan only seeds the fingerprint map;
+    /// * a repeated identical waiting row does not alert again;
+    /// * a changed `(status, last_activity_secs)` — e.g. running → waiting, or
+    ///   a new question in the same session — alerts again, but a task that was
+    ///   already pending re-alerts at most once per [`ALERT_COOLDOWN_SECS`];
+    /// * non-question statuses are ignored entirely.
+    fn detect_new_questions(&mut self, tasks: &[TaskRecord], now_secs: u64) {
+        let mut current: HashMap<String, QuestionFingerprint> = HashMap::new();
+        let mut new_questions: Vec<PendingAlert> = Vec::new();
+        let mut alerted: Vec<(String, u64)> = Vec::new();
+        for task in tasks {
+            if !task.status.is_pending_question() {
+                continue;
+            }
+            let fingerprint = (task.status, task.last_activity_secs);
+            let previous = self.question_fingerprints.get(&task.id);
+            let is_new = previous != Some(&fingerprint);
+            // Still advance the fingerprint even when the alert is rate-limited:
+            // the suppressed tick must not surface as an alert later.
+            current.insert(task.id.clone(), fingerprint);
+            if !(is_new && self.question_seeded) {
+                continue;
+            }
+            let already_pending = previous.is_some();
+            let last_alert_at = self.question_alert_at.get(&task.id).copied();
+            if !question_alert_allowed(already_pending, last_alert_at, now_secs) {
+                continue;
+            }
+            new_questions.push(PendingAlert {
+                task_id: task.id.clone(),
+                agent_key: task.agent_key.clone(),
+                agent_name: task.agent_name.clone(),
+                title: task.title.clone(),
+                status: task.status.key().to_string(),
+                status_reason: task.status_reason.clone(),
+            });
+            alerted.push((task.id.clone(), now_secs));
+        }
+        self.question_seeded = true;
+        // Cooldown state only matters for questions that are still visible.
+        self.question_alert_at.retain(|id, _| current.contains_key(id));
+        for (id, at) in alerted {
+            self.question_alert_at.insert(id, at);
+        }
+        self.question_fingerprints = current;
+        // `tasks` is sorted newest-activity first, so the cap keeps the newest
+        // questions (the ones most likely to still block the user).
+        new_questions.truncate(MAX_ALERTS);
+        self.pending_questions = new_questions;
+    }
+
+    /// Test-only: age the recorded alert so the cooldown-expiry branch can be
+    /// exercised without sleeping a real minute.
+    #[cfg(test)]
+    fn backdate_question_alert(&mut self, id: &str, age_secs: u64) {
+        let at = crate::model::now_secs().saturating_sub(age_secs);
+        self.question_alert_at.insert(id.to_string(), at);
+    }
+
+    /// Drain the new pending questions discovered by the latest [`Self::scan`].
+    ///
+    /// The caller (lib.rs) emits the `attention-pending` event and the macOS
+    /// notification from this batch. The list is replaced by every scan, so
+    /// call this right after a scan; an empty result means "nothing new".
+    pub fn take_new_questions(&mut self) -> Vec<PendingAlert> {
+        std::mem::take(&mut self.pending_questions)
+    }
+
     pub fn dismiss(&mut self, id: &str) -> bool {
         if let Some(task) = self.snapshot.tasks.iter().find(|t| t.id == id) {
             self.dismissed.insert(id.to_string(), task.last_activity_secs);
             self.snapshot.tasks.retain(|t| t.id != id);
+            // The badge/header counters are derived from the visible rows.
+            self.snapshot.recount();
             self.last_hash = 0;
             self.save_dismissed();
             true
@@ -284,7 +412,29 @@ impl Monitor {
             dismissed: HashMap::new(),
             dismissed_path: None,
             enabled_agents: EnabledAgents::default(),
+            question_fingerprints: HashMap::new(),
+            question_alert_at: HashMap::new(),
+            question_seeded: false,
+            pending_questions: Vec::new(),
         }
+    }
+}
+
+/// Re-alert rule for an already-pending question: at most once per
+/// [`ALERT_COOLDOWN_SECS`]. A task that was not pending before (first
+/// appearance, running → waiting) always alerts immediately.
+fn question_alert_allowed(
+    already_pending: bool,
+    last_alert_at: Option<u64>,
+    now_secs: u64,
+) -> bool {
+    if !already_pending {
+        return true;
+    }
+    match last_alert_at {
+        // Boundary is inclusive: at exactly ALERT_COOLDOWN_SECS it may alert.
+        Some(at) => now_secs.saturating_sub(at) >= ALERT_COOLDOWN_SECS,
+        None => true,
     }
 }
 
@@ -613,5 +763,310 @@ mod tests {
         assert_eq!(monitor.dismissed_count(), 1);
         assert!(monitor.undismiss("fake:a"));
         assert_eq!(monitor.clear_dismissed(), 0);
+    }
+
+    // ── Pending-question detector ───────────────────────────────
+
+    fn records_with(tasks: Vec<TaskRecord>) -> Arc<Mutex<Vec<TaskRecord>>> {
+        Arc::new(Mutex::new(tasks))
+    }
+
+    fn set_status(records: &Arc<Mutex<Vec<TaskRecord>>>, id: &str, status: TaskStatus, activity: u64) {
+        let mut guard = records.lock().unwrap();
+        let t = guard
+            .iter_mut()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("fixture task {id} missing"));
+        t.status = status;
+        t.last_activity_secs = activity;
+    }
+
+    #[test]
+    fn first_scan_only_seeds_question_fingerprints() {
+        let probe = Probe::default();
+        let records = records_with(vec![
+            task("fake:input", TaskStatus::WaitingInput, 100),
+            task("fake:approval", TaskStatus::WaitingApproval, 90),
+        ]);
+        let mut monitor = monitor_with(records, &probe);
+        monitor.scan(false, 3_600);
+        assert!(
+            monitor.take_new_questions().is_empty(),
+            "questions that already existed at launch must only seed the baseline"
+        );
+        assert_eq!(monitor.snapshot().question_count, 2);
+        // The identical next scan stays silent too.
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+    }
+
+    #[test]
+    fn new_waiting_task_alerts_with_the_documented_fields() {
+        let probe = Probe::default();
+        let records = records_with(vec![task("fake:run", TaskStatus::Running, 100)]);
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+
+        records
+            .lock()
+            .unwrap()
+            .push(task("fake:q", TaskStatus::WaitingInput, 200));
+        monitor.scan(false, 3_600);
+        let alerts = monitor.take_new_questions();
+        assert_eq!(alerts.len(), 1);
+        let alert = &alerts[0];
+        assert_eq!(alert.task_id, "fake:q");
+        assert_eq!(alert.agent_key, "fake");
+        assert_eq!(alert.agent_name, "Fake");
+        assert_eq!(alert.title, "fake:q");
+        assert_eq!(alert.status, "waiting_input");
+        assert_eq!(alert.status_reason, "fixture");
+        assert_eq!(monitor.snapshot().question_count, 1);
+        // Drained: the same batch is never delivered twice.
+        assert!(monitor.take_new_questions().is_empty());
+    }
+
+    #[test]
+    fn pending_alert_serialises_the_frontend_contract() {
+        let alert = PendingAlert {
+            task_id: "dsh:session-1".into(),
+            agent_key: "dsh".into(),
+            agent_name: "DSH".into(),
+            title: "多窗口询问提醒与跳转".into(),
+            status: "waiting_approval".into(),
+            status_reason: "1 active user question(s)".into(),
+        };
+        let json = serde_json::to_value(&alert).unwrap();
+        for key in [
+            "task_id",
+            "agent_key",
+            "agent_name",
+            "title",
+            "status",
+            "status_reason",
+        ] {
+            assert!(json.get(key).is_some(), "missing key {key} in {json}");
+        }
+        assert_eq!(json["status"], "waiting_approval");
+        let roundtrip: PendingAlert = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, alert);
+    }
+
+    #[test]
+    fn repeated_identical_waiting_scan_does_not_realert() {
+        let probe = Probe::default();
+        let records = records_with(vec![task("fake:q", TaskStatus::WaitingInput, 100)]);
+        let mut monitor = monitor_with(records, &probe);
+        monitor.scan(false, 3_600); // seeds
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+        // An explicit user refresh must not replay the notification either.
+        monitor.scan(true, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+    }
+
+    #[test]
+    fn waiting_activity_tick_within_cooldown_is_silent() {
+        let probe = Probe::default();
+        let records = records_with(Vec::new());
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.scan(false, 3_600); // seeds empty baseline
+
+        // First appearance alerts immediately and starts the cooldown.
+        records
+            .lock()
+            .unwrap()
+            .push(task("fake:q", TaskStatus::WaitingInput, 100));
+        monitor.scan(false, 3_600);
+        assert_eq!(monitor.take_new_questions().len(), 1);
+
+        // Adapters may keep ticking activity while the agent is still blocked:
+        // the same question must not notify again inside the cooldown.
+        set_status(&records, "fake:q", TaskStatus::WaitingInput, 101);
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+        // A status change while still pending is the same blocking question too.
+        set_status(&records, "fake:q", TaskStatus::WaitingApproval, 102);
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+    }
+
+    #[test]
+    fn waiting_activity_change_after_cooldown_realerts() {
+        let probe = Probe::default();
+        let records = records_with(Vec::new());
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.scan(false, 3_600); // seeds empty baseline
+
+        records
+            .lock()
+            .unwrap()
+            .push(task("fake:q", TaskStatus::WaitingInput, 100));
+        monitor.scan(false, 3_600);
+        assert_eq!(monitor.take_new_questions().len(), 1);
+
+        // Age the recorded alert past the cooldown: a further activity change is
+        // a genuinely new blocking state and may alert again.
+        monitor.backdate_question_alert("fake:q", ALERT_COOLDOWN_SECS + 1);
+        set_status(&records, "fake:q", TaskStatus::WaitingInput, 200);
+        monitor.scan(false, 3_600);
+        assert_eq!(monitor.take_new_questions().len(), 1);
+
+        // The new alert restarts the cooldown.
+        set_status(&records, "fake:q", TaskStatus::WaitingInput, 201);
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+    }
+
+    #[test]
+    fn cooldown_rule_boundary_and_new_questions() {
+        // Not previously pending → always allowed, regardless of any timer.
+        assert!(question_alert_allowed(false, Some(999), 1_000));
+        assert!(question_alert_allowed(false, None, 1_000));
+        // Already pending: suppressed strictly inside the window...
+        assert!(!question_alert_allowed(true, Some(1_000), 1_000));
+        assert!(!question_alert_allowed(
+            true,
+            Some(1_000),
+            1_000 + ALERT_COOLDOWN_SECS - 1
+        ));
+        // ...and allowed at/after the boundary.
+        assert!(question_alert_allowed(
+            true,
+            Some(1_000),
+            1_000 + ALERT_COOLDOWN_SECS
+        ));
+        // A seeded question that was never alerted is not rate-limited.
+        assert!(question_alert_allowed(true, None, 1_000));
+    }
+
+    #[test]
+    fn running_then_waiting_alerts_immediately_despite_cooldown() {
+        let probe = Probe::default();
+        let records = records_with(vec![task("fake:q", TaskStatus::WaitingInput, 100)]);
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.scan(false, 3_600); // seeds
+
+        set_status(&records, "fake:q", TaskStatus::Running, 150);
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty(), "running is not a question");
+
+        // running → waiting is a new question: no cooldown applies.
+        set_status(&records, "fake:q", TaskStatus::WaitingInput, 150);
+        monitor.scan(false, 3_600);
+        assert_eq!(monitor.take_new_questions().len(), 1);
+
+        // Even immediately afterwards, a new run → new question alerts again.
+        set_status(&records, "fake:q", TaskStatus::Running, 160);
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+        set_status(&records, "fake:q", TaskStatus::WaitingInput, 160);
+        monitor.scan(false, 3_600);
+        assert_eq!(monitor.take_new_questions().len(), 1);
+    }
+
+    #[test]
+    fn non_question_statuses_never_alert() {
+        let probe = Probe::default();
+        let records = records_with(Vec::new());
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.scan(false, 3_600); // seeds empty baseline
+
+        records.lock().unwrap().extend(vec![
+            task("fake:failed", TaskStatus::Failed, 100),
+            task("fake:completed", TaskStatus::Completed, 100),
+            task("fake:running", TaskStatus::Running, 100),
+            task("fake:idle", TaskStatus::Idle, 100),
+            task("fake:unknown", TaskStatus::Unknown, 100),
+        ]);
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+        assert_eq!(monitor.snapshot().question_count, 0);
+    }
+
+    #[test]
+    fn dismissed_waiting_tasks_never_alert() {
+        let probe = Probe::default();
+        let records = records_with(vec![task("fake:q", TaskStatus::WaitingInput, 100)]);
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.scan(false, 3_600); // seeds
+        assert!(monitor.dismiss("fake:q"));
+        // Dismissal is reflected in the derived counter immediately.
+        assert_eq!(monitor.snapshot().question_count, 0);
+
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+
+        // A different, genuinely new question still alerts.
+        records
+            .lock()
+            .unwrap()
+            .push(task("fake:new", TaskStatus::WaitingApproval, 300));
+        monitor.scan(false, 3_600);
+        let alerts = monitor.take_new_questions();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].task_id, "fake:new");
+        assert_eq!(alerts[0].status, "waiting_approval");
+    }
+
+    #[test]
+    fn new_questions_are_capped_per_batch() {
+        let probe = Probe::default();
+        let records = records_with(Vec::new());
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.scan(false, 3_600); // seeds empty baseline
+
+        {
+            let mut guard = records.lock().unwrap();
+            for i in 0..(MAX_ALERTS + 4) {
+                guard.push(task(
+                    &format!("fake:q{i}"),
+                    TaskStatus::WaitingInput,
+                    100 + i as u64,
+                ));
+            }
+        }
+        monitor.scan(false, 3_600);
+        let alerts = monitor.take_new_questions();
+        assert_eq!(alerts.len(), MAX_ALERTS);
+        // Newest activity first: the cap keeps the most recent questions.
+        assert_eq!(alerts[0].task_id, format!("fake:q{}", MAX_ALERTS + 3));
+        assert_eq!(alerts[MAX_ALERTS - 1].task_id, "fake:q4");
+        // All visible questions still count, even beyond the batch cap.
+        assert_eq!(monitor.snapshot().question_count, MAX_ALERTS + 4);
+    }
+
+    #[test]
+    fn questions_not_collected_by_any_adapter_never_alert() {
+        let probe = Probe::default();
+        let records = records_with(vec![task("fake:q", TaskStatus::WaitingInput, 100)]);
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.scan(false, 3_600); // seeds
+        records.lock().unwrap().clear();
+        monitor.scan(false, 3_600);
+        assert!(monitor.take_new_questions().is_empty());
+        assert_eq!(monitor.snapshot().question_count, 0);
+    }
+
+    #[test]
+    fn registry_change_reseeds_the_question_detector() {
+        let probe = Probe::default();
+        let records = records_with(vec![task("fake:q", TaskStatus::WaitingInput, 100)]);
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.scan(false, 3_600); // seeds
+        records
+            .lock()
+            .unwrap()
+            .push(task("fake:q2", TaskStatus::WaitingInput, 200));
+        monitor.scan(false, 3_600);
+        assert_eq!(monitor.take_new_questions().len(), 1);
+
+        // Toggling agents rebuilds the registry; the new registry must start from
+        // a fresh baseline instead of replaying every waiting row.
+        let mut enabled = EnabledAgents::default();
+        enabled.codex = false;
+        assert!(monitor.set_enabled_agents(&enabled));
+        assert!(monitor.take_new_questions().is_empty());
     }
 }

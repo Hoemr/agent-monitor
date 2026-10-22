@@ -31,6 +31,21 @@ P0 的全部设置项都不需要重启。
 | `show_jump_level` | bool | `true` | — | 即时：行尾 L3/L2/L1/L0 显隐 |
 | `new_badge` | bool | `true` | — | 即时：收起/隐藏时显示“自上次查看后新完成”的绿色角标与数量（0 时自动隐藏） |
 
+### 提醒 / 待回答（attention）
+
+Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠角标外可主动提醒。
+只对**新出现**的问题触发；同一问题在后续刷新中不会重复打扰；启动时的历史问题不触发
+（首次扫描只建立基线）。设计与去重规则见 [`docs/ATTENTION.md`](ATTENTION.md)。
+
+| key | 类型 | 默认 | 范围 | 生效 |
+|---|---|---|---|---|
+| `notify_on_question` | bool | `true` | — | 即时：新问题出现时发一条 macOS 通知（`osascript display notification`），在其他应用/全屏窗口上方也能看到；一批问题合并为一条 |
+| `alert_sound` | bool | `true` | — | 即时：提醒时播放系统 “Glass” 声音（通知被关闭时用 `afplay` 单独播放） |
+| `auto_show_on_question` | bool | `true` | — | 即时：新问题出现且桌宠处于收起/贴边隐藏/托盘隐藏时，自动展开面板（**不抢键盘焦点**）；已展开则不动 |
+
+> 通知是 best-effort：若 macOS 在“通知”设置里禁止了 Agent Monitor（或通知由
+> `osascript` 的宿主终端归属），横幅可能不显示；贴边展开、角标脉冲和声音仍然有效。
+
 ### 监控
 
 | key | 类型 | 默认 | 范围 | 生效 |
@@ -62,6 +77,11 @@ P0 的全部设置项都不需要重启。
 | `toast_on_degraded` | bool | `true` | — | 即时：关闭后仅静默“降级/未确认”提示；**失败始终提示**（不允许完全静默） |
 | `auto_dismiss_invalid` | bool | `false` | — | 即时：跳转判定目标失效（`target_invalid` / `task_gone` / `workspace_missing` / `rollout_missing` / `no_target` / `app_not_found`）后自动忽略该任务，并弹出可“撤销”的 toast |
 
+跳转页同时是**配置向导与自检**：辅助功能/自动化/窗口读取三项权限状态、打开对应系统
+设置面板、在访达中显示 App（拖入辅助功能列表）、重新自检，以及每个 Agent 的最高跳转
+等级、安装/运行状态和限制说明。完整步骤与诊断字段见 [`docs/JUMP.md`](JUMP.md) 的
+“Setup, permissions and self-check”一节。
+
 ### 数据 / 恢复
 
 - 每个分组有“恢复本组默认值”，“数据”页有“全部恢复默认设置”（二次确认）。
@@ -82,7 +102,7 @@ P0 的全部设置项都不需要重启。
 |---|---|---|---|
 | `get_settings` | — | Settings | 设置窗口/桌宠启动时读取 |
 | `set_settings` | `settings: Settings` | Settings（已夹取） | 全量保存并应用；服务端再次 clamp |
-| `reset_settings` | `scope: all\|general\|monitor\|pet\|jump` | Settings | 分组恢复默认 |
+| `reset_settings` | `scope: all\|general\|attention\|monitor\|pet\|jump` | Settings | 分组恢复默认 |
 | `get_settings_meta` | — | 见下 | 数据页只读信息 |
 | `clear_dismissed` | — | number | 清除已忽略任务数量 |
 | `get_custom_icons` | — | `{collapsed, hidden}` | 自定义图标 data URL；见 [`docs/ICONS.md`](ICONS.md) |
@@ -92,10 +112,14 @@ P0 的全部设置项都不需要重启。
 | `import_legacy_settings` | `lang?`, `pollMs?` | Settings \| null | 一次性迁移，已迁移返回 null |
 | `open_settings` / `close_settings` | — | — | 单实例显示/隐藏设置窗口 |
 | `open_data_dir` | — | `Result<(), String>` | Finder 打开数据目录 |
+| `get_jump_diagnostics` | — | 见 [`docs/JUMP.md`](JUMP.md) | 跳转自检：辅助功能/自动化/窗口读取 + 各 Agent 安装/运行/最高等级 |
+| `reveal_app_in_finder` | — | `Result<(), String>` | 在访达中显示 Agent Monitor.app（方便拖入辅助功能列表） |
 | `reset_pet_position_command` | — | — | 复用桌宠 reset |
 
 事件 `settings-changed` payload 为完整 `Settings`，广播到全部窗口；`pet-state` payload
-中的 `settings` 也内嵌完整设置，保证首次渲染不闪默认值。
+中的 `settings` 也内嵌完整设置，保证首次渲染不闪默认值。新问题提醒另发 `attention-pending`
+（payload `{alerts, question_count, auto_show}`，只在新问题出现时发送），见
+[`docs/ATTENTION.md`](ATTENTION.md)。
 
 `get_settings_meta`:
 
@@ -106,7 +130,7 @@ P0 的全部设置项都不需要重启。
   "pet_path": "…/pet.json",
   "dismissed_path": "…/dismissed.json",
   "version": 1,
-  "app_version": "0.4.1",
+  "app_version": "0.5.0",
   "system_language": "zh",
   "legacy_imported": true,
   "corrupt_backup": null
@@ -120,7 +144,7 @@ P0 的全部设置项都不需要重启。
 * 非法 JSON → 备份为 `.bak` + 默认值 + 应用继续启动；
 * 自定义图标单独校验：仅按文件头接受 PNG/JPEG/WebP、解码后 ≤2 MB、原子写入，非法载荷拒绝；
 * 写失败只记录日志，不阻塞 UI；下一次修改会重试；
-* `--dump-tasks` / `--dump-agents` / `--jump` 会读取 `settings.json`（Agent 开关与保留期），
+* `--dump-tasks` / `--dump-agents` / `--jump` / `--jump-diagnostics` 会读取 `settings.json`（Agent 开关与保留期），
   但不加载 `dismissed.json`，所以可能显示 GUI 里已忽略的任务（无头验收需要看到原始采集结果）。
 
 ## 迁移
@@ -150,9 +174,10 @@ P0 的全部设置项都不需要重启。
 source ~/.cargo/env
 cargo test --release --manifest-path src-tauri/Cargo.toml      # 含 settings/pet/monitor 单测
 cargo build --release --manifest-path src-tauri/Cargo.toml
-bash scripts/ui-test.sh              # 桌宠（69 项）+ 设置窗口（45 项），聚合退出码
+bash scripts/ui-test.sh              # 桌宠（88 项）+ 设置窗口（60 项），聚合退出码
 bash scripts/ui-test-settings.sh     # 只跑设置窗口
 src-tauri/target/release/agent-monitor --dump-tasks   # 打印生效的 enabled/retention/rows
+src-tauri/target/release/agent-monitor --jump-diagnostics  # 跳转权限/应用自检 JSON
 AGENT_MONITOR_DEBUG_GEOMETRY=1 src-tauri/target/release/agent-monitor
 swift scripts/wins-probe.swift <pid>  # 真实窗口 bounds + activationPolicy
 ```

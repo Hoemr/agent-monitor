@@ -10,6 +10,10 @@ fn main() {
         agent_monitor::dump_agents();
         return;
     }
+    if args.iter().any(|a| a == "--jump-diagnostics") {
+        agent_monitor::dump_jump_diagnostics();
+        return;
+    }
     if let Some(pos) = args.iter().position(|a| a == "--jump") {
         if let Some(id) = args.get(pos + 1) {
             agent_monitor::jump_task(id);

@@ -48,6 +48,10 @@
 
   --badge-bg: light-dark(#007aff, #0a84ff);
   --badge-fg: #ffffff;
+  /* Amber "waiting for you" variant of the attention badge. The foreground
+   * flips in dark mode so the count keeps enough contrast on the orange fill. */
+  --badge-question-bg: light-dark(#b25000, #ff9f0a);
+  --badge-question-fg: light-dark(#ffffff, #1d1d1f);
 
   /* Inner-side rounding of the tiny edge-hidden tab (hidden_sliver square). */
   --tab-radius: min(6px, 40%);
@@ -155,6 +159,42 @@ body {
 }
 #badge[hidden] { display: none; }
 
+/* Amber question variant: while at least one task blocks on a question
+ * (`waiting_input` / `waiting_approval`) the attention count turns amber, so
+ * the collapsed pet reads as "someone is waiting for you", not just "busy". */
+#badge.question {
+  background: var(--badge-question-bg);
+  color: var(--badge-question-fg);
+}
+
+/* One-shot attention pulse: `attention-pending` (or a rising `question_count`)
+ * adds `.alerting` for ~4 s (main.js owns the single timer). The pet only glows
+ * — no transform, so layout measurements and the collapsed size stay exact —
+ * while the small badge gets a short scale beat. */
+@keyframes badge-pulse {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.24); }
+  70% { transform: scale(0.96); }
+  100% { transform: scale(1); }
+}
+@keyframes pet-pulse {
+  0%, 100% {
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset,
+      0 8px 20px rgba(0, 0, 0, 0.18),
+      0 0 0 0 transparent;
+  }
+  45% {
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset,
+      0 8px 20px rgba(0, 0, 0, 0.18),
+      0 0 0 4px color-mix(in srgb, var(--status-waiting) 55%, transparent);
+  }
+}
+#badge.alerting { animation: badge-pulse 1000ms ease-out 1; }
+#pet.alerting { animation: pet-pulse 1000ms ease-out 1; }
+/* The 14 px edge tab has no room for a glow; its badge dot still pulses. */
+#app.mode-edge_hidden #pet.alerting,
+#app.mode-tray_hidden #pet.alerting { animation: none; }
+
 /* Custom icon (`icon_style: custom`): replaces the glyph. The inset keeps the
  * artwork inside the squircle without touching the hairline border. */
 .pet-icon {
@@ -252,10 +292,12 @@ body {
   letter-spacing: -0.01em;
   color: var(--text-primary);
   white-space: nowrap;
+  /* Pushes every trailing chip/button to the right edge, independent of which
+   * optional chips are currently hidden. */
+  margin-right: auto;
 }
 
 .header-meta {
-  margin-left: auto;
   font-size: 11px;
   font-weight: 500;
   color: var(--status-waiting);
@@ -263,6 +305,21 @@ body {
   white-space: nowrap;
 }
 .header-meta[hidden] { display: none; }
+
+/* "N waiting" chip: the blocking-question count. A filled amber pill, so it is
+ * visually distinct from the plain attention count in #header-meta (the two
+ * numbers can differ: a stale failure counts as attention, not as a question). */
+.header-question {
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--status-waiting) 15%, transparent);
+  color: var(--status-waiting);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.header-question[hidden] { display: none; }
 
 /* "N new" chip: what appeared since the last time the panel was open. */
 .header-new {
@@ -273,7 +330,6 @@ body {
   white-space: nowrap;
 }
 .header-new[hidden] { display: none; }
-#header-meta[hidden] + .header-new { margin-left: auto; }
 
 .icon-btn {
   margin-left: 4px;
@@ -684,9 +740,12 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   #pet, .task, .dismiss, .icon-btn, .link-btn { transition: none; }
+  /* Belt and braces: main.js never adds `.alerting` in this mode. */
+  #pet.alerting, #badge.alerting { animation: none; }
 }
 
 html[data-animations="off"] #pet,
+html[data-animations="off"] #badge,
 html[data-animations="off"] .task,
 html[data-animations="off"] .dismiss,
 html[data-animations="off"] .icon-btn,
@@ -698,6 +757,9 @@ html[data-animations="off"] .link-btn {
 html[data-animations="always"] #pet {
   transition: box-shadow 150ms ease, border-color 150ms ease, opacity 150ms ease;
 }
+/* `always` must win over the OS Reduce Motion media query above. */
+html[data-animations="always"] #pet.alerting { animation: pet-pulse 1000ms ease-out 1; }
+html[data-animations="always"] #badge.alerting { animation: badge-pulse 1000ms ease-out 1; }
 html[data-animations="always"] .task,
 html[data-animations="always"] .dismiss,
 html[data-animations="always"] .icon-btn,

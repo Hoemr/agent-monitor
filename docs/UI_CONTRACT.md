@@ -41,6 +41,7 @@ renders whatever the snapshot contains.
   }],
   "collected_at_secs": 1792580000,
   "attention_count": 1,            // waiting_* always; failed only if recent (<30 min) and not interrupted/aborted/cancelled
+  "question_count": 1,             // waiting_input + waiting_approval only (never failures)
   "agents": [{ "key": "codex", "name": "Codex", "source": "…", "origin": "index", "max_level": "L2", "notes": "…" }]
 }
 ```
@@ -57,9 +58,11 @@ renders whatever the snapshot contains.
 | `set_expanded` | `expanded: boolean, focus?: boolean` | — | resize; `focus=true` only for explicit clicks (hover expansion never focuses) |
 | `request_collapse` | `force?: boolean` | — | `force=true` for explicit dismissal (outside click/blur/Escape), bypasses the post-resize suppression window |
 | `open_permission_settings` | `kind: "accessibility"\|"automation"` | — | system pane |
+| `get_jump_diagnostics` | — | JumpDiagnostics | permission + per-agent jump self-check (see `docs/JUMP.md`) |
+| `reveal_app_in_finder` | — | Result | reveal the .app bundle so it can be added to Accessibility |
 | `get_settings` | — | Settings | single source of truth (see `docs/SETTINGS.md`) |
 | `set_settings` | `settings: Settings` | Settings (normalized) | instant save + broadcast `settings-changed` |
-| `reset_settings` | `scope: "all"\|"general"\|"monitor"\|"pet"\|"jump"` | Settings | group defaults |
+| `reset_settings` | `scope: "all"\|"general"\|"attention"\|"monitor"\|"pet"\|"jump"` | Settings | group defaults |
 | `get_settings_meta` | — | SettingsMeta | data paths / version / system language |
 | `import_legacy_settings` | `lang?`, `pollMs?` | Settings \| null | one-shot v0.3.x migration |
 | `clear_dismissed` | — | number | clear ignored tasks (persisted) |
@@ -121,6 +124,9 @@ Settings (abridged; authoritative list in `docs/SETTINGS.md`):
   "edge_hide_enabled": true,
   "icon_style": "builtin|custom",
   "animations": "system|always|off",
+  "notify_on_question": true,
+  "alert_sound": true,
+  "auto_show_on_question": true,
   "toast_on_degraded": true,
   "auto_dismiss_invalid": false,
   "legacy_imported": false
@@ -131,7 +137,23 @@ Events: `tasks-updated` (Snapshot; emitted even while hidden so the collapsed
 “new completions” indicator updates), `pet-state` (PetStateView), `jump-feedback`
 (JumpOutcome, used for tray or keyboard initiated jumps), `settings-changed`
 (Settings; broadcast to both windows, never polled), `icons-changed`
-(`{collapsed, hidden}` data URLs).
+(`{collapsed, hidden}` data URLs), and `attention-pending` — emitted only when a
+session **newly** blocks on a question:
+
+```jsonc
+{
+  "alerts": [{
+    "task_id": "dsh:session-…", "agent_key": "dsh", "agent_name": "DSH",
+    "title": "…", "status": "waiting_input", "status_reason": "1 active user question(s)"
+  }],
+  "question_count": 2,
+  "auto_show": true
+}
+```
+
+The pet pulses its amber question badge, the header shows the waiting count, and
+Rust separately shows a macOS notification / plays a sound / auto-reveals the
+panel. Detection, dedupe and settings: `docs/ATTENTION.md`.
 
 Dev-only: with `?mock=1` (or `?mock=collapsed`) the pet page renders a fixture and
 exposes `window.__AM_TEST__` for `scripts/ui-selftest.html`. The settings page uses
@@ -214,6 +236,12 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
 * Settings entry points: tray menu “Settings…” (top item), a gear button in the
   expanded footer, and Cmd+, while either app window is focused. The footer no
   longer contains a language toggle (it moved into Settings).
+* Pending questions: `question_count` from the snapshot paints an amber header
+  chip (`N 待回答` / `N waiting`) while expanded and switches the collapsed badge
+  to the amber “question” variant; an `attention-pending` event adds a one-shot
+  pulse (disabled by `animations=off` / Reduce Motion) and the collapsed pet's
+  aria-label/title mention the waiting count. The panel itself is auto-expanded
+  by Rust when `auto_show_on_question` is on — the page never focuses the window.
 * `max_visible_rows` drives both the Rust window height (44 + rows×64 + 26) and
   the list's CSS max-height; `show_summary` / `show_jump_level` hide the
   corresponding row elements; `animations=off` disables window geometry
@@ -228,7 +256,8 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   open Settings pay no extra webview/RSS at idle), single instance; closing
   hides it (state preserved); the app keeps running in the menu bar and remains
   **accessory** (no Dock icon).
-* Left group navigation (General / Monitoring / Desktop Pet / Jump / Data) and a
+* Left group navigation (General / Attention / Monitoring / Desktop Pet / Jump /
+  Data) and a
   scrollable content pane; the selected group is remembered in the settings
   window's own localStorage, not in `settings.json`.
 * macOS Preferences behaviour: no OK/Cancel, every change is saved immediately;

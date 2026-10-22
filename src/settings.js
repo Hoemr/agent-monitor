@@ -69,7 +69,7 @@ function queryParam(name) {
 
 // ── Settings contract (mirrors src-tauri/src/settings.rs) ───────
 
-var GROUPS = ['general', 'monitor', 'pet', 'jump', 'data'];
+var GROUPS = ['general', 'attention', 'monitor', 'pet', 'jump', 'data'];
 var GROUP_KEY = 'am-settings-group';
 
 var RETENTION_CHOICES = [1, 6, 24, 72];
@@ -101,6 +101,9 @@ function defaultSettings() {
     show_summary: true,
     show_jump_level: true,
     new_badge: true,
+    notify_on_question: true,
+    alert_sound: true,
+    auto_show_on_question: true,
     refresh_interval: 'auto',
     retention_hours: 6,
     enabled_agents: { codex: true, dsh: true, zcode: true, claude_code: true },
@@ -153,6 +156,11 @@ function normalizeSettings(settings) {
   out.hidden_sliver = clamp(out.hidden_sliver, 8, 24);
   out.collapsed_size = clamp(out.collapsed_size, 48, 96);
   out.auto_hide_after_s = clamp(out.auto_hide_after_s, 0, 60);
+  // New attention flags are plain booleans; coerce so an older/edited
+  // settings.json can never put a non-boolean behind a switch.
+  out.notify_on_question = !!out.notify_on_question;
+  out.alert_sound = !!out.alert_sound;
+  out.auto_show_on_question = !!out.auto_show_on_question;
   if (out.icon_style !== 'custom') out.icon_style = 'builtin';
   return out;
 }
@@ -167,6 +175,10 @@ function resetScope(settings, scope) {
     out.show_summary = d.show_summary;
     out.show_jump_level = d.show_jump_level;
     out.new_badge = d.new_badge;
+  } else if (scope === 'attention') {
+    out.notify_on_question = d.notify_on_question;
+    out.alert_sound = d.alert_sound;
+    out.auto_show_on_question = d.auto_show_on_question;
   } else if (scope === 'monitor') {
     out.refresh_interval = d.refresh_interval;
     out.retention_hours = d.retention_hours;
@@ -196,10 +208,12 @@ var I18N = {
     window: { title: 'Settings' },
     nav: {
       label: 'Settings sections',
-      general: 'General', monitor: 'Monitoring', pet: 'Desktop Pet', jump: 'Jump', data: 'Data'
+      general: 'General', attention: 'Attention', monitor: 'Monitoring',
+      pet: 'Desktop Pet', jump: 'Jump', data: 'Data'
     },
     pane: {
-      general: 'General', monitor: 'Monitoring', pet: 'Desktop Pet', jump: 'Jump', data: 'Data'
+      general: 'General', attention: 'Attention', monitor: 'Monitoring',
+      pet: 'Desktop Pet', jump: 'Jump', data: 'Data'
     },
     common: {
       cancel: 'Cancel', reset: 'Reset', clear: 'Clear', open: 'Open',
@@ -231,6 +245,24 @@ var I18N = {
       showJump: { label: 'Show jump level', desc: 'Show the L0–L3 jump-level hint on each row.' },
       newBadge: { label: 'Show new completions', desc: 'Show how many tasks completed since you last opened the panel, on the collapsed pet. Hidden when the count is zero.' },
       reset: { label: 'Reset General…', confirm: 'Restore the General section to defaults?' }
+    },
+    attention: {
+      pane: 'Attention',
+      alerts: 'When an agent waits for you',
+      notify: {
+        label: 'Notify me about new questions',
+        desc: 'Show a macOS notification when an agent starts waiting for an answer, so it is visible while another app is focused.'
+      },
+      sound: {
+        label: 'Play a sound',
+        desc: 'Play the system “Glass” sound with every alert. It still plays when notifications are turned off.'
+      },
+      reveal: {
+        label: 'Reveal the pet',
+        desc: 'Expand the always-on-top pet so the waiting session is one click away. It appears without stealing keyboard focus.'
+      },
+      note: 'Only new questions alert. A question that is already waiting is not repeated on every refresh, and questions that existed at launch stay quiet.',
+      reset: { label: 'Reset Attention…', confirm: 'Restore the Attention section to defaults?' }
     },
     monitor: {
       pane: 'Monitoring',
@@ -305,6 +337,65 @@ var I18N = {
         label: 'Remove tasks with a dead target',
         desc: 'When a jump target no longer exists, remove the task and show a toast with Undo.'
       },
+      setup: 'Permissions & setup',
+      status: {
+        accessibility: 'Accessibility',
+        automation: 'Automation',
+        windowAccess: 'Window access',
+        granted: 'Granted',
+        notGranted: 'Not granted',
+        checking: 'Checking…',
+        accessibilityDesc: 'Reads window titles and raises the right window (L2/L3 jumps).',
+        automationDesc: 'Runs the System Events AppleScript calls used by L2/L3.',
+        windowAccessDesc: 'The real read test: window titles of a running agent app.',
+        systemEventsOn: 'System Events responded.',
+        hint: {
+          accessibility: 'Add Agent Monitor.app under Privacy & Security → Accessibility.',
+          automation: 'Allow Agent Monitor to control System Events when macOS asks.',
+          windowAccess: 'Needs Accessibility, and Automation for the System Events calls.'
+        },
+        detail: {
+          needsAccessibility: 'Grant Accessibility first.',
+          needsAutomation: 'Allow System Events under Privacy & Security → Automation.',
+          osascriptFailed: 'The AppleScript helper failed; see the app log.',
+          diagnosticsFailed: 'The self-check could not run; try again.',
+          noAgentApp: 'No running agent app to read right now.',
+          windowStateUnavailable: 'Window information is unavailable.',
+          other: 'macOS reported an unknown permission state.'
+        },
+        failed: 'Could not run the self-check: {message}'
+      },
+      actions: {
+        checkLabel: 'Self-check',
+        checkDesc: 'Re-read the permission states and each agent’s capabilities.',
+        checkButton: 'Check again',
+        revealLabel: 'Reveal the app in Finder',
+        revealDesc: 'Show Agent Monitor.app in Finder so it can be dragged into the Accessibility list.',
+        revealButton: 'Reveal App',
+        open: 'Open',
+        openAccessibility: 'Open Accessibility settings',
+        openAutomation: 'Open Automation settings'
+      },
+      guide: {
+        heading: 'First run',
+        intro: 'Three steps make window-level jumps work:',
+        step1: 'Open System Settings → Privacy & Security → Accessibility, then add Agent Monitor.app with + — or drag it in from Finder after “Reveal App”.',
+        step2: 'Come back here and press “Check again” until Accessibility and Window access read “Granted”.',
+        step3: 'The first jump that needs System Events triggers macOS’s Automation prompt — allow Agent Monitor to control System Events.',
+        adhoc: 'Agent Monitor.app is ad-hoc signed, so macOS may forget these grants after an update: if jumping suddenly stops, re-add the new copy once.',
+        appPath: 'App bundle: {path}'
+      },
+      agents: {
+        heading: 'Agent capabilities',
+        desc: 'Maximum jump level, install/run state and deep-link support, as measured on this Mac.',
+        installed: 'Installed',
+        notInstalled: 'Not installed',
+        running: 'Running',
+        notRunning: 'Stopped',
+        deepLink: 'Deep link',
+        noDeepLink: 'App level only',
+        noDiagnostics: 'The self-check has not reported yet.'
+      },
       reset: { label: 'Reset Jump…', confirm: 'Restore the Jump section to defaults?' }
     },
     data: {
@@ -339,10 +430,12 @@ var I18N = {
     window: { title: '设置' },
     nav: {
       label: '设置分区',
-      general: '通用', monitor: '监控', pet: '桌宠', jump: '跳转', data: '数据'
+      general: '通用', attention: '提醒', monitor: '监控',
+      pet: '桌宠', jump: '跳转', data: '数据'
     },
     pane: {
-      general: '通用', monitor: '监控', pet: '桌宠', jump: '跳转', data: '数据'
+      general: '通用', attention: '提醒', monitor: '监控',
+      pet: '桌宠', jump: '跳转', data: '数据'
     },
     common: {
       cancel: '取消', reset: '恢复', clear: '清除', open: '打开',
@@ -374,6 +467,24 @@ var I18N = {
       showJump: { label: '显示跳转等级', desc: '在每行显示 L0–L3 的跳转等级提示。' },
       newBadge: { label: '显示新完成数量', desc: '在收起的桌宠上显示自上次打开面板以来完成的任务数量；数量为 0 时自动隐藏。' },
       reset: { label: '恢复通用默认设置…', confirm: '将“通用”恢复为默认设置？' }
+    },
+    attention: {
+      pane: '提醒',
+      alerts: 'Agent 等待你回答时',
+      notify: {
+        label: '新问题时发送系统通知',
+        desc: 'Agent 开始等待回答时发一条 macOS 通知，即使你正专注于其他应用也能看到。'
+      },
+      sound: {
+        label: '播放提示音',
+        desc: '每次提醒播放系统“Glass”声音；即使关闭了通知也会单独播放。'
+      },
+      reveal: {
+        label: '自动展开桌宠',
+        desc: '展开置顶的桌宠，让等待中的会话一次点击即可到达；不会抢走键盘焦点。'
+      },
+      note: '仅对“新出现”的问题提醒。已在等待中的问题不会在每次刷新时重复提醒，启动前就存在的老问题也不会打扰你。',
+      reset: { label: '恢复提醒默认设置…', confirm: '将“提醒”恢复为默认设置？' }
     },
     monitor: {
       pane: '监控',
@@ -447,6 +558,65 @@ var I18N = {
       autoDismiss: {
         label: '移除目标已失效的任务',
         desc: '跳转目标失效时自动移除任务，并弹出带“撤销”的提示。'
+      },
+      setup: '权限与配置',
+      status: {
+        accessibility: '辅助功能',
+        automation: '自动化',
+        windowAccess: '窗口读取',
+        granted: '已授权',
+        notGranted: '未授权',
+        checking: '正在检查…',
+        accessibilityDesc: '读取窗口标题并抬起正确的窗口（L2/L3 跳转）。',
+        automationDesc: '执行 L2/L3 所需的 System Events AppleScript 调用。',
+        windowAccessDesc: '真实读取测试：读取正在运行的 Agent 应用的窗口标题。',
+        systemEventsOn: 'System Events 已响应。',
+        hint: {
+          accessibility: '在“隐私与安全性”→“辅助功能”中加入 Agent Monitor.app。',
+          automation: 'macOS 询问时允许 Agent Monitor 控制 System Events。',
+          windowAccess: '需要辅助功能权限，System Events 调用还需要自动化权限。'
+        },
+        detail: {
+          needsAccessibility: '请先授予辅助功能权限。',
+          needsAutomation: '在“隐私与安全性”→“自动化”中允许 System Events。',
+          osascriptFailed: 'AppleScript 调用失败，请查看应用日志。',
+          diagnosticsFailed: '自检未能运行，请重试。',
+          noAgentApp: '当前没有正在运行的 Agent 应用可供读取。',
+          windowStateUnavailable: '暂时无法读取窗口信息。',
+          other: 'macOS 返回了未知的权限状态。'
+        },
+        failed: '自检未能运行：{message}'
+      },
+      actions: {
+        checkLabel: '自检',
+        checkDesc: '重新读取三项权限状态与各 Agent 的跳转能力。',
+        checkButton: '重新检查',
+        revealLabel: '在访达中显示 App',
+        revealDesc: '在访达中显示 Agent Monitor.app，便于拖入辅助功能列表。',
+        revealButton: '显示 App',
+        open: '打开',
+        openAccessibility: '打开辅助功能设置',
+        openAutomation: '打开自动化设置'
+      },
+      guide: {
+        heading: '首次配置',
+        intro: '三步让窗口级跳转生效：',
+        step1: '打开“系统设置”→“隐私与安全性”→“辅助功能”，点“+”加入 Agent Monitor.app；或先点“显示 App”再从访达拖入。',
+        step2: '回到这里点“重新检查”，直到“辅助功能”和“窗口读取”都显示“已授权”。',
+        step3: '第一次需要 System Events 的跳转会触发 macOS 自动化授权弹窗——允许 Agent Monitor 控制 System Events。',
+        adhoc: 'Agent Monitor.app 使用 ad-hoc 签名，macOS 可能在应用更新后忘记这些授权：如果跳转突然失效，重新添加一次新的副本即可。',
+        appPath: 'App 位置：{path}'
+      },
+      agents: {
+        heading: 'Agent 能力',
+        desc: '本机实测的最高跳转等级、安装/运行状态与 deep link 支持。',
+        installed: '已安装',
+        notInstalled: '未安装',
+        running: '运行中',
+        notRunning: '未运行',
+        deepLink: '支持 deep link',
+        noDeepLink: '仅应用级',
+        noDiagnostics: '自检尚未返回结果。'
       },
       reset: { label: '恢复跳转默认设置…', confirm: '将“跳转”恢复为默认设置？' }
     },
@@ -580,6 +750,7 @@ function slug(key) {
 
 var ICONS = {
   general: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2.5 4.3h11M2.5 8h11M2.5 11.7h11"/><circle cx="5.4" cy="4.3" r="1.6" fill="currentColor" stroke="none"/><circle cx="10.4" cy="8" r="1.6" fill="currentColor" stroke="none"/><circle cx="6.4" cy="11.7" r="1.6" fill="currentColor" stroke="none"/></svg>',
+  attention: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.4 11.1h9.2c-.9-1-1.3-2.2-1.3-3.9V6a3.3 3.3 0 0 0-6.6 0v1.2c0 1.7-.4 2.9-1.3 3.9Z"/><path d="M6.6 13.1a1.5 1.5 0 0 0 2.8 0"/><path d="M8 1.6V2.6"/></svg>',
   monitor: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.4"/><path d="M8 4.7V8l2.3 1.5"/></svg>',
   pet: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2.6" y="3.1" width="10.8" height="9.8" rx="2.2"/><circle cx="8" cy="8" r="1.7" fill="currentColor" stroke="none"/></svg>',
   jump: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.4 11.6 11.6 4.4M6.2 4.4h5.4v5.4"/></svg>',
@@ -597,7 +768,12 @@ var state = {
   focusAfterRender: null,
   bootError: null,
   icons: { collapsed: null, hidden: null },
-  iconMeta: {}
+  iconMeta: {},
+  diagnostics: null,          // get_jump_diagnostics result, normalized
+  diagnosticsLoaded: false,   // one successful read
+  diagnosticsLoading: false,
+  diagnosticsRequested: false, // lazy: the jump pane was opened at least once
+  diagnosticsError: null
 };
 
 var saveQueue = { inFlight: false, pending: null };
@@ -1162,6 +1338,277 @@ function buildIconSection() {
   return section('pet.iconSection', h('div', { class: 'card-stack' }, [styleCard, slotsCard]), notes);
 }
 
+// ── Jump diagnostics (get_jump_diagnostics) ────────────────────
+//
+// The Jump pane is a setup wizard: it reads the three macOS permission states
+// and the per-agent capability table once, the first time the pane is opened,
+// and only again when the user presses "Check again". It is never polled.
+
+function pick(raw, snake, camel, fallback) {
+  if (raw && raw[snake] !== undefined) return raw[snake];
+  if (raw && raw[camel] !== undefined) return raw[camel];
+  return fallback;
+}
+
+/* Accepts the documented snake_case payload and camelCase spellings, so an
+ * older/newer Rust side can never blank the pane. */
+function normalizeDiagnostics(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  function perm(key, camel) {
+    var entry = pick(raw, key, camel, null);
+    if (entry && typeof entry === 'object') {
+      return { granted: !!entry.granted, detail: entry.detail === undefined ? null : entry.detail };
+    }
+    return { granted: !!entry, detail: null };
+  }
+  var agents = raw.agents;
+  return {
+    accessibility: perm('accessibility', 'accessibility'),
+    automation: perm('automation', 'automation'),
+    window_access: perm('window_access', 'windowAccess'),
+    system_events: !!pick(raw, 'system_events', 'systemEvents', false),
+    app_bundle_path: pick(raw, 'app_bundle_path', 'appBundlePath', null) || null,
+    agents: Array.isArray(agents) ? agents.map(function (agent) {
+      var level = String(pick(agent, 'max_level', 'maxLevel', 'L0') || 'L0');
+      // Rust serialises JumpLevel as "L3"; accept a lower-case spelling too.
+      if (/^l[0-3]$/i.test(level)) level = level.toUpperCase();
+      return {
+        key: agent.key || '',
+        name: agent.name || agent.key || '',
+        bundle_id: pick(agent, 'bundle_id', 'bundleId', null),
+        app_name: pick(agent, 'app_name', 'appName', null),
+        max_level: level,
+        notes: agent.notes || '',
+        installed: !!agent.installed,
+        running: !!agent.running,
+        deep_link: !!pick(agent, 'deep_link', 'deepLink', false)
+      };
+    }) : []
+  };
+}
+
+// Unknown detail codes fall back to a localised generic message; the raw code is
+// kept as the element's title for support tickets (never silently dropped).
+var DIAGNOSTIC_DETAIL_KEYS = {
+  needs_accessibility: 'needsAccessibility',
+  needs_automation: 'needsAutomation',
+  osascript_failed: 'osascriptFailed',
+  diagnostics_failed: 'diagnosticsFailed',
+  no_running_agent_app: 'noAgentApp',
+  no_process: 'noAgentApp',
+  window_state_unavailable: 'windowStateUnavailable',
+  terminal_unavailable: 'windowStateUnavailable'
+};
+
+// “Could not verify” rather than “denied”: grey pill, still explains itself.
+var UNVERIFIED_DETAILS = {
+  diagnostics_failed: 1,
+  no_running_agent_app: 1,
+  no_process: 1,
+  window_state_unavailable: 1,
+  terminal_unavailable: 1
+};
+
+function diagnosticDetail(code) {
+  var key = DIAGNOSTIC_DETAIL_KEYS[code];
+  return key ? i('jump.status.detail.' + key) : i('jump.status.detail.other');
+}
+
+/* Only the first open triggers a read; "Check again" passes force=true. */
+function loadJumpDiagnostics(force) {
+  if (state.diagnosticsLoading) return;
+  if (!force && state.diagnosticsLoaded) return;
+  state.diagnosticsLoading = true;
+  state.diagnosticsError = null;
+  renderAll();
+  invoke('get_jump_diagnostics').then(function (data) {
+    state.diagnosticsLoading = false;
+    state.diagnostics = normalizeDiagnostics(data);
+    state.diagnosticsLoaded = !!state.diagnostics;
+    renderAll();
+  }).catch(function (err) {
+    state.diagnosticsLoading = false;
+    state.diagnosticsError = String(err && err.message ? err.message : err);
+    renderAll();
+  });
+}
+
+function ensureJumpDiagnostics() {
+  if (state.diagnosticsRequested || state.bootError || !state.settings) return;
+  state.diagnosticsRequested = true;
+  // Deferred one microtask so the pane paints its “Checking…” state first.
+  Promise.resolve().then(function () { loadJumpDiagnostics(); });
+}
+
+function permissionState(key) {
+  if (state.diagnosticsLoading || !state.diagnostics) {
+    return { cls: 'unknown', text: i('jump.status.checking'), granted: null };
+  }
+  var entry = state.diagnostics[key] || {};
+  return {
+    cls: entry.granted ? 'ok' : (UNVERIFIED_DETAILS[entry.detail] ? 'unknown' : 'warn'),
+    text: entry.granted ? i('jump.status.granted') : i('jump.status.notGranted'),
+    granted: !!entry.granted
+  };
+}
+
+function diagnosticHint(row) {
+  var diag = state.diagnostics;
+  if (!diag) return null;
+  var entry = diag[row.key] || {};
+  if (!entry.granted) {
+    if (entry.detail) return { text: diagnosticDetail(entry.detail), raw: String(entry.detail) };
+    if (row.key === 'accessibility') return { text: i('jump.status.hint.accessibility'), raw: null };
+    if (row.key === 'automation') return { text: i('jump.status.hint.automation'), raw: null };
+    return { text: i('jump.status.hint.windowAccess'), raw: null };
+  }
+  if (row.key === 'automation' && diag.system_events) {
+    return { text: i('jump.status.systemEventsOn'), raw: null };
+  }
+  return null;
+}
+
+function diagnosticRow(row) {
+  var status = permissionState(row.key);
+  var hint = diagnosticHint(row);
+  var info = h('div', { class: 'status-info' }, [
+    h('div', { class: 'status-head' }, [
+      h('span', { class: 'row-title', text: i(row.titleKey) }),
+      h('span', {
+        class: 'status-pill ' + status.cls,
+        'data-pill': row.key,
+        'data-pill-state': status.cls,
+        role: 'status',
+        text: status.text
+      })
+    ]),
+    h('span', { class: 'row-desc', text: i(row.descKey) }),
+    hint ? h('span', {
+      class: 'status-detail',
+      'data-detail': row.key,
+      title: hint.raw && !DIAGNOSTIC_DETAIL_KEYS[hint.raw] ? hint.raw : null,
+      text: hint.text
+    }) : null
+  ]);
+  var children = [info];
+  if (row.permission) {
+    (function (kind) {
+      children.push(button('', i('jump.actions.open'), {
+        action: 'open-permission-' + kind,
+        focus: 'open-permission:' + kind,
+        ariaLabel: i(kind === 'accessibility' ? 'jump.actions.openAccessibility' : 'jump.actions.openAutomation'),
+        title: i(kind === 'accessibility' ? 'jump.actions.openAccessibility' : 'jump.actions.openAutomation'),
+        onclick: function () {
+          invoke('open_permission_settings', { kind: kind }).catch(function (err) {
+            flashStatus('error', String(err && err.message ? err.message : err), 5000);
+          });
+        }
+      }));
+    })(row.permission);
+  }
+  return h('div', { class: 'row status-row', 'data-status-row': row.key }, children);
+}
+
+var DIAGNOSTIC_ROWS = [
+  { key: 'accessibility', titleKey: 'jump.status.accessibility', descKey: 'jump.status.accessibilityDesc', permission: 'accessibility' },
+  { key: 'automation', titleKey: 'jump.status.automation', descKey: 'jump.status.automationDesc', permission: 'automation' },
+  { key: 'window_access', titleKey: 'jump.status.windowAccess', descKey: 'jump.status.windowAccessDesc', permission: null }
+];
+
+function buildJumpSetup() {
+  var frag = document.createDocumentFragment();
+  var statusCard = card(DIAGNOSTIC_ROWS.map(function (row) { return diagnosticRow(row); }));
+
+  var actionsCard = card([
+    actionRow('jump.actions.checkLabel', 'jump.actions.checkDesc', [
+      button('', i('jump.actions.checkButton'), {
+        action: 'jump-check',
+        focus: 'jump-check',
+        onclick: function () { loadJumpDiagnostics(true); }
+      })
+    ]),
+    actionRow('jump.actions.revealLabel', 'jump.actions.revealDesc', [
+      button('', i('jump.actions.revealButton'), {
+        action: 'reveal-app',
+        focus: 'reveal-app',
+        onclick: function () {
+          invoke('reveal_app_in_finder').catch(function (err) {
+            flashStatus('error', String(err && err.message ? err.message : err), 5000);
+          });
+        }
+      })
+    ])
+  ]);
+
+  var notes = [];
+  if (state.diagnosticsError) {
+    notes.push(i('jump.status.failed', { message: state.diagnosticsError }));
+  }
+  notes.push(i('jump.guide.adhoc'));
+  if (state.diagnostics && state.diagnostics.app_bundle_path) {
+    notes.push(i('jump.guide.appPath', { path: state.diagnostics.app_bundle_path }));
+  }
+
+  frag.appendChild(section('jump.setup', h('div', { class: 'card-stack' }, [statusCard, actionsCard]), notes));
+  return frag;
+}
+
+function buildJumpGuide() {
+  var stepKeys = ['jump.guide.step1', 'jump.guide.step2', 'jump.guide.step3'];
+  var steps = h('ol', { class: 'steps' }, stepKeys.map(function (key, index) {
+    return h('li', { class: 'step', 'data-step': String(index + 1) }, [
+      h('span', { class: 'step-text', text: i(key) })
+    ]);
+  }));
+  // The intro belongs above the numbered steps, not in the section note slot.
+  return section('jump.guide.heading', card([
+    h('p', { class: 'guide-intro', text: i('jump.guide.intro') }),
+    steps
+  ]));
+}
+
+function agentRow(agent) {
+  var name = agent.name || agent.key || '—';
+  var level = agent.max_level || 'L0';
+  var stateText = agent.installed ? i('jump.agents.installed') : i('jump.agents.notInstalled');
+  if (agent.installed) {
+    stateText += ' · ' + (agent.running ? i('jump.agents.running') : i('jump.agents.notRunning'));
+  }
+  return h('div', { class: 'agent-row', 'data-agent': agent.key || slug(name) }, [
+    h('div', { class: 'agent-head' }, [
+      h('span', { class: 'row-title agent-name', text: name }),
+      h('span', {
+        class: 'agent-level',
+        'data-level': level,
+        'aria-label': i('jump.agents.heading') + ': ' + name + ' ' + level,
+        text: level
+      })
+    ]),
+    h('span', { class: 'agent-state', 'data-agent-state': agent.installed ? (agent.running ? 'installed-running' : 'installed') : 'not-installed', text: stateText }),
+    agent.notes ? h('span', { class: 'agent-notes', text: agent.notes }) : null,
+    h('span', { class: 'agent-flags' }, [
+      h('span', {
+        class: 'agent-flag' + (agent.deep_link ? ' on' : ''),
+        'data-deep-link': agent.deep_link ? 'yes' : 'no',
+        text: agent.deep_link ? i('jump.agents.deepLink') : i('jump.agents.noDeepLink')
+      })
+    ])
+  ]);
+}
+
+function buildJumpAgents() {
+  var agents = state.diagnostics && state.diagnostics.agents;
+  var content;
+  if (Array.isArray(agents) && agents.length) {
+    content = card(agents.map(agentRow));
+  } else {
+    content = card([h('div', { class: 'row row-stacked' }, [
+      h('span', { class: 'row-desc', text: i('jump.agents.noDiagnostics') })
+    ])]);
+  }
+  return section('jump.agents.heading', content, i('jump.agents.desc'));
+}
+
 // ── Pane builders ──────────────────────────────────────────────
 
 function buildGeneral() {
@@ -1212,6 +1659,34 @@ function buildGeneral() {
   ])));
 
   frag.appendChild(h('div', { class: 'pane-actions' }, [resetFooter('general', 'general.reset')]));
+  return frag;
+}
+
+function buildAttention() {
+  var settings = state.settings;
+  var frag = document.createDocumentFragment();
+  frag.appendChild(section('attention.alerts', card([
+    switchRow({
+      key: 'notify_on_question',
+      titleKey: 'attention.notify.label',
+      descKey: 'attention.notify.desc',
+      checked: settings.notify_on_question
+    }),
+    switchRow({
+      key: 'alert_sound',
+      titleKey: 'attention.sound.label',
+      descKey: 'attention.sound.desc',
+      checked: settings.alert_sound
+    }),
+    switchRow({
+      key: 'auto_show_on_question',
+      titleKey: 'attention.reveal.label',
+      descKey: 'attention.reveal.desc',
+      checked: settings.auto_show_on_question
+    })
+  ]), i('attention.note')));
+
+  frag.appendChild(h('div', { class: 'pane-actions' }, [resetFooter('attention', 'attention.reset')]));
   return frag;
 }
 
@@ -1326,6 +1801,11 @@ function buildJump() {
       checked: settings.auto_dismiss_invalid
     })
   ])));
+
+  frag.appendChild(buildJumpSetup());
+  frag.appendChild(buildJumpGuide());
+  frag.appendChild(buildJumpAgents());
+
   frag.appendChild(h('div', { class: 'pane-actions' }, [resetFooter('jump', 'jump.reset')]));
   return frag;
 }
@@ -1426,6 +1906,7 @@ function buildData() {
 
 var BUILDERS = {
   general: buildGeneral,
+  attention: buildAttention,
   monitor: buildMonitor,
   pet: buildPet,
   jump: buildJump,
@@ -1494,6 +1975,7 @@ function renderPane() {
     return;
   }
   paneBodyEl.appendChild(BUILDERS[state.group]());
+  if (state.group === 'jump') ensureJumpDiagnostics();
 }
 
 function renderAll() {
@@ -1565,6 +2047,50 @@ function mockMeta() {
   };
 }
 
+/* Fixture for `get_jump_diagnostics` (documented shape, docs/JUMP.md).
+ * Deliberately mixed: Accessibility missing, Automation granted, window reads
+ * blocked by the accessibility grant — exactly the most common real state, so
+ * the preview/selftest exercises every pill class and every hint. */
+function mockDiagnostics() {
+  return {
+    accessibility: { granted: false, detail: null },
+    automation: { granted: true, detail: null },
+    window_access: { granted: false, detail: 'needs_accessibility' },
+    system_events: true,
+    app_bundle_path: '/Users/you/Documents/AgentMonitor/dist/Agent Monitor.app',
+    agents: [
+      {
+        key: 'codex', name: 'Codex',
+        bundle_id: 'com.openai.codex', app_name: 'ChatGPT',
+        max_level: 'L3',
+        notes: 'codex://threads/<id> deep link; verified by a window-title change.',
+        installed: true, running: true, deep_link: true
+      },
+      {
+        key: 'dsh', name: 'DSH',
+        bundle_id: 'com.deepseek.dsh', app_name: 'DeepSeek Harness',
+        max_level: 'L1',
+        notes: 'Only dsh://open exists, so app-level focus is the declared maximum.',
+        installed: true, running: true, deep_link: false
+      },
+      {
+        key: 'zcode', name: 'ZCode',
+        bundle_id: 'dev.zcode.app', app_name: 'ZCode',
+        max_level: 'L1',
+        notes: 'The app exits immediately on this host; only app activation is declared.',
+        installed: false, running: false, deep_link: false
+      },
+      {
+        key: 'claude-code', name: 'Claude Code',
+        bundle_id: 'com.microsoft.VSCode', app_name: 'Visual Studio Code',
+        max_level: 'L2',
+        notes: 'Modelled as VS Code-hosted; raises the matching workspace window.',
+        installed: true, running: false, deep_link: false
+      }
+    ]
+  };
+}
+
 function mockInvoke(cmd, args) {
   switch (cmd) {
     case 'get_settings':
@@ -1614,6 +2140,17 @@ function mockInvoke(cmd, args) {
     case 'open_data_dir':
     case 'reset_pet_position_command':
       return null;
+    case 'get_jump_diagnostics':
+      return clone(mockDiagnostics());
+    case 'reveal_app_in_finder':
+      return null;
+    case 'open_permission_settings': {
+      var kind = args.kind;
+      if (kind !== 'accessibility' && kind !== 'automation') {
+        throw new Error('unknown permission kind: ' + kind);
+      }
+      return null;
+    }
     case 'close_settings':
       mockState.closed = true;
       return null;
@@ -1663,6 +2200,11 @@ if (MOCK) {
     get dismissedCount() { return mockState.dismissed; },
     get icons() { return clone(state.icons); },
     get iconMeta() { return clone(state.iconMeta); },
+    get diagnostics() { return clone(state.diagnostics); },
+    get diagnosticsLoading() { return state.diagnosticsLoading; },
+    get diagnosticsLoaded() { return state.diagnosticsLoaded; },
+    get diagnosticsRequested() { return state.diagnosticsRequested; },
+    get diagnosticsError() { return state.diagnosticsError; },
     setIcons: function (next) {
       mockState.icons = normalizeIcons(next);
       mockEmit('icons-changed', clone(mockState.icons));

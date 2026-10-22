@@ -212,6 +212,15 @@ pub struct Settings {
     /// is collapsed/hidden.
     pub new_badge: bool,
 
+    // Attention / pending questions (see docs/ATTENTION.md)
+    /// Show a macOS notification when a session newly blocks on a question.
+    pub notify_on_question: bool,
+    /// Play the system "Glass" sound with the alert (also when notifications
+    /// are disabled, via `afplay`).
+    pub alert_sound: bool,
+    /// Reveal/expand the pet when a new question appears (never focuses it).
+    pub auto_show_on_question: bool,
+
     // Monitoring
     pub refresh_interval: RefreshInterval,
     pub retention_hours: u32,
@@ -250,6 +259,9 @@ impl Default for Settings {
             show_summary: true,
             show_jump_level: true,
             new_badge: true,
+            notify_on_question: true,
+            alert_sound: true,
+            auto_show_on_question: true,
             refresh_interval: RefreshInterval::Auto,
             retention_hours: 6,
             enabled_agents: EnabledAgents::default(),
@@ -323,6 +335,11 @@ impl Settings {
                 self.show_jump_level = d.show_jump_level;
                 self.new_badge = d.new_badge;
             }
+            SettingsGroup::Attention => {
+                self.notify_on_question = d.notify_on_question;
+                self.alert_sound = d.alert_sound;
+                self.auto_show_on_question = d.auto_show_on_question;
+            }
             SettingsGroup::Monitor => {
                 self.refresh_interval = d.refresh_interval;
                 self.retention_hours = d.retention_hours;
@@ -353,6 +370,7 @@ impl Settings {
 pub enum SettingsGroup {
     All,
     General,
+    Attention,
     Monitor,
     Pet,
     Jump,
@@ -363,6 +381,7 @@ impl SettingsGroup {
         match s {
             "all" => Some(SettingsGroup::All),
             "general" => Some(SettingsGroup::General),
+            "attention" => Some(SettingsGroup::Attention),
             "monitor" => Some(SettingsGroup::Monitor),
             "pet" => Some(SettingsGroup::Pet),
             "jump" => Some(SettingsGroup::Jump),
@@ -522,6 +541,9 @@ mod tests {
         assert_eq!(s.appearance, Appearance::System);
         assert!(s.show_summary && s.show_jump_level);
         assert!(s.new_badge);
+        assert!(s.notify_on_question);
+        assert!(s.alert_sound);
+        assert!(s.auto_show_on_question);
         assert_eq!(s.refresh_interval, RefreshInterval::Auto);
         assert_eq!(s.retention_hours, 6);
         assert_eq!(s.retention_secs(), 6 * 3600);
@@ -736,6 +758,9 @@ mod tests {
             "show_summary",
             "show_jump_level",
             "new_badge",
+            "notify_on_question",
+            "alert_sound",
+            "auto_show_on_question",
             "refresh_interval",
             "retention_hours",
             "enabled_agents",
@@ -756,12 +781,48 @@ mod tests {
             assert!(json.get(key).is_some(), "missing key {key} in {json}");
         }
         assert_eq!(json["enabled_agents"]["claude_code"], true);
+        assert_eq!(json["notify_on_question"], true);
+        assert_eq!(json["alert_sound"], true);
+        assert_eq!(json["auto_show_on_question"], true);
     }
 
     #[test]
     fn settings_group_parsing_rejects_unknown_scopes() {
         assert_eq!(SettingsGroup::parse("all"), Some(SettingsGroup::All));
+        assert_eq!(SettingsGroup::parse("attention"), Some(SettingsGroup::Attention));
         assert_eq!(SettingsGroup::parse("pet"), Some(SettingsGroup::Pet));
         assert_eq!(SettingsGroup::parse("nope"), None);
+    }
+
+    #[test]
+    fn attention_flags_default_true_and_accept_partial_json() {
+        // An older settings.json has none of the keys: they must default to on.
+        let s: Settings = serde_json::from_str(r#"{"retention_hours":24}"#).unwrap();
+        assert!(s.notify_on_question && s.alert_sound && s.auto_show_on_question);
+        // Partial JSON only overrides what it carries.
+        let s: Settings = serde_json::from_str(r#"{"alert_sound":false}"#).unwrap();
+        assert!(s.notify_on_question);
+        assert!(!s.alert_sound);
+        assert!(s.auto_show_on_question);
+        // A non-boolean value is rejected, not silently coerced.
+        assert!(serde_json::from_str::<Settings>(r#"{"alert_sound":"no"}"#).is_err());
+    }
+
+    #[test]
+    fn attention_group_reset_restores_only_the_attention_flags() {
+        let mut s = Settings {
+            notify_on_question: false,
+            alert_sound: false,
+            auto_show_on_question: false,
+            language: Language::Zh,
+            new_badge: false,
+            toast_on_degraded: false,
+            ..Default::default()
+        };
+        s.reset_group(SettingsGroup::Attention);
+        assert!(s.notify_on_question && s.alert_sound && s.auto_show_on_question);
+        assert_eq!(s.language, Language::Zh);
+        assert!(!s.new_badge);
+        assert!(!s.toast_on_degraded);
     }
 }

@@ -9,6 +9,8 @@
 //! is what Apple exposes without private APIs. No retry loops, no polling.
 
 use crate::model::*;
+use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -17,6 +19,10 @@ pub const ACCESSIBILITY_PANE: &str =
 pub const AUTOMATION_PANE: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation";
 
+/// Bundle identifier of this app (`tauri.conf.json`); used to locate the
+/// installed bundle when the running binary is not inside one (e.g. `cargo run`).
+pub const APP_BUNDLE_ID: &str = "com.agent.monitor";
+
 pub fn open_permission_settings(kind: PermissionKind) {
     let pane = match kind {
         PermissionKind::Accessibility => ACCESSIBILITY_PANE,
@@ -24,6 +30,330 @@ pub fn open_permission_settings(kind: PermissionKind) {
     };
     let _ = Command::new("open").arg(pane).status();
 }
+
+// ── Diagnostics / self-check (docs/JUMP.md) ─────────────────────
+
+/// One permission status pill in Settings → Jump.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticStatus {
+    pub granted: bool,
+    /// Machine-readable reason when `granted` is false
+    /// (`needs_accessibility`, `needs_automation`, `osascript_failed`,
+    /// `no_running_agent_app`, `no_process`, `window_state_unavailable`, ...).
+    pub detail: Option<String>,
+}
+
+/// Per-agent row of the capability table: declared maximum, install/run state
+/// and deep-link support. Static capability metadata never depends on the host.
+#[derive(Clone, Debug, Serialize)]
+pub struct AgentDiagnostics {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub bundle_id: &'static str,
+    pub app_name: &'static str,
+    pub max_level: JumpLevel,
+    pub notes: &'static str,
+    pub installed: bool,
+    pub running: bool,
+    pub deep_link: bool,
+}
+
+/// `get_jump_diagnostics` payload (`docs/JUMP.md`).
+#[derive(Clone, Debug, Serialize)]
+pub struct JumpDiagnostics {
+    pub accessibility: DiagnosticStatus,
+    pub automation: DiagnosticStatus,
+    pub window_access: DiagnosticStatus,
+    pub system_events: bool,
+    pub app_bundle_path: Option<String>,
+    pub agents: Vec<AgentDiagnostics>,
+}
+
+impl JumpDiagnostics {
+    /// Fallback when the blocking self-check task could not run at all.
+    pub fn unavailable() -> Self {
+        let failed = || DiagnosticStatus {
+            granted: false,
+            detail: Some("diagnostics_failed".into()),
+        };
+        Self {
+            accessibility: failed(),
+            automation: failed(),
+            window_access: failed(),
+            system_events: false,
+            app_bundle_path: None,
+            agents: Vec::new(),
+        }
+    }
+}
+
+/// Static per-agent map (docs/JUMP.md / docs/CAPABILITIES.md). `max_level` is
+/// the declared capability, not a promise that the host can reach it today.
+struct AgentSpec {
+    key: &'static str,
+    name: &'static str,
+    bundle_id: &'static str,
+    /// macOS application name as shown to the user.
+    app_name: &'static str,
+    /// Process name used by System Events; differs from the display name for
+    /// VSCode ("Code").
+    ax_process: &'static str,
+    max_level: JumpLevel,
+    notes: &'static str,
+    deep_link: bool,
+}
+
+const AGENT_SPECS: [AgentSpec; 4] = [
+    AgentSpec {
+        key: "codex",
+        name: "Codex",
+        bundle_id: "com.openai.codex",
+        app_name: "ChatGPT",
+        ax_process: "ChatGPT",
+        max_level: JumpLevel::L3,
+        notes: "codex://threads/<id> route; L3 verified by a real window-title change",
+        deep_link: true,
+    },
+    AgentSpec {
+        key: "dsh",
+        name: "DSH",
+        bundle_id: "com.deepseek.dsh",
+        app_name: "DeepSeek Harness",
+        ax_process: "DeepSeek Harness",
+        max_level: JumpLevel::L1,
+        notes: "one window for all sessions; dsh://open only focuses the app (no per-session route)",
+        deep_link: false,
+    },
+    AgentSpec {
+        key: "zcode",
+        name: "ZCode",
+        bundle_id: "dev.zcode.app",
+        app_name: "ZCode",
+        ax_process: "ZCode",
+        max_level: JumpLevel::L1,
+        notes: "the app exits immediately on this host; activation cannot be verified",
+        deep_link: false,
+    },
+    AgentSpec {
+        key: "claude-code",
+        name: "Claude Code",
+        bundle_id: "com.microsoft.VSCode",
+        app_name: "Visual Studio Code",
+        ax_process: "Code",
+        max_level: JumpLevel::L2,
+        notes: "VSCode-hosted; window matched by workspace (L2 verified)",
+        deep_link: false,
+    },
+];
+
+/// Collect the real permission/self-check state. Blocking (spawns `osascript`,
+/// `mdfind` and `ps`); call it from a background thread, never from a scan.
+pub fn collect_jump_diagnostics() -> JumpDiagnostics {
+    let accessibility = DiagnosticStatus {
+        granted: ax_is_process_trusted(),
+        detail: None,
+    };
+    let automation = automation_status();
+    let ps_sample = sample_ps_commands();
+    // System Events is the helper every AX/AppleScript read goes through. After
+    // the automation probe it is usually already running; a denied grant can
+    // still leave it alive, so check the process table as well.
+    let system_events =
+        automation.granted || ps_sample.contains("System Events.app/Contents/MacOS/");
+
+    let agents: Vec<AgentDiagnostics> = AGENT_SPECS
+        .iter()
+        .map(|spec| AgentDiagnostics {
+            key: spec.key,
+            name: spec.name,
+            bundle_id: spec.bundle_id,
+            app_name: spec.app_name,
+            max_level: spec.max_level,
+            notes: spec.notes,
+            installed: find_installed_bundle(spec.bundle_id, spec.app_name).is_some(),
+            running: app_running_in(&ps_sample, spec.app_name),
+            deep_link: spec.deep_link,
+        })
+        .collect();
+
+    let window_access = window_access_status(&agents);
+
+    JumpDiagnostics {
+        accessibility,
+        automation,
+        window_access,
+        system_events,
+        app_bundle_path: current_app_bundle_path().map(|p| p.display().to_string()),
+        agents,
+    }
+}
+
+/// The window-access pill is a **real read test**: read the window titles of a
+/// running agent app, exactly what L2/L3 need.
+fn window_access_status(agents: &[AgentDiagnostics]) -> DiagnosticStatus {
+    let Some(running) = agents.iter().find(|agent| agent.running) else {
+        return DiagnosticStatus {
+            granted: false,
+            detail: Some("no_running_agent_app".into()),
+        };
+    };
+    let Some(spec) = AGENT_SPECS.iter().find(|spec| spec.key == running.key) else {
+        return DiagnosticStatus {
+            granted: false,
+            detail: Some("no_running_agent_app".into()),
+        };
+    };
+    match ax_window_titles(spec.ax_process) {
+        Some(_) => DiagnosticStatus {
+            granted: true,
+            detail: None,
+        },
+        None => DiagnosticStatus {
+            granted: false,
+            detail: Some(ax_failure_detail()),
+        },
+    }
+}
+
+/// Harmless System Events query, classified exactly like a jump would classify
+/// the same failure.
+fn automation_status() -> DiagnosticStatus {
+    match run_osascript("tell application \"System Events\" to count processes") {
+        Ok(_) => DiagnosticStatus {
+            granted: true,
+            detail: None,
+        },
+        Err(reason) => DiagnosticStatus {
+            granted: false,
+            detail: Some(match reason.as_str() {
+                "needs_accessibility" | "needs_automation" | "osascript_failed" => reason,
+                _ => "osascript_failed".into(),
+            }),
+        },
+    }
+}
+
+/// `AXIsProcessTrusted()` from ApplicationServices (no extra crate).
+#[cfg(target_os = "macos")]
+fn ax_is_process_trusted() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        /// Carbon `Boolean` (unsigned char): non-zero when the process is trusted.
+        fn AXIsProcessTrusted() -> u8;
+    }
+    // Safety: documented, side-effect-free system query.
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ax_is_process_trusted() -> bool {
+    false
+}
+
+/// One `ps` sample shared by the install/run checks and `system_events`.
+fn sample_ps_commands() -> String {
+    Command::new("ps")
+        .args(["-axo", "command="])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Is the app bundle's main executable in the process table? Matching
+/// `<App>.app/Contents/MacOS/` also catches the Electron main process.
+fn app_running_in(ps_sample: &str, app_name: &str) -> bool {
+    let needle = format!("{app_name}.app/Contents/MacOS/");
+    ps_sample.lines().any(|line| line.contains(&needle))
+}
+
+/// LaunchServices (`mdfind` by bundle id) first, then the standard application
+/// directories. The order is pure and unit tested.
+fn find_installed_bundle(bundle_id: &str, app_name: &str) -> Option<PathBuf> {
+    let mdfind_stdout = Command::new("mdfind")
+        .arg(format!("kMDItemCFBundleIdentifier == '{bundle_id}'"))
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+    resolve_installed_bundle(mdfind_stdout.as_deref(), &app_search_dirs(), app_name)
+}
+
+fn app_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join("Applications"));
+    }
+    dirs.push(PathBuf::from("/System/Applications"));
+    dirs
+}
+
+/// Pure install resolution: first `.app` path from `mdfind`, then the app-name
+/// fallback in the given directories (tests pass a temp dir).
+fn resolve_installed_bundle(
+    mdfind_stdout: Option<&str>,
+    search_dirs: &[PathBuf],
+    app_name: &str,
+) -> Option<PathBuf> {
+    if let Some(stdout) = mdfind_stdout {
+        for line in stdout.lines() {
+            let candidate = line.trim();
+            if candidate.ends_with(".app") {
+                return Some(PathBuf::from(candidate));
+            }
+        }
+    }
+    let bundle_name = format!("{app_name}.app");
+    search_dirs
+        .iter()
+        .map(|dir| dir.join(&bundle_name))
+        .find(|path| path.is_dir())
+}
+
+/// Extract the `.app` bundle from a `…/Foo.app/Contents/MacOS/binary` path.
+/// `None` for `cargo run`/unbundled binaries.
+pub fn app_bundle_path_from_exe(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()?.to_str()? != "MacOS" {
+        return None;
+    }
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()?.to_str()? != "Contents" {
+        return None;
+    }
+    let bundle = contents_dir.parent()?;
+    let is_app = bundle
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("app"))
+        .unwrap_or(false);
+    is_app.then(|| bundle.to_path_buf())
+}
+
+/// The running app bundle, or the installed copy when this is a dev binary.
+fn current_app_bundle_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    app_bundle_path_from_exe(&exe)
+        .or_else(|| find_installed_bundle(APP_BUNDLE_ID, "Agent Monitor"))
+}
+
+/// `reveal_app_in_finder` command: reveal the `.app` so the user can drag it
+/// into the Accessibility list. Never opens System Settings itself.
+pub fn reveal_app_in_finder() -> Result<(), String> {
+    let bundle = current_app_bundle_path().ok_or_else(|| "app_bundle_not_found".to_string())?;
+    let path = bundle
+        .to_str()
+        .ok_or_else(|| "app_bundle_path_not_utf8".to_string())?;
+    let status = Command::new("open")
+        .args(["-R", path])
+        .status()
+        .map_err(|err| format!("open_failed: {err}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("open_failed".into())
+    }
+}
+
 
 // ── Public entry ────────────────────────────────────────────────
 
@@ -69,34 +399,74 @@ pub fn jump(task: &TaskRecord) -> JumpOutcome {
     }
     // L1 — application activation.
     match try_app_level(task) {
-        Attempt::Done(mut outcome) => {
-            // App-level activation is always a degradation for a session that
-            // has an identity the user expected to reach.
-            let needs_session = requested > JumpLevel::L1 || task.session_id.is_some();
-            if outcome.reason_key == "activated_app" && needs_session {
-                outcome.kind = JumpOutcomeKind::Degraded;
-                outcome.reason_key = first_error
-                    .clone()
-                    .unwrap_or_else(|| "activated_app_only".into());
-            }
-            outcome
+        Attempt::Done(outcome) => {
+            // Reporting rule: only degrade when the user asked for more than
+            // the app could reach. A declared L1 adapter (DSH) succeeds at L1.
+            let outcome = report_app_level(outcome, requested, first_error.as_deref());
+            apply_permission_hint(outcome, first_error.as_deref())
         }
         Attempt::NotPossible(reason) => {
-            let needs = if reason == "needs_accessibility" {
-                Some(PermissionKind::Accessibility)
-            } else if reason == "needs_automation" {
-                Some(PermissionKind::Automation)
-            } else {
-                None
-            };
+            let permission = permission_kind_from_reason(first_error.as_deref())
+                .or_else(|| permission_kind_from_reason(Some(reason.as_str())));
             let mut outcome =
                 JumpOutcome::failed(&task.id, requested, first_error.as_deref().unwrap_or(&reason));
-            outcome.permission_needed = needs;
-            if needs.is_some() {
+            outcome.permission_needed = permission;
+            if permission.is_some() {
                 outcome.next_step = Some("grant_permission".into());
             }
             outcome
         }
+    }
+}
+
+/// Reporting rule for an L1 result: app-level activation is a **degradation
+/// only when `requested > achieved`**. Before this rule a declared-L1 adapter
+/// (DSH) produced a permanent "degraded" toast even though it reached exactly
+/// its documented maximum.
+fn report_app_level(
+    mut outcome: JumpOutcome,
+    requested: JumpLevel,
+    first_error: Option<&str>,
+) -> JumpOutcome {
+    if outcome.reason_key == "activated_app" && requested > outcome.achieved {
+        outcome.kind = JumpOutcomeKind::Degraded;
+        outcome.reason_key = first_error.unwrap_or("activated_app_only").to_string();
+    }
+    outcome
+}
+
+/// Propagate a missing privacy grant from the failed L3/L2 attempt to the final
+/// L1 outcome, so the toast offers "Grant permission" instead of an unexplained
+/// degradation/focus failure (`docs/JUMP.md`, "Jump outcome fixes").
+fn apply_permission_hint(mut outcome: JumpOutcome, first_error: Option<&str>) -> JumpOutcome {
+    let Some(permission) = permission_kind_from_reason(first_error) else {
+        return outcome;
+    };
+    outcome.permission_needed = Some(permission);
+    outcome.next_step = Some("grant_permission".into());
+    if outcome.kind == JumpOutcomeKind::Unconfirmed {
+        // "focus unconfirmed" is not actionable; the missing grant is. The
+        // frontend maps `needs_accessibility` / `needs_automation` to the toast
+        // text and the grant button.
+        outcome.reason_key = permission_reason_key(permission).to_string();
+    }
+    outcome
+}
+
+/// The `reason_key` the UI already localises for a missing privacy grant.
+fn permission_reason_key(kind: PermissionKind) -> &'static str {
+    match kind {
+        PermissionKind::Accessibility => "needs_accessibility",
+        PermissionKind::Automation => "needs_automation",
+    }
+}
+
+/// Map an attempt-failure reason to the privacy grant the user must give.
+fn permission_kind_from_reason(reason: Option<&str>) -> Option<PermissionKind> {
+    match reason? {
+        "needs_accessibility" => Some(PermissionKind::Accessibility),
+        "needs_automation" => Some(PermissionKind::Automation),
+        _ => None,
     }
 }
 
@@ -314,12 +684,13 @@ fn process_name(task: &TaskRecord) -> String {
         }
     }
     match task.target.bundle_id.as_deref() {
-        Some("com.openai.codex") => "ChatGPT".into(),
-        Some("com.deepseek.dsh") => "DeepSeek Harness".into(),
-        Some("dev.zcode.app") => "ZCode".into(),
-        Some("com.microsoft.VSCode") => "Code".into(),
         Some("com.apple.Terminal") => "Terminal".into(),
-        _ => String::new(),
+        Some(bundle) => AGENT_SPECS
+            .iter()
+            .find(|spec| spec.bundle_id == bundle)
+            .map(|spec| spec.ax_process.to_string())
+            .unwrap_or_default(),
+        None => String::new(),
     }
 }
 
@@ -344,22 +715,26 @@ fn run_osascript(script: &str) -> Result<String, String> {
     }
 }
 
-fn is_permission_error(stderr: &str) -> bool {
-    let s = stderr.to_ascii_lowercase();
-    s.contains("assistive access")
-        || s.contains("not authorized")
-        || s.contains("not allowed")
-        || s.contains("-1743")
-        || s.contains("-25211")
-}
-
-fn permission_reason(stderr: &str) -> &'static str {
+/// Classify an AppleScript failure into the two macOS privacy grants or a
+/// generic failure (pure, unit tested). `-1743` is "not authorized to send
+/// Apple events" (Automation); `-25211` is a denied Accessibility prompt.
+pub fn classify_osascript_error(stderr: &str) -> &'static str {
     let s = stderr.to_ascii_lowercase();
     if s.contains("assistive access") || s.contains("-25211") {
         "needs_accessibility"
-    } else {
+    } else if s.contains("not authorized") || s.contains("not allowed") || s.contains("-1743") {
         "needs_automation"
+    } else {
+        "osascript_failed"
     }
+}
+
+fn is_permission_error(stderr: &str) -> bool {
+    classify_osascript_error(stderr) != "osascript_failed"
+}
+
+fn permission_reason(stderr: &str) -> &'static str {
+    classify_osascript_error(stderr)
 }
 
 thread_local! {
@@ -375,6 +750,14 @@ fn ax_failure_reason() -> &'static str {
         },
         None => "window_state_unavailable",
     })
+}
+
+/// Raw AX failure for diagnostics (`no_process` is useful there, while jumps
+/// collapse it to `window_state_unavailable`).
+fn ax_failure_detail() -> String {
+    AX_FAILURE
+        .with(|f| f.borrow().clone())
+        .unwrap_or_else(|| "window_state_unavailable".to_string())
 }
 
 fn ax_window_titles(process: &str) -> Option<Vec<String>> {
@@ -707,5 +1090,317 @@ mod tests {
         assert_eq!(agent_process_needle("claude-code"), "claude");
         assert_eq!(agent_process_needle("codex"), "codex");
         assert_eq!(agent_process_needle("unknown"), "");
+    }
+
+    // ── Outcome reporting rules (docs/JUMP.md "Jump outcome fixes") ──
+
+    fn app_outcome(
+        kind: JumpOutcomeKind,
+        requested: JumpLevel,
+        achieved: JumpLevel,
+        reason_key: &str,
+    ) -> JumpOutcome {
+        JumpOutcome {
+            task_id: "codex:x".into(),
+            kind,
+            requested,
+            achieved,
+            reason_key: reason_key.into(),
+            detail: None,
+            next_step: None,
+            permission_needed: None,
+        }
+    }
+
+    #[test]
+    fn declared_l1_adapter_reports_success_at_its_maximum() {
+        // DSH: requested == declared max == achieved == L1 → no degraded toast.
+        let dsh = app_outcome(
+            JumpOutcomeKind::Success,
+            JumpLevel::L1,
+            JumpLevel::L1,
+            "activated_app",
+        );
+        let reported = report_app_level(dsh, JumpLevel::L1, Some("no_session_route"));
+        assert_eq!(reported.kind, JumpOutcomeKind::Success);
+        assert_eq!(reported.reason_key, "activated_app");
+    }
+
+    #[test]
+    fn app_activation_below_the_requested_level_is_degraded() {
+        let outcome = app_outcome(
+            JumpOutcomeKind::Success,
+            JumpLevel::L3,
+            JumpLevel::L1,
+            "activated_app",
+        );
+        let reported = report_app_level(outcome.clone(), JumpLevel::L3, Some("needs_accessibility"));
+        assert_eq!(reported.kind, JumpOutcomeKind::Degraded);
+        assert_eq!(reported.reason_key, "needs_accessibility");
+
+        // Without a deeper error the generic reason is used.
+        let generic = report_app_level(outcome, JumpLevel::L2, None);
+        assert_eq!(generic.kind, JumpOutcomeKind::Degraded);
+        assert_eq!(generic.reason_key, "activated_app_only");
+
+        // Unconfirmed outcomes are not reclassified by this rule.
+        let unconfirmed = app_outcome(
+            JumpOutcomeKind::Unconfirmed,
+            JumpLevel::L2,
+            JumpLevel::L1,
+            "focus_unconfirmed",
+        );
+        assert_eq!(
+            report_app_level(unconfirmed, JumpLevel::L2, None).kind,
+            JumpOutcomeKind::Unconfirmed
+        );
+    }
+
+    #[test]
+    fn permission_reasons_map_to_the_grant_the_user_needs() {
+        assert_eq!(
+            permission_kind_from_reason(Some("needs_accessibility")),
+            Some(PermissionKind::Accessibility)
+        );
+        assert_eq!(
+            permission_kind_from_reason(Some("needs_automation")),
+            Some(PermissionKind::Automation)
+        );
+        assert_eq!(permission_kind_from_reason(Some("window_not_found")), None);
+        assert_eq!(permission_kind_from_reason(None), None);
+    }
+
+    #[test]
+    fn missing_grant_is_propagated_to_the_final_unconfirmed_outcome() {
+        // L2/L3 failed on a missing grant and L1 could not be confirmed: the
+        // toast must offer the grant action and name the permission reason.
+        let unconfirmed = app_outcome(
+            JumpOutcomeKind::Unconfirmed,
+            JumpLevel::L3,
+            JumpLevel::L1,
+            "focus_unconfirmed",
+        );
+        let hinted = apply_permission_hint(unconfirmed, Some("needs_accessibility"));
+        assert_eq!(
+            hinted.permission_needed,
+            Some(PermissionKind::Accessibility)
+        );
+        assert_eq!(hinted.next_step.as_deref(), Some("grant_permission"));
+        assert_eq!(hinted.reason_key, "needs_accessibility");
+
+        let automation = apply_permission_hint(
+            app_outcome(
+                JumpOutcomeKind::Unconfirmed,
+                JumpLevel::L2,
+                JumpLevel::L1,
+                "focus_unconfirmed",
+            ),
+            Some("needs_automation"),
+        );
+        assert_eq!(automation.permission_needed, Some(PermissionKind::Automation));
+        assert_eq!(automation.reason_key, "needs_automation");
+
+        // A confirmed degradation keeps its own reason but still carries the
+        // grant action (the app came forward, the window level needs the grant).
+        let degraded = report_app_level(
+            app_outcome(
+                JumpOutcomeKind::Success,
+                JumpLevel::L3,
+                JumpLevel::L1,
+                "activated_app",
+            ),
+            JumpLevel::L3,
+            Some("needs_accessibility"),
+        );
+        let hinted = apply_permission_hint(degraded, Some("needs_accessibility"));
+        assert_eq!(hinted.kind, JumpOutcomeKind::Degraded);
+        assert_eq!(hinted.reason_key, "needs_accessibility");
+        assert_eq!(hinted.next_step.as_deref(), Some("grant_permission"));
+
+        // Unrelated errors are left untouched.
+        let untouched = apply_permission_hint(
+            app_outcome(
+                JumpOutcomeKind::Unconfirmed,
+                JumpLevel::L3,
+                JumpLevel::L1,
+                "focus_unconfirmed",
+            ),
+            Some("window_not_found"),
+        );
+        assert_eq!(untouched.permission_needed, None);
+        assert_eq!(untouched.next_step, None);
+        assert_eq!(untouched.reason_key, "focus_unconfirmed");
+    }
+
+    #[test]
+    fn osascript_error_classification_covers_both_grants() {
+        assert_eq!(
+            classify_osascript_error("osascript is not allowed assistive access."),
+            "needs_accessibility"
+        );
+        assert_eq!(
+            classify_osascript_error("Not authorized to send Apple events to System Events."),
+            "needs_automation"
+        );
+        assert_eq!(
+            classify_osascript_error("execution error: System Events got an error: -1743"),
+            "needs_automation"
+        );
+        assert_eq!(
+            classify_osascript_error("some unrelated failure"),
+            "osascript_failed"
+        );
+    }
+
+    // ── Diagnostics helpers ─────────────────────────────────────
+
+    #[test]
+    fn app_bundle_path_is_extracted_only_from_contents_macos_binaries() {
+        assert_eq!(
+            app_bundle_path_from_exe(Path::new(
+                "/Applications/Agent Monitor.app/Contents/MacOS/agent-monitor"
+            )),
+            Some(PathBuf::from("/Applications/Agent Monitor.app"))
+        );
+        // cargo run / unbundled binaries have no .app ancestor.
+        assert_eq!(
+            app_bundle_path_from_exe(Path::new("/Users/x/src-tauri/target/debug/agent-monitor")),
+            None
+        );
+        // A helper inside Contents/Resources is not the bundle root.
+        assert_eq!(
+            app_bundle_path_from_exe(Path::new(
+                "/Applications/Foo.app/Contents/Resources/helper"
+            )),
+            None
+        );
+        assert_eq!(app_bundle_path_from_exe(Path::new("/Applications/Foo/Contents/MacOS/x")), None);
+    }
+
+    #[test]
+    fn installed_bundle_prefers_mdfind_then_falls_back_to_app_dirs() {
+        let dir = std::env::temp_dir().join(format!(
+            "am-jump-installed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ChatGPT.app")).unwrap();
+        let dirs = vec![dir.clone()];
+
+        // LaunchServices wins when it reports a bundle.
+        assert_eq!(
+            resolve_installed_bundle(Some("/Applications/ChatGPT.app\n"), &dirs, "ChatGPT"),
+            Some(PathBuf::from("/Applications/ChatGPT.app"))
+        );
+        // Fallback: <dir>/<App name>.app exists.
+        assert_eq!(
+            resolve_installed_bundle(None, &dirs, "ChatGPT"),
+            Some(dir.join("ChatGPT.app"))
+        );
+        // Not installed anywhere we looked.
+        assert_eq!(resolve_installed_bundle(None, &dirs, "ZCode"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn running_detection_matches_the_app_bundle_path() {
+        let ps_sample = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT --flag\n/usr/bin/foo";
+        assert!(app_running_in(ps_sample, "ChatGPT"));
+        assert!(!app_running_in(ps_sample, "ZCode"));
+        assert!(app_running_in(
+            "/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+            "Visual Studio Code"
+        ));
+    }
+
+    #[test]
+    fn static_agent_map_matches_the_documented_contract() {
+        let spec = |key: &str| AGENT_SPECS.iter().find(|spec| spec.key == key).unwrap();
+        assert_eq!(spec("codex").bundle_id, "com.openai.codex");
+        assert_eq!(spec("codex").app_name, "ChatGPT");
+        assert_eq!(spec("codex").max_level, JumpLevel::L3);
+        assert!(spec("codex").deep_link);
+
+        assert_eq!(spec("dsh").bundle_id, "com.deepseek.dsh");
+        assert_eq!(spec("dsh").app_name, "DeepSeek Harness");
+        assert_eq!(spec("dsh").max_level, JumpLevel::L1);
+        assert!(!spec("dsh").deep_link);
+
+        assert_eq!(spec("zcode").bundle_id, "dev.zcode.app");
+        assert_eq!(spec("zcode").app_name, "ZCode");
+        assert!(!spec("zcode").deep_link);
+
+        assert_eq!(spec("claude-code").bundle_id, "com.microsoft.VSCode");
+        assert_eq!(spec("claude-code").app_name, "Visual Studio Code");
+        assert_eq!(spec("claude-code").ax_process, "Code");
+        assert_eq!(spec("claude-code").max_level, JumpLevel::L2);
+        assert!(!spec("claude-code").deep_link);
+    }
+
+    #[test]
+    fn diagnostics_serialise_the_documented_shape() {
+        let diagnostics = JumpDiagnostics {
+            accessibility: DiagnosticStatus {
+                granted: false,
+                detail: None,
+            },
+            automation: DiagnosticStatus {
+                granted: true,
+                detail: None,
+            },
+            window_access: DiagnosticStatus {
+                granted: false,
+                detail: Some("needs_accessibility".into()),
+            },
+            system_events: true,
+            app_bundle_path: Some("/Applications/Agent Monitor.app".into()),
+            agents: vec![AgentDiagnostics {
+                key: "codex",
+                name: "Codex",
+                bundle_id: "com.openai.codex",
+                app_name: "ChatGPT",
+                max_level: JumpLevel::L3,
+                notes: "codex://threads/<id>",
+                installed: true,
+                running: true,
+                deep_link: true,
+            }],
+        };
+        let json = serde_json::to_value(&diagnostics).unwrap();
+        for key in [
+            "accessibility",
+            "automation",
+            "window_access",
+            "system_events",
+            "app_bundle_path",
+            "agents",
+        ] {
+            assert!(json.get(key).is_some(), "missing key {key} in {json}");
+        }
+        assert_eq!(json["accessibility"]["granted"], false);
+        assert_eq!(json["automation"]["granted"], true);
+        assert_eq!(json["window_access"]["detail"], "needs_accessibility");
+        for key in [
+            "key",
+            "name",
+            "bundle_id",
+            "app_name",
+            "max_level",
+            "notes",
+            "installed",
+            "running",
+            "deep_link",
+        ] {
+            assert!(
+                json["agents"][0].get(key).is_some(),
+                "missing agent key {key} in {}",
+                json["agents"][0]
+            );
+        }
+        assert_eq!(json["agents"][0]["max_level"], "L3");
     }
 }

@@ -85,3 +85,69 @@ osascript -e 'tell application "System Events" to tell process "Code" to get tit
 # ZCode launch probe (documents the blocker)
 open -b dev.zcode.app; sleep 3; pgrep -fl 'ZCode.app/Contents/MacOS/ZCode' || echo "no ZCode process"
 ```
+
+## Setup, permissions and self-check (Settings → Jump)
+
+Jumping needs two macOS privacy grants for **Agent Monitor.app**; without them
+the app can still show sessions, but it cannot locate/raise the right window:
+
+| Grant | System Settings pane | Needed for |
+|---|---|---|
+| **Accessibility** | Privacy & Security → Accessibility | reading window titles / raising a window (`AXRaise`) |
+| **Automation** (→ System Events) | Privacy & Security → Automation | the `osascript` calls that drive System Events |
+
+The packaged app is **ad-hoc signed** (`codesign -dv` shows `Signature=adhoc`).
+macOS keys TCC grants to the code signature, so after rebuilding/replacing
+`Agent Monitor.app` the grants may be forgotten — re-add the new copy once. This
+is the most common reason "jump suddenly stopped working".
+
+### Settings → Jump now contains a guided setup
+
+* status pills for Accessibility / Automation / window access, refreshed by a
+  **Check again** button;
+* buttons that open the exact System Settings pane (`open_permission_settings`)
+  and reveal the app bundle in Finder (`reveal_app_in_finder`) so it can be
+  dragged into the Accessibility list;
+* a three-step first-run guide and a note about ad-hoc re-authorisation;
+* the per-agent capability table (max level, installed/running, deep-link
+  support) so declared limitations (DSH L1, ZCode blocked) are visible in the
+  app instead of only in this document.
+
+### Command `get_jump_diagnostics`
+
+```jsonc
+{
+  "accessibility": { "granted": false, "detail": null },
+  "automation":    { "granted": true,  "detail": null },
+  "window_access": { "granted": false, "detail": "needs_accessibility" },
+  "system_events": true,
+  "app_bundle_path": "/Applications/Agent Monitor.app",
+  "agents": [{
+    "key": "codex", "name": "Codex",
+    "bundle_id": "com.openai.codex", "app_name": "ChatGPT",
+    "max_level": "L3", "notes": "codex://threads/<id> route; verified …",
+    "installed": true, "running": true, "deep_link": true
+  }]
+}
+```
+
+* `accessibility` uses `AXIsProcessTrusted()` (ApplicationServices, no extra crate);
+* `automation` runs a harmless System Events process query and classifies the
+  error (`needs_accessibility` / `needs_automation` / `osascript_failed`);
+* `window_access` is the real read test (window titles of a running agent app);
+  it is what L2/L3 actually need;
+* `installed` uses LaunchServices (`mdfind` by bundle id) with `/Applications`
+  fallbacks; `running` matches the app's process path from `ps`;
+* `deep_link` is the adapter capability, not a promise that the host supports it.
+
+`--jump-diagnostics` prints the same JSON headlessly for support tickets.
+
+### Jump outcome fixes (same release)
+
+* An L1-only adapter (DSH) reports **success** at its declared maximum level
+  instead of a permanent "degraded" toast; degradation is now
+  `requested > achieved`.
+* When the L2/L3 attempts fail because of a missing privacy grant, the final
+  outcome carries `permission_needed` + `next_step: "grant_permission"` even if
+  the app itself was activated, so the toast offers the grant button instead of
+  an unexplained "focus unconfirmed".

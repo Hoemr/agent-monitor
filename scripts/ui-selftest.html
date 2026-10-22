@@ -62,6 +62,34 @@ function completedOnly(activitySecs) {
     }]
   };
 }
+// Snapshot carrying `n` blocking questions (waiting_input / waiting_approval)
+// plus one running session, matching the shape Rust now sends.
+function questionFixture(n, attentionCount) {
+  var now = Math.floor(Date.now() / 1000);
+  var tasks = [{
+    id: 'q:running', agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
+    title: 'Running background task', status: 'running', status_reason: 'fixture',
+    last_activity_secs: now - 5, collected_at_secs: now, summary: null,
+    origin: 'index', target: {}, target_validity: 'valid', invalid_reason: null,
+    capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false
+  }];
+  for (var i = 0; i < n; i++) {
+    tasks.push({
+      id: 'q:ask:' + i, agent_key: 'dsh', agent_name: 'DSH', host: 'desktop',
+      title: 'Blocked on question ' + i,
+      status: i % 2 === 0 ? 'waiting_input' : 'waiting_approval',
+      status_reason: 'ask user question', last_activity_secs: now - 30 - i,
+      collected_at_secs: now, summary: null, origin: 'event', target: {},
+      target_validity: 'valid', invalid_reason: null,
+      capability: { max_level: 'L3', notes: '', requires: [] }, level: 'L3', pinned: false
+    });
+  }
+  return {
+    collected_at_secs: now,
+    attention_count: typeof attentionCount === 'number' ? attentionCount : n,
+    question_count: n, agents: [], tasks: tasks
+  };
+}
 var frame = document.getElementById('frame');
 frame.addEventListener('load', async function () {
   try {
@@ -79,6 +107,12 @@ frame.addEventListener('load', async function () {
     check('mock hooks present', !!T);
     if (!T) { finish(); return; }
     var app = doc.getElementById('app');
+    check('mock fixture carries the waiting-question count',
+      T.snapshot.question_count === 2 &&
+      typeof T.emitAttention === 'function' &&
+      typeof T.setAttentionHold === 'function',
+      'q=' + T.snapshot.question_count +
+      ' emit=' + typeof T.emitAttention + ' hold=' + typeof T.setAttentionHold);
 
     // 1. rows render
     var rows = doc.querySelectorAll('.task');
@@ -616,6 +650,176 @@ frame.addEventListener('load', async function () {
     T.applyPetState({ mode: 'collapsed', edge: 'none' });
     await T.setSettings({ icon_style: 'builtin', new_badge: true });
     T.setMockSnapshot(fixture());
+    await sleep(20);
+
+    // ── Pending-question attention (new) ────────────────────────────
+    // Every snapshot now carries `question_count`; Rust emits
+    // `attention-pending` for NEW blocking questions. The page paints an amber
+    // badge variant + one-shot pulse, a header chip and the aria text, and it
+    // never expands or focuses itself (Rust owns auto_show).
+    T.clearNotice();
+    await T.setSettings({
+      animations: 'system', language: 'en', new_badge: true,
+      auto_dismiss_invalid: false
+    });
+    var badge = doc.getElementById('badge');
+    var headerMeta = doc.getElementById('header-meta');
+    var headerQuestion = doc.getElementById('header-question');
+    check('question chip exists next to the attention count',
+      !!badge && !!headerMeta && !!headerQuestion &&
+      headerQuestion.tagName === 'SPAN' && headerQuestion !== headerMeta,
+      'chip=' + !!headerQuestion);
+
+    // 29. expanded header paints the waiting count in its own amber chip
+    T.setMockSnapshot(questionFixture(2));
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(30);
+    check('expanded header shows the waiting-question chip',
+      headerQuestion.hidden === false &&
+      win.getComputedStyle(headerQuestion).display !== 'none' &&
+      /^2 (waiting|待回答)$/.test(headerQuestion.textContent.trim()),
+      'hidden=' + headerQuestion.hidden + ' text=' + headerQuestion.textContent);
+    check('attention and question counts stay separate',
+      headerMeta.hidden === false && headerMeta !== headerQuestion &&
+      /^2 (need attention|个待处理)$/.test(headerMeta.textContent.trim()) &&
+      headerQuestion.textContent.indexOf(headerMeta.textContent) === -1,
+      'meta=' + headerMeta.textContent + ' question=' + headerQuestion.textContent);
+
+    // 30. chip hides when the snapshot reports zero questions
+    T.setMockSnapshot(questionFixture(0, 1));
+    await sleep(20);
+    check('question chip hides at zero',
+      headerQuestion.hidden === true && headerQuestion.textContent === '',
+      'hidden=' + headerQuestion.hidden + ' text=' + JSON.stringify(headerQuestion.textContent));
+    check('zero questions leaves the attention chip alone',
+      headerMeta.hidden === false, 'metaHidden=' + headerMeta.hidden);
+
+    // 31. collapsed badge: amber question variant + announced count
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    T.setMockSnapshot(questionFixture(2));
+    await sleep(30);
+    var questionBg = rgbaParts(win.getComputedStyle(badge).backgroundColor);
+    var amberToken = tokenColor(win, doc, '--status-waiting');
+    var blueToken = tokenColor(win, doc, '--badge-bg');
+    check('collapsed badge gets the amber question variant',
+      badge.hidden === false && badge.classList.contains('question') &&
+      !!questionBg && !!amberToken &&
+      questionBg.r === amberToken.r && questionBg.g === amberToken.g &&
+      questionBg.b === amberToken.b &&
+      (!blueToken || questionBg.r !== blueToken.r || questionBg.b !== blueToken.b),
+      'class=' + badge.className + ' bg=' + win.getComputedStyle(badge).backgroundColor);
+    check('collapsed pet aria-label/title announce the waiting count',
+      /\b2\b/.test(pet.getAttribute('aria-label') || '') &&
+      /waiting|待回答/.test(pet.getAttribute('aria-label') || '') &&
+      /\b2\b/.test(pet.getAttribute('title') || '') &&
+      /waiting|待回答/.test(pet.getAttribute('title') || ''),
+      'aria=' + pet.getAttribute('aria-label') + ' title=' + pet.getAttribute('title'));
+
+    // 32. attention-pending pulses once, never expands/focuses, then clears
+    T.setAttentionHold(150);
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    var expandBeforeAttention = T.expandCalls.length;
+    var collapseBeforeAttention = T.collapseCalls;
+    T.emitAttention({
+      alerts: [{
+        task_id: 'q:ask:0', agent_key: 'dsh', agent_name: 'DSH',
+        title: 'Blocked on question 0', status: 'waiting_input',
+        status_reason: 'ask user question'
+      }],
+      question_count: 2, auto_show: true
+    });
+    await sleep(40);
+    check('attention-pending starts the one-shot pulse',
+      pet.classList.contains('alerting') && badge.classList.contains('alerting') &&
+      !!T.attention && T.attention.active === true &&
+      T.attention.alerts.length === 1 && T.attention.timerActive === true,
+      'pet=' + pet.classList.contains('alerting') +
+      ' badge=' + badge.classList.contains('alerting') +
+      ' active=' + (T.attention && T.attention.active) +
+      ' alerts=' + (T.attention && T.attention.alerts.length));
+    check('attention-pending never expands or focuses the pet',
+      T.petState.mode === 'collapsed' &&
+      T.expandCalls.length === expandBeforeAttention &&
+      T.collapseCalls === collapseBeforeAttention,
+      'mode=' + T.petState.mode +
+      ' expands=' + (T.expandCalls.length - expandBeforeAttention));
+    await sleep(260);
+    check('pulse clears after the hold, leaving no timer',
+      !pet.classList.contains('alerting') && !badge.classList.contains('alerting') &&
+      !!T.attention && T.attention.active === false && T.attention.timerActive === false,
+      'pet=' + pet.classList.contains('alerting') +
+      ' active=' + (T.attention && T.attention.active) +
+      ' timer=' + (T.attention && T.attention.timerActive));
+
+    // 32b. a rising question_count pulses even without an event
+    T.setMockSnapshot(questionFixture(0, 0));
+    await sleep(20);
+    T.setMockSnapshot(questionFixture(1));
+    await sleep(20);
+    check('a rising question_count pulses without an event',
+      pet.classList.contains('alerting') && badge.classList.contains('alerting'),
+      'pet=' + pet.classList.contains('alerting') +
+      ' badge=' + badge.classList.contains('alerting'));
+    await sleep(260);
+
+    // 33. animations=off suppresses the pulse but keeps the amber count
+    await T.setSettings({ animations: 'off' });
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    T.emitAttention({ alerts: [], question_count: 2, auto_show: false });
+    await sleep(40);
+    check('animations=off suppresses the pulse class',
+      !pet.classList.contains('alerting') && !badge.classList.contains('alerting'),
+      'pet=' + pet.classList.contains('alerting') +
+      ' badge=' + badge.classList.contains('alerting'));
+    check('animations=off keeps the amber question variant',
+      badge.classList.contains('question'),
+      'class=' + badge.className);
+    await sleep(200);
+    await T.setSettings({ animations: 'system' });
+
+    // 34. the event can paint a count before the confirming snapshot lands
+    T.setMockSnapshot(questionFixture(0, 1));
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(20);
+    T.emitAttention({ alerts: [], question_count: 3, auto_show: false });
+    await sleep(30);
+    check('attention-pending paints the count immediately',
+      headerQuestion.hidden === false &&
+      /^3 (waiting|待回答)$/.test(headerQuestion.textContent.trim()),
+      'hidden=' + headerQuestion.hidden + ' text=' + headerQuestion.textContent);
+    await sleep(260);
+    check('the confirming snapshot stays authoritative',
+      headerQuestion.hidden === true,
+      'hidden=' + headerQuestion.hidden + ' text=' + headerQuestion.textContent);
+
+    // 35. the question variant clears once no questions remain
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    T.setMockSnapshot(questionFixture(0, 1));
+    await sleep(20);
+    check('question variant clears when no questions remain',
+      !badge.classList.contains('question') && badge.hidden === false &&
+      headerQuestion.hidden === true,
+      'class=' + badge.className + ' hidden=' + badge.hidden);
+
+    // 36. the edge-hidden tab keeps the amber dot variant (6 px, no text)
+    T.setMockSnapshot(questionFixture(2));
+    T.applyPetState({ mode: 'edge_hidden', edge: 'right' });
+    await sleep(30);
+    var hiddenQuestionBg = rgbaParts(win.getComputedStyle(badge).backgroundColor);
+    check('edge-hidden tab shows the amber question dot',
+      badge.hidden === false && badge.classList.contains('question') &&
+      Math.round(parseFloat(win.getComputedStyle(badge).width)) === 6 &&
+      !!hiddenQuestionBg && !!amberToken &&
+      hiddenQuestionBg.r === amberToken.r &&
+      hiddenQuestionBg.g === amberToken.g &&
+      hiddenQuestionBg.b === amberToken.b,
+      'bg=' + win.getComputedStyle(badge).backgroundColor +
+      ' size=' + win.getComputedStyle(badge).width);
+
+    T.setAttentionHold(4000);
+    await T.setSettings({ animations: 'system', language: 'en', new_badge: true });
+    T.setMockSnapshot(fixture());
+    T.applyPetState({ mode: 'collapsed', edge: 'none' });
     await sleep(20);
 
     // 28. no runtime errors in the mock path
