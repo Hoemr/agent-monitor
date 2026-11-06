@@ -13,7 +13,7 @@ status=0
 
 echo "== desktop pet (src/index.html) =="
 OUT=$("$CHROME" --headless=new --disable-gpu --allow-file-access-from-files \
-  --virtual-time-budget=12000 --dump-dom "file://$PWD/scripts/ui-selftest.html" 2>/dev/null)
+  --virtual-time-budget=20000 --dump-dom "file://$PWD/scripts/ui-selftest.html" 2>/dev/null)
 python3 - "$OUT" <<'PY'
 import html, re, sys
 s = sys.argv[1]

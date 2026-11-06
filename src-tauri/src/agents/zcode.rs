@@ -2,13 +2,27 @@
 //!
 //! Real source: `~/.zcode/v2/tasks-index.sqlite`, table `tasks` — ZCode's own
 //! index of conversations/tasks (task_id, title, task_status, workspace, model,
-//! created_at/updated_at in ms). Read-only, opened with `immutable=1` so a
-//! running ZCode process is never blocked by our reads.
+//! created_at/updated_at in ms). Read-only, opened with `mode=ro` so a running
+//! ZCode process is never blocked by our reads.
 //!
-//! Status vocabulary observed on this machine: `completed`. The application
-//! bundle also references `running`, `pending`, `failed`, `cancelled`; those
-//! mappings are implemented but marked 待验证 in docs/CAPABILITIES.md until a
-//! live record is observed.
+//! The database is WAL-mode: between checkpoints, committed rows live in
+//! `tasks-index.sqlite-wal`. `immutable=1` silently ignores that sidecar and
+//! serves a stale snapshot, so we open WAL-aware (`mode=ro`) and fingerprint
+//! the `-wal`/`-shm` mtimes too — the main file's mtime only moves when ZCode
+//! checkpoints. When no writer is around to serve a read-only WAL open
+//! (crashed app, leftover `-wal`), we fall back to a private db+wal copy.
+//!
+//! Status vocabulary observed on this machine: a live session keeps
+//! `task_status` NULL/empty and only gets `'completed'` stamped when the task
+//! ends. An empty status with fresh `updated_at` therefore means Running
+//! (ZCode touches the row on every turn); an empty status with no activity
+//! for `ACTIVE_FRESHNESS_SECS` stays honestly Unknown — a crashed session and
+//! an idle one look identical in the index. The application bundle also
+//! references `running`, `pending`, `failed`, `cancelled`; those mappings are
+//! implemented but marked 待验证 in docs/CAPABILITIES.md until observed.
+//!
+//! Model ids arrive provider-scoped (`account:zai-start-plan/GLM-5.3-Flash`);
+//! only the model name after the last `/` is displayed.
 
 use super::{retention_keeps, truncate_chars, ScanCtx, Source};
 use crate::model::*;
@@ -18,6 +32,12 @@ use std::path::{Path, PathBuf};
 const APP_NAME: &str = "ZCode";
 const BUNDLE_ID: &str = "dev.zcode.app";
 const PROCESS_NEEDLE: &str = "ZCode.app/Contents/MacOS/ZCode";
+
+/// A live ZCode session touches its index row on every turn, so an empty
+/// `task_status` counts as Running only while `updated_at` is this fresh.
+/// Long enough to ride out a slow tool call, short enough that a finished
+/// turn does not linger as "running" for ages.
+const ACTIVE_FRESHNESS_SECS: u64 = 300;
 
 struct TaskRow {
     workspace_path: String,
@@ -30,14 +50,14 @@ struct TaskRow {
 }
 
 pub struct ZCodeSource {
-    db_mtime: u64,
+    db_fingerprint: u64,
     rows: Vec<TaskRow>,
 }
 
 impl ZCodeSource {
     pub fn new() -> Self {
         Self {
-            db_mtime: 0,
+            db_fingerprint: 0,
             rows: Vec::new(),
         }
     }
@@ -46,15 +66,66 @@ impl ZCodeSource {
         super::home_dir().map(|h| h.join(".zcode/v2/tasks-index.sqlite"))
     }
 
+    /// Fingerprint that changes whenever the index content can have changed.
+    /// WAL mode writes land in `tasks-index.sqlite-wal`; the main database
+    /// file's mtime only moves on checkpoint, so watching it alone hides
+    /// live updates between checkpoints.
+    fn db_fingerprint() -> Option<u64> {
+        let db = Self::db_path()?;
+        let base = db.to_string_lossy().into_owned();
+        let mut newest = super::file_mtime_secs(&db);
+        for suffix in ["-wal", "-shm"] {
+            newest = newest.max(super::file_mtime_secs(&PathBuf::from(format!(
+                "{base}{suffix}"
+            ))));
+        }
+        Some(newest)
+    }
+
+    /// WAL-aware read-only open: `mode=ro` sees committed WAL content without
+    /// blocking the writer. (`immutable=1` was wrong here — it ignores the
+    /// WAL and serves a stale snapshot.) A read-only connection cannot
+    /// recover a WAL when no writer is around (crashed app, leftover
+    /// `-wal`), and that failure only surfaces at first query — hence the
+    /// probe below. Fall back to a private db+wal copy for that case.
     fn open_ro(path: &Path) -> Option<Connection> {
-        let uri = format!("file:{}?immutable=1", uri_path(path));
-        Connection::open_with_flags(
-            uri,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok()
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let uri = format!("file:{}?mode=ro", uri_path(path));
+        if let Ok(conn) = Connection::open_with_flags(uri, flags) {
+            if conn
+                .query_row("select count(*) from sqlite_master", [], |_| Ok(()))
+                .is_ok()
+            {
+                return Some(conn);
+            }
+        }
+        Self::open_private_copy(path)
+    }
+
+    /// Copy db + wal to a scratch directory and open the copy read-write so
+    /// SQLite performs WAL recovery there; the original stays untouched.
+    fn open_private_copy(path: &Path) -> Option<Connection> {
+        let dir = std::env::temp_dir().join(format!("agent-monitor-zcode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        let base = path.to_string_lossy().into_owned();
+        let mut copied = false;
+        for suffix in ["", "-wal"] {
+            let src = PathBuf::from(format!("{base}{suffix}"));
+            if src.exists() {
+                let dst = dir.join(format!("tasks-index.sqlite{suffix}"));
+                if std::fs::copy(&src, &dst).is_err() {
+                    return None;
+                }
+                copied = true;
+            }
+        }
+        if !copied {
+            return None;
+        }
+        Connection::open(dir.join("tasks-index.sqlite")).ok()
     }
 
     fn reload(&mut self) {
@@ -103,7 +174,7 @@ fn uri_path(path: &Path) -> String {
 fn map_status(s: &str) -> (TaskStatus, String) {
     let key = s.trim().to_ascii_lowercase();
     match key.as_str() {
-        "completed" | "complete" | "done" => {
+        "completed" => {
             (TaskStatus::Completed, "task_status = completed".into())
         }
         "failed" | "error" => (TaskStatus::Failed, "task_status = failed".into()),
@@ -120,8 +191,45 @@ fn map_status(s: &str) -> (TaskStatus, String) {
             format!("task_status = {key}"),
         ),
         "idle" => (TaskStatus::Idle, "task_status = idle".into()),
-        "" => (TaskStatus::Unknown, "task_status is empty".into()),
         other => (TaskStatus::Unknown, format!("unmapped task_status = {other}")),
+    }
+}
+
+/// Status decision for one indexed row. ZCode keeps `task_status` NULL/empty
+/// while a session is live and stamps `'completed'` only when it ends, so an
+/// empty status with fresh `updated_at` means Running — anything else would
+/// misreport every in-flight session as Unknown and let retention age it out.
+/// Once activity goes quiet we honestly report Unknown: a crashed session and
+/// an idle one look identical in the index.
+fn map_row_status(task_status: &str, updated_secs: u64, now_secs: u64) -> (TaskStatus, String) {
+    if task_status.trim().is_empty() {
+        let age = now_secs.saturating_sub(updated_secs);
+        if age <= ACTIVE_FRESHNESS_SECS {
+            (
+                TaskStatus::Running,
+                format!("task_status empty, updated {age}s ago (live session)"),
+            )
+        } else {
+            (
+                TaskStatus::Unknown,
+                format!("task_status empty, no activity for {age}s"),
+            )
+        }
+    } else {
+        map_status(task_status)
+    }
+}
+
+/// Short display model name. ZCode records provider-scoped ids like
+/// `account:zai-start-plan/GLM-5.3-Flash`; the account/plan qualifier is
+/// noise in a pet row, so only the model name after the last `/` is shown.
+/// Plain ids pass through unchanged.
+fn short_model(model: &str) -> String {
+    let trimmed = model.trim();
+    let without_account = trimmed.strip_prefix("account:").unwrap_or(trimmed);
+    match without_account.rsplit_once('/') {
+        Some((_, name)) if !name.is_empty() => name.to_string(),
+        _ => without_account.to_string(),
     }
 }
 
@@ -164,26 +272,24 @@ impl Source for ZCodeSource {
     }
 
     fn invalidate(&mut self) {
-        self.db_mtime = 0;
+        self.db_fingerprint = 0;
     }
 
     fn scan(&mut self, ctx: &ScanCtx) -> Vec<TaskRecord> {
-        let Some(db) = Self::db_path() else {
-            return Vec::new();
-        };
-        let mtime = super::file_mtime_secs(&db);
-        if mtime != self.db_mtime {
+        let fingerprint = Self::db_fingerprint().unwrap_or(0);
+        if fingerprint != self.db_fingerprint {
             self.reload();
-            self.db_mtime = mtime;
+            self.db_fingerprint = fingerprint;
         }
         let app_alive = ctx.processes.any(PROCESS_NEEDLE) || ctx.processes.any(APP_NAME);
         let mut out = Vec::new();
         for row in self.rows.iter() {
             let updated = row.updated_at / 1000;
-            let (status, reason) = map_status(&row.task_status);
+            let (status, reason) = map_row_status(&row.task_status, updated, ctx.now_secs);
             // Active rows are exempt inside `keeps_row`; ended ones must be
             // inside the configured retention window.
-            if !keeps_row(status, updated, ctx.now_secs, ctx.retention_secs) {
+            if !ctx.pinned_ids.contains(&format!("zcode:{}", row.task_id))
+                && !keeps_row(status, updated, ctx.now_secs, ctx.retention_secs) {
                 continue;
             }
             let workspace = Path::new(&row.workspace_path);
@@ -196,14 +302,6 @@ impl Source for ZCodeSource {
             } else {
                 truncate_chars(row.title.trim(), 120)
             };
-            let summary = if row.model.is_empty() {
-                None
-            } else {
-                Some(truncate_chars(
-                    row.model.rsplit('/').next().unwrap_or(&row.model),
-                    40,
-                ))
-            };
             let mut record = TaskRecord {
                 id: format!("zcode:{}", row.task_id),
                 agent_key: "zcode".into(),
@@ -213,10 +311,13 @@ impl Source for ZCodeSource {
                 task_id: Some(row.task_id.clone()),
                 title,
                 status,
+                completion_id: Some(row.task_id.clone()),
+                completion: (status == TaskStatus::Completed).then_some(CompletionEvidence::TaskIndex),
                 status_reason: reason,
                 last_activity_secs: updated,
                 collected_at_secs: ctx.now_secs,
-                summary,
+                summary: None,
+                model: (!row.model.trim().is_empty()).then(|| short_model(&row.model)),
                 origin: DataOrigin::Index,
                 target: JumpTarget {
                     app_name: Some(APP_NAME.into()),
@@ -269,10 +370,63 @@ mod tests {
     }
 
     #[test]
+    fn empty_status_with_fresh_activity_is_running() {
+        // Live sessions keep task_status NULL; only freshness tells them
+        // apart from abandoned ones.
+        let now = 2_000_000;
+        let (status, reason) = map_row_status("", now - 10, now);
+        assert_eq!(status, TaskStatus::Running);
+        assert!(reason.contains("live session"));
+        // Boundary: exactly ACTIVE_FRESHNESS_SECS old still counts as live.
+        assert_eq!(
+            map_row_status("", now - ACTIVE_FRESHNESS_SECS, now).0,
+            TaskStatus::Running
+        );
+    }
+
+    #[test]
+    fn empty_status_without_activity_stays_unknown() {
+        let now = 2_000_000;
+        let (status, reason) = map_row_status("", now - ACTIVE_FRESHNESS_SECS - 1, now);
+        assert_eq!(status, TaskStatus::Unknown);
+        assert!(reason.contains("no activity"));
+        // A stale row is subject to retention like other ended tasks —
+        // regression guard: it must not be reported as Running to dodge it.
+        assert!(!keeps_row(status, now - 10 * 3_600, now, 3_600));
+    }
+
+    #[test]
+    fn fresh_running_rows_survive_retention() {
+        // An in-flight session must never be aged out while it keeps moving.
+        let now = 2_000_000;
+        let (status, _) = map_row_status("", now - 30, now);
+        assert_eq!(status, TaskStatus::Running);
+        assert!(keeps_row(status, 0, now, 3_600));
+    }
+
+    #[test]
+    fn model_display_drops_account_prefix_but_keeps_the_name() {
+        assert_eq!(
+            short_model("account:zai-start-plan/GLM-5.3-Flash"),
+            "GLM-5.3-Flash"
+        );
+        assert_eq!(short_model("glm-4.6"), "glm-4.6");
+        assert_eq!(short_model("provider/"), "provider/");
+        assert_eq!(short_model("  "), "");
+    }
+
+    #[test]
     fn pending_is_never_reported_as_waiting_input() {
         let (status, reason) = map_status("pending");
         assert_ne!(status, TaskStatus::WaitingInput);
         assert!(reason.contains("unmapped"));
+    }
+
+    #[test]
+    fn ambiguous_or_step_statuses_are_not_final_task_completion() {
+        for status in ["done", "complete", "step_completed", "tool_completed"] {
+            assert_eq!(map_status(status).0, TaskStatus::Unknown, "{status}");
+        }
     }
 
     #[test]

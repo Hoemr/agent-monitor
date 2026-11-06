@@ -100,6 +100,21 @@ pub fn restart_app(app: AppHandle) {
 
 // ── Core ────────────────────────────────────────────────────────
 
+/// A local certificate must never be replaced by a differently signed release.
+pub(crate) fn require_release_build() -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    require_release_build_at(&executable)
+}
+
+fn require_release_build_at(executable: &std::path::Path) -> Result<(), String> {
+    if executable.parent().and_then(|path| path.parent())
+        .map(|contents| contents.join("Resources/local-signing").is_file()).unwrap_or(false)
+    {
+        return Err("此版本使用固定本机签名，请在本机重新构建更新；在线版本的不同签名会使已保存权限失效。 This locally signed build must be updated with its original signing identity.".into());
+    }
+    Ok(())
+}
+
 /// Build the updater, honouring `AGENT_MONITOR_UPDATE_ENDPOINT` when set.
 fn updater_builder(app: &AppHandle) -> Result<tauri_plugin_updater::UpdaterBuilder, String> {
     let builder = app.updater_builder();
@@ -113,6 +128,7 @@ fn updater_builder(app: &AppHandle) -> Result<tauri_plugin_updater::UpdaterBuild
 
 /// Run one check against the configured (or overridden) endpoints.
 async fn check(app: &AppHandle) -> Result<UpdateCheck, String> {
+    require_release_build()?;
     let current_version = app.package_info().version.to_string();
     let updater = updater_builder(app)?
         .build()
@@ -139,6 +155,7 @@ async fn check(app: &AppHandle) -> Result<UpdateCheck, String> {
 /// Check again, then download + install. Progress is emitted while the bytes
 /// arrive (throttled), `update-installed` after the bundle was swapped.
 async fn install(app: &AppHandle) -> Result<(), String> {
+    require_release_build()?;
     let updater = updater_builder(app)?
         .build()
         .map_err(|err| format!("updater unavailable: {err}"))?;
@@ -196,6 +213,7 @@ async fn install(app: &AppHandle) -> Result<(), String> {
 /// start, check once and emit `update-available` only when there is something
 /// newer. Failures (offline, 404, DNS, TLS) are logged and otherwise ignored.
 pub fn spawn_startup_check(app: &AppHandle) {
+    if require_release_build().is_err() { return; }
     if auto_check_updates(app) && !auto_install_requested() {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -384,6 +402,18 @@ pub fn rfc3339_from_unix(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locally_signed_bundle_cannot_be_overwritten_by_release_updates() {
+        let root = std::env::temp_dir().join(format!("am-signing-guard-{}", std::process::id()));
+        let executable = root.join("Contents/MacOS/agent-monitor");
+        assert!(require_release_build_at(&executable).is_ok());
+        let resources = root.join("Contents/Resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(resources.join("local-signing"), "local").unwrap();
+        assert!(require_release_build_at(&executable).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn update_check_serialises_the_documented_shape() {

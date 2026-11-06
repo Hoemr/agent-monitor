@@ -10,10 +10,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub mod claude_code;
+pub mod antigravity;
 pub mod codex;
 pub mod dsh;
 pub mod simulated;
 pub mod zcode;
+
+/// Explicit interactive tool names, allowing namespace-qualified spellings.
+pub fn is_question_tool(name: &str) -> bool {
+    let name = name.rsplit('.').next().unwrap_or(name);
+    let name = name.rsplit("__").next().unwrap_or(name);
+    matches!(name.to_ascii_lowercase().as_str(),
+        "request_user_input" | "request_user_input_async" | "askuserquestion" | "ask_user_question" | "ask_user")
+}
 
 /// Cheap snapshot of the process table, refreshed at most every 2 s.
 /// Adapters use it to decide whether a host application is still alive
@@ -80,6 +89,7 @@ pub struct ScanCtx {
     pub now_secs: u64,
     pub processes: Arc<ProcessTable>,
     pub retention_secs: u64,
+    pub pinned_ids: Arc<std::collections::HashSet<String>>,
 }
 
 impl ScanCtx {
@@ -88,6 +98,7 @@ impl ScanCtx {
             now_secs,
             processes,
             retention_secs,
+            pinned_ids: Arc::new(std::collections::HashSet::new()),
         }
     }
 }
@@ -96,6 +107,8 @@ impl ScanCtx {
 /// changed (mtime/db checks) and must never spawn per-task timers.
 pub trait Source: Send {
     fn descriptor(&self) -> AgentDescriptor;
+    /// Completed records must include `CompletionEvidence` from the current
+    /// parent task/turn. Monitor rejects unsupported completion claims.
     fn scan(&mut self, ctx: &ScanCtx) -> Vec<TaskRecord>;
 
     /// Force the next `scan` to re-read everything (used after the user clicks
@@ -118,6 +131,9 @@ pub fn build_registry(enabled: &EnabledAgents) -> Vec<Box<dyn Source>> {
     }
     if enabled.zcode {
         sources.push(Box::new(zcode::ZCodeSource::new()));
+    }
+    if enabled.antigravity {
+        sources.push(Box::new(antigravity::AntigravitySource::new()));
     }
     sources
 }
@@ -168,13 +184,12 @@ pub fn truncate_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// Newest activity first — the live conversation the user most recently touched
-/// is always at the top. Status only breaks ties, so the list never "groups" by
-/// state; waiting/failed tasks are still surfaced by the badge + attention bar.
+/// Pinned conversations first, then newest activity within each group.
+/// Status only breaks ties; waiting/failed tasks keep their attention surfaces.
 pub fn sort_tasks(tasks: &mut [TaskRecord]) {
     tasks.sort_by(|a, b| {
-        b.last_activity_secs
-            .cmp(&a.last_activity_secs)
+        b.pinned.cmp(&a.pinned)
+            .then_with(|| b.last_activity_secs.cmp(&a.last_activity_secs))
             .then_with(|| a.status.priority().cmp(&b.status.priority()))
             .then_with(|| a.agent_key.cmp(&b.agent_key))
             .then_with(|| a.id.cmp(&b.id))
@@ -184,6 +199,16 @@ pub fn sort_tasks(tasks: &mut [TaskRecord]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn question_tools_are_explicit_and_allow_namespaces() {
+        for name in ["AskUserQuestion", "functions.request_user_input", "mcp__agent__ask_user_question", "request_user_input_async"] {
+            assert!(is_question_tool(name), "{name}");
+        }
+        for name in ["Read", "Agent", "ask_database", "finish_question"] {
+            assert!(!is_question_tool(name), "{name}");
+        }
+    }
     use crate::model::*;
 
     fn rec(id: &str, status: TaskStatus, activity: u64) -> TaskRecord {
@@ -196,10 +221,13 @@ mod tests {
             task_id: None,
             title: id.into(),
             status,
+            completion_id: Some("100".into()),
+            completion: (status == TaskStatus::Completed).then_some(CompletionEvidence::TaskEnd),
             status_reason: String::new(),
             last_activity_secs: activity,
             collected_at_secs: activity,
             summary: None,
+            model: None,
             origin: DataOrigin::Index,
             target: JumpTarget::default(),
             target_validity: TargetValidity::Valid,
@@ -236,6 +264,17 @@ mod tests {
     }
 
     #[test]
+    fn pinned_group_precedes_recent_tasks_and_is_itself_newest_first() {
+        let mut older = rec("pinned-old", TaskStatus::Completed, 1);
+        let mut newer = rec("pinned-new", TaskStatus::Completed, 2);
+        older.pinned = true;
+        newer.pinned = true;
+        let mut tasks = vec![rec("recent", TaskStatus::Running, 999), older, newer];
+        sort_tasks(&mut tasks);
+        assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["pinned-new", "pinned-old", "recent"]);
+    }
+
+    #[test]
     fn sort_is_deterministic_for_equal_status_and_time() {
         let mut a = vec![rec("b", TaskStatus::Running, 5), rec("a", TaskStatus::Running, 5)];
         sort_tasks(&mut a);
@@ -255,14 +294,14 @@ mod tests {
                 .map(|s| s.descriptor().key)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(keys(&EnabledAgents::default()), vec!["claude-code", "codex", "dsh", "zcode"]);
+        assert_eq!(keys(&EnabledAgents::default()), vec!["claude-code", "codex", "dsh", "zcode", "antigravity"]);
         assert_eq!(
             keys(&EnabledAgents {
                 codex: false,
                 dsh: false,
                 ..Default::default()
             }),
-            vec!["claude-code", "zcode"]
+            vec!["claude-code", "zcode", "antigravity"]
         );
         assert_eq!(
             keys(&EnabledAgents {
@@ -270,13 +309,14 @@ mod tests {
                 claude_code: false,
                 ..Default::default()
             }),
-            vec!["dsh", "zcode"]
+            vec!["dsh", "zcode", "antigravity"]
         );
         assert!(build_registry(&EnabledAgents {
             codex: false,
             dsh: false,
             zcode: false,
             claude_code: false,
+            antigravity: false,
         })
         .is_empty());
     }

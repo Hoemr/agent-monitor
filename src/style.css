@@ -53,7 +53,7 @@
   --badge-question-bg: light-dark(#b25000, #ff9f0a);
   --badge-question-fg: light-dark(#ffffff, #1d1d1f);
 
-  /* Inner-side rounding of the tiny edge-hidden tab (hidden_sliver square). */
+  /* Inner-side rounding of the narrow edge-hidden strip. */
   --tab-radius: min(6px, 40%);
 }
 
@@ -293,6 +293,39 @@ body {
 }
 .pet-icon[hidden] { display: none; }
 
+/* ── Roaming mascot (pet_kind = mascot, docs/PETS.md) ──────────────
+   Rust moves the window every engine tick and emits pet-frame; this side
+   only pins the sprite so its pose anchor sits at the window's anchor slot.
+   Pixel art stays crisp at integer zooms. */
+.mascot-sprite {
+  position: absolute;
+  left: 0;
+  top: 0;
+  image-rendering: pixelated;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  transform-origin: top left;
+}
+.mascot-sprite[hidden] { display: none; }
+/* State-image pets (Familiar packs): the art fills the pet square; the
+   two-frame APNG animates itself in the <img>. */
+.mascot-sprite.state { object-fit: contain; image-rendering: pixelated; }
+/* The pet replaces the capsule artwork but keeps the classic furniture:
+   the three status dots stay (amber/green/red), the glyph/icon/grip/badge
+   go, and the capsule background must not paint behind the sprite (Rust
+   clears the vibrancy material too). */
+#app.mode-mascot #pet {
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+#app.mode-mascot .pet-glyph,
+#app.mode-mascot .pet-icon,
+#app.mode-mascot .pet-grip,
+#app.mode-mascot .badge,
+#app.mode-mascot .notice-dot { display: none !important; }
+
 /* Jump-feedback notice while the panel is closed: a text-free dot in the
  * bottom-right corner (the top-left corner is the semantic status cluster). It
  * stays until the notice expires or is acted on. */
@@ -475,6 +508,50 @@ body {
   min-width: 0;
 }
 
+.pin, .rename {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+  height: 20px;
+  margin-right: 4px;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+}
+.pin.active { color: var(--accent); }
+.pin:hover, .pin:focus-visible { background: var(--fill-hover); color: var(--accent); }
+.pin:focus-visible { outline: 1px solid var(--accent); }
+.rename { margin-left: 4px; margin-right: 0; }
+.rename:hover, .rename:focus-visible { color: var(--accent); background: var(--fill-hover); }
+.host { color: var(--text-tertiary); font-size: 10px; }
+.name-dialog {
+  margin: auto;
+  width: calc(100% - 48px);
+  max-width: 340px;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid var(--text-tertiary);
+  border-radius: 12px;
+  background: light-dark(#fafafc, #1c1c1e);
+  color: var(--text-primary);
+  font: inherit;
+}
+.name-dialog::backdrop { background: rgba(0, 0, 0, .35); }
+.name-dialog label { display: block; margin-bottom: 10px; font-weight: 600; }
+.name-dialog input { width: 100%; box-sizing: border-box; padding: 8px; font: inherit; }
+.name-dialog p { font-size: 11px; margin: 8px 0; }
+.name-actions { display: flex; justify-content: flex-end; gap: 16px; }
+.name-error:empty { display: none; }
+.task-model {
+  color: var(--text-secondary);
+  font-size: 10px;
+  min-width: 0;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent {
   display: inline-flex;
   align-items: center;
@@ -512,9 +589,11 @@ body {
 }
 
 /* "Newly completed" row marker: a 6 px green dot before the title. It carries
- * its own aria-label/title (`Newly completed` / `新完成`), so the state is never
+ * an explicit mark-as-read action and label, so the state is never
  * colour-only, and the fixed 64 px row height keeps the list layout stable. */
 .new-dot {
+  position: relative;
+  cursor: pointer;
   flex: 0 0 auto;
   width: 6px;
   height: 6px;
@@ -523,6 +602,9 @@ body {
   background: var(--status-running);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--status-running) 40%, transparent);
 }
+
+.new-dot::after { content: ""; position: absolute; inset: -5px; }
+.new-dot:focus-visible { outline: 2px solid var(--status-running); outline-offset: 4px; }
 
 .status {
   grid-column: 1;
@@ -666,8 +748,8 @@ body {
 .gear-btn svg { display: block; pointer-events: none; }
 .gear-btn:hover { background: var(--fill-hover); color: var(--text-primary); }
 
-/* ── Edge-hidden tab (hidden_sliver × hidden_sliver nub) ───── *
- * Rust parks the window as a small square tab attached to a screen edge, so
+/* ── Edge-hidden strip (width × collapsed size, rotated for top/bottom) ── *
+ * Rust parks the window as a narrow strip attached to a screen edge, so
  * only the inner side looks rounded; the screen-edge side is flush and has no
  * border. Badges shrink to textless dots and the grip becomes a 2×8 px handle.
  */

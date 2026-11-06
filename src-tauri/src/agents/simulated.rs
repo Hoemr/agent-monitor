@@ -49,10 +49,13 @@ impl Source for SimulatedSource {
                 task_id: Some(format!("task-{n}")),
                 title: title.into(),
                 status,
+                completion_id: Some(format!("sim:{secs_ago}")),
+                completion: (status == TaskStatus::Completed).then_some(CompletionEvidence::TaskEnd),
                 status_reason: "fixture event".into(),
                 last_activity_secs: ctx.now_secs.saturating_sub(secs_ago),
                 collected_at_secs: ctx.now_secs,
                 summary: Some(format!("fixture age {age}s")),
+                model: None,
                 origin: DataOrigin::Synthetic,
                 target: JumpTarget {
                     app_name: Some("Simulated Agent".into()),

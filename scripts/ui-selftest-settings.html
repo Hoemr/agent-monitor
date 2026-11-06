@@ -132,6 +132,7 @@ frame.addEventListener('load', async function () {
       'notify_on_question', 'alert_sound', 'auto_show_on_question', 'auto_check_updates',
       'refresh_interval', 'retention_hours', 'enabled_agents.codex',
       'enabled_agents.dsh', 'enabled_agents.zcode', 'enabled_agents.claude_code',
+      'enabled_agents.antigravity',
       'max_visible_rows', 'hover_expand_ms', 'collapse_delay_ms', 'snap_distance',
       'hidden_sliver', 'collapsed_size', 'auto_hide_after_s',
       'edge_hide_enabled', 'animations', 'icon_style', 'toast_on_degraded',
@@ -254,6 +255,14 @@ frame.addEventListener('load', async function () {
 
     // 8. segmented control
     T.selectGroup('monitor');
+    var agySwitch = q('input[data-setting="enabled_agents.antigravity"]');
+    check('Antigravity CLI collection defaults on', !!agySwitch && agySwitch.checked);
+    agySwitch.click();
+    await sleep(60);
+    check('Antigravity CLI collection switch saves independently',
+      lastSetPayload().enabled_agents.antigravity === false && lastSetPayload().enabled_agents.codex === true);
+    q('input[data-setting="enabled_agents.antigravity"]').click();
+    await sleep(60);
     q('input[data-setting="refresh_interval"][data-value="10s"]').click();
     await sleep(60);
     var refreshPayload = lastSetPayload();
@@ -616,12 +625,12 @@ frame.addEventListener('load', async function () {
       /reveal app|显示 App/i.test(staleAlert.textContent),
       staleAlert ? staleAlert.textContent.slice(0, 90) : 'missing');
 
-    // 22d. three-step first-run guide + ad-hoc re-grant note
-    check('first-run guide has three numbered steps and a re-grant note',
+    // 22d. one-time migration guidance and persistent signing identity
+    check('first-run guide explains persistent signing and one-time migration',
       qa('.steps .step').length === 3 &&
       /ad-hoc/i.test(jumpText) && /Accessibility/.test(jumpText) &&
-      /Automation/.test(jumpText) && /update/i.test(jumpText) &&
-      /re-add|re-grant/i.test(jumpText));
+      /Automation/.test(jumpText) && /persistent signing certificate/i.test(jumpText) &&
+      /one new grant/i.test(jumpText));
 
     // 22e. per-agent capability rows come from diagnostics.agents
     var agentRows = qa('.agent-row[data-agent]');
@@ -1011,6 +1020,18 @@ frame.addEventListener('load', async function () {
       T.settings.auto_check_updates === true,
       updateResetEntry ? 'scope=' + updateResetEntry.args.scope : 'not called');
 
+    T.selectGroup('update');
+    T.setLocalBuild(true);
+    var localChecks = count('check_for_update');
+    T.emitOpenUpdatePane();
+    await sleep(30);
+    check('local builds explain their update path without offering online replacement',
+      /Locally maintained version/.test(q('#pane-body').textContent) &&
+      !q('[data-action="update-check"]') &&
+      !q('input[data-setting="auto_check_updates"]') &&
+      count('check_for_update') === localChecks);
+    T.setLocalBuild(false);
+
     // 23. data paths come from get_settings_meta, read-only and focusable
     T.selectGroup('data');
     var paths = qa('.path-value');
@@ -1084,6 +1105,25 @@ frame.addEventListener('load', async function () {
       forbidden.length === 0 &&
       /Changes save automatically/.test(q('#save-hint').textContent),
       'buttons=' + labels.join(','));
+
+    // Character picker: real generated previews load and each choice persists.
+    T.setSettings(Object.assign({}, T.settings, { pet_kind: 'mascot', mascot_pack: 'nailong' }));
+    T.selectGroup('pet');
+    await sleep(80);
+    var choices = qa('input[name="mascot-pack"]').map(function (el) { return el.value; });
+    check('pet picker replaces legacy pixel packs with three characters',
+      ['nailong', 'doraemon', 'tihun', 'british-blue'].every(function (id) { return choices.indexOf(id) !== -1; }) &&
+      choices.indexOf('agent-cat') === -1 && choices.indexOf('byte-slime') === -1,
+      choices.join(','));
+    for (var character of ['nailong', 'doraemon', 'tihun']) {
+      var radio = q('input[name="mascot-pack"][value="' + character + '"]');
+      var preview = radio && radio.closest('label').querySelector('.pack-preview');
+      var loaded = await waitFor(function () { return preview && preview.complete && preview.naturalWidth === 512; });
+      check(character + ' preview loads the transparent artwork', loaded);
+      radio.click();
+      await sleep(35);
+      check(character + ' selection saves immediately', T.settings.mascot_pack === character);
+    }
   } catch (e) {
     check('selftest crashed', false, String(e && e.stack ? e.stack : e));
   }

@@ -24,6 +24,12 @@
       <span id="notice-dot" class="notice-dot" hidden aria-hidden="true"></span>
       <span class="pet-grip" aria-hidden="true"></span>
     </div>
+    <!-- Roaming mascot sprite (pet_kind = mascot): a DIRECT child of #app so
+         its absolute coordinates are window coordinates — nesting it inside
+         #pet (72 px) mis-positioned the 132 px state art and stole its
+         right-clicks. Rust moves this window every engine tick and emits
+         pet-frame; JS only blits the PNG. -->
+    <img id="mascot-sprite" class="mascot-sprite" hidden alt="">
 
     <!-- Expanded popover -->
     <section id="panel" hidden aria-label="Sessions">
@@ -40,6 +46,7 @@
       <footer id="footer">
         <span id="footer-count"></span>
         <span id="footer-hint" class="dim"></span>
+        <button id="mark-all-read" class="link-btn" hidden>Mark all as read</button>
         <button id="settings-btn" class="icon-btn gear-btn" aria-label="Settings" title="Settings">
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round"

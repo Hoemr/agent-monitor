@@ -21,6 +21,7 @@ renders whatever the snapshot contains.
     "last_activity_secs": 1792579593, // epoch seconds of real activity
     "collected_at_secs": 1792580000,
     "summary": "Editing parser.rs",   // may be null
+    "model": "gpt-6.1-sol",           // latest recorded model, may be null
     "origin": "event",                // event|index|cache|synthetic
     "target": {
       "app_name": "ChatGPT",
@@ -46,11 +47,23 @@ renders whatever the snapshot contains.
 }
 ```
 
+`model` is the full latest recorded model id or `null` when the source cannot
+establish it. The row renders it independently of progress-summary visibility.
+Codex uses the latest turn context; DSH uses `modelSelection.lastUsed` (never a
+pending selection); Claude Code uses the latest parent assistant model; ZCode
+exposes the task-index model, whose source does not identify a separate turn.
+
+The pin action calls `set_task_pinned(task_id, pinned)`. Pins persist in
+`pins.json`, precede unpinned tasks, and bypass normal retention filtering.
+Each group remains sorted by most recent activity. Pin/unpin never jumps to the
+conversation or acknowledges its completion.
+
 ## Commands (Tauri `invoke`)
 
 | Command | Args | Returns | Notes |
 |---|---|---|---|
 | `get_snapshot` | — | Snapshot | initial paint |
+| `watch_unread_completions` | `completions: [{task_id, completion_id}]` | — | derived unread versions for native receipt / foreground checks; read state remains in the webview |
 | `refresh` | — | Snapshot | explicit user refresh |
 | `jump_to_task` | `task_id: string` | `Result<JumpOutcome, String>` | **exactly one** jump per click; rejection only on transport failure |
 | `dismiss_task` | `task_id: string` | `boolean` | remove stale/invalid record |
@@ -139,6 +152,21 @@ Settings (abridged; authoritative list in `docs/SETTINGS.md`):
 }
 ```
 
+`completion-viewed` carries `{task_id, completion_id}` for an exactly identified
+foreground conversation or a native Codex read receipt. Codex receipts require
+`first_unread_turn IS NULL` and `last_published_turn` matching the completed
+rollout's turn ID. They work after the user switches away and require no AX
+permission. Missing receipts or an older published turn do not acknowledge the
+answer. Events acknowledge that version only; delayed events cannot acknowledge
+newer completions. Desktop receipt checks use the existing active refresh interval even while the
+pet is hidden. Codex CLI reads are checked from the existing pet heartbeat (~1 s):
+only the foreground Terminal tab's TTY is queried, then its attached processes'
+open rollout files identify the conversation. An exact, unique session and
+completion version are required, and the selected tab is rechecked before the
+read event. OS queries run off the animation thread, with one probe at a time;
+no new task-scan or frontend timer is added. This Terminal route requires
+Automation access to Terminal; inaccessible/ambiguous tabs remain unread.
+
 Events: `tasks-updated` (Snapshot; emitted even while hidden so the collapsed
 “new completions” indicator updates), `pet-state` (PetStateView), `jump-feedback`
 (JumpOutcome, used for tray or keyboard initiated jumps), `settings-changed`
@@ -190,8 +218,8 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   (secondary), one status dot + label, and an optional short summary on the second
   line; time + jump level right-aligned. No uppercase labels and no `A · B · C`
   middle-dot meta strings (summaries use commas).
-* **Ordering**: the snapshot is already sorted by `last_activity_secs` descending
-  (newest conversation first). The UI must render in snapshot order and must not
+* **Ordering**: pinned conversations precede unpinned ones; each group sorts by
+  `last_activity_secs` descending. The UI renders snapshot order and must not
   re-group by status; attention is surfaced by the header count and the coloured
   state dot/Label.
 * **Footer count**: the expanded footer shows how many sessions the current window
@@ -210,22 +238,41 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   one row per task showing agent name, title (ellipsis + `title` tooltip), status
   text **and** icon (not colour alone), relative last-activity time, and
   jump-level hint.
-* “New completions”: `seenAtSecs` is set at boot and refreshed whenever the panel
-  is expanded. There is **no collapsed count ring** any more (removed in 0.7.1);
-  the expanded header shows the count as a chip and every row completed since the
-  last look carries a green dot + “newly completed” label while the panel stays
-  open. The collapsed pet only shows the semantic green status dot (below).
+* “New completions”: read state is stored per task id and stable completion identity in
+  localStorage (`am-completion-reads-v2`). Opening, closing, hovering, refreshing or
+  restarting the panel never acknowledges a completion. A confirmed successful
+  row jump acknowledges only the clicked completion version. Manually viewing a
+  conversation also acknowledges that version when macOS Accessibility identifies
+  the foreground application by NSWorkspace PID/bundle id and its conversation
+  by session reference or exact unique title/selected
+  conversation. App/workspace activation alone, ambiguous titles or unavailable
+  permissions leave the marker intact. Failed, degraded,
+  unconfirmed and transport-failed jumps retain the marker unless an exact foreground
+  conversation match independently confirms viewing. Metadata changes never create a new completion.
+  Answers without a source completion identity do not create unread alerts. A later completion
+  of the same task becomes unread again. Initial installation starts tracking
+  from that moment, without marking the existing history unread. The v2 read
+  store establishes this baseline once on upgrade because old activity-based
+  receipts cannot reliably identify answer versions. There is no
+  collapsed count ring; the expanded header counts unread completions and each
+  unread completed row carries a green dot + “newly completed” label. Clicking
+  that dot explicitly marks just that answer as read without jumping. The
+  collapsed pet keeps its semantic green dot until no unread completions remain.
   `new_badge=false` hides the header chip, the row markers and the green dot.
+  The footer offers “Mark all as read” while unread completions exist. One click
+  acknowledges all currently unread completed versions and saves them without
+  opening conversations. Running tasks and pending questions are untouched;
+  subsequent completions become unread again.
 * Jump notices never render inside the small pet window: the toast is painted only
   while the panel is expanded/dragging. While collapsed/edge-hidden/tray-hidden a
   text-free notice dot (**bottom-right**; amber = degraded, red = failed, blue =
   info) is shown instead, the notice lifetime is extended (~30 s), and expanding
   restores the full toast with its action button. The pending notice is included
   in the collapsed pet's `aria-label`/`title`.
-* Edge-hidden geometry: the window becomes a `hidden_sliver × hidden_sliver`
-  square (8–24 pt) flush with the snapped screen edge — the snapped side is
-  invisible and the two perpendicular sides only expose that small square. The
-  tab keeps its position along the edge, so expanding again grows from there.
+* Edge-hidden geometry: left/right strips are `hidden_sliver × collapsed_size`;
+  top/bottom strips rotate those dimensions. `collapsed_size` is the single
+  along-edge size setting; changing it updates an already-hidden strip too.
+  The strip stays flush with the edge and preserves its along-edge centre.
 * Custom artwork: with `icon_style=custom` and an uploaded image, the collapsed
   pet (and the hidden tab, preferring the `hidden` slot) renders the image
   instead of the built-in glyph; badges stay on top. See `docs/ICONS.md`.
@@ -245,9 +292,9 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   `blur`, which calls `request_collapse(force=true)` immediately — the popover
   behaves like a native menu-bar panel. Hover expansion deliberately never
   focuses the window, preserving the “never steal focus” rule.
-* Optional “hide after snapping” (`auto_hide_after_s > 0`): once the pet rests
+* Optional “hide after snapping” (`auto_hide_after_s > 0` and `edge_hide_enabled=true`): once the pet rests
   collapsed on an edge it hides itself after that many idle seconds by calling
-  the normal `hide_pet` command (edge sliver or tray). Hover/drag/expand cancel
+  `hide_pet(automatic=true)` (visible edge sliver only). Hover/drag/expand cancel
   the one-shot timer; a free-floating pet never auto-hides.
 * No `focus()`, no `setInterval` faster than 30 s; relative times are updated by
   one shared 30 s timer that only rewrites time labels.
@@ -266,10 +313,10 @@ and exposes `window.__AM_SETTINGS_TEST__` for `scripts/ui-selftest-settings.html
   pulse (disabled by `animations=off` / Reduce Motion) and the collapsed pet's
   aria-label/title mention the waiting count. The panel itself is auto-expanded
   by Rust when `auto_show_on_question` is on — the page never focuses the window.
-* New completions are identifiable **in the list**: on opening, the ids completed
-  since the last look are captured and each such row carries a green “newly
-  completed” marker while the panel stays open (the header chip still shows the
-  count; the collapsed green ring is unchanged).
+* New completions are identifiable **in the list**: each unacknowledged completion
+  carries a green marker across panel sessions, until that row's jump succeeds
+  or its exact conversation is manually viewed.
+  `new_badge=false` hides these surfaces without acknowledging them.
 * Collapsed pet status capsule (semantic, can coexist, top-left): a small
   translucent macOS-traffic-light-style vertical capsule (hairline border, inset
   highlight, soft shadow, no `backdrop-filter`) holding three 6 px glass-bead

@@ -1,5 +1,20 @@
 # Acceptance results by phase
 
+## v0.8.0 pre-release verification — 2026-11-06
+
+- `cargo test --release --manifest-path src-tauri/Cargo.toml`: 265 passed,
+  0 failed.
+- `bash scripts/ui-test.sh`: desktop-pet and Settings suites both report
+  `ALL PASS`.
+- JavaScript (`node --check`), shell (`bash -n`) and Python syntax checks passed.
+- Pet pack JSON manifests parse; application, Cargo and lockfile versions agree
+  on 0.8.0; `git diff --check` passed.
+- Public signed packaging is pending the repository's macOS distribution
+  certificate configuration. This verification does not claim a successful
+  public download or an end-to-end update from v0.7.1.
+
+---
+
 Host: macOS 27.0.1 (26A434), arm64, single display 1920×1080 (scale 1).
 Build: `cargo build --release` (Rust 1.99.1, Tauri 2.11.2). Date: 2026-10-21.
 Every command below was executed on this machine; unexecuted items are labelled
@@ -58,12 +73,12 @@ level spread: L1=23  L2=10  L3=7
 | Claude session discovered from `~/.claude/projects/**/*.jsonl` | 10 Claude tasks in the live snapshot |
 | Two parallel sessions not merged | Separate ids `claude-code:<uuid>`; 7+3 rows |
 | Rescan does not duplicate | `stable=true` after two consecutive scans |
-| `tool_use` → running, `end_turn` → completed | `parse_jsonl` mapping + unit test `legacy_status_mapping_is_explicit` |
-| `file-history` 120 s long-thinking rule | Ported unchanged (`session.is_active && status=="done" && silence<120`) |
-| `ide/*.lock` PID liveness | Ported; live run showed `claude-code vscode` host for 3 sessions |
+| `tool_use` → running, parent `end_turn` → completed | Explicit parent final message only; tool calls and sidechain messages cannot complete it |
+| Silence / file-history heuristics | Removed: neither 10 s silence nor file-history timestamps imply completion |
+| Completion evidence required for every adapter | Monitor changes unsupported completion claims to Unknown, including future adapters (unit tested) |
 | Tokens/model/message metadata | Rendered as `summary` (e.g. `OPUS · 12 msg · 34 tok`) |
 | Subagent transcripts excluded | Ported (`fname.contains("subagent")`) |
-| Stale sessions hidden | 6 h retention (24 h for IDE-matched), documented |
+| Stale sessions hidden | User-configured retention window; no separate IDE retention |
 | Tray show/hide/refresh/quit | Rebuilt and exercised (show/hide/reset/refresh/quit menu items exist; show + reset verified); tray is the **only** entry point (Dock icon hidden) |
 | Click-through | **Removed intentionally** (replaced by the pet interaction model) |
 | Language switch en/zh | Frontend dictionaries + footer toggle; UI selftest checks both dictionaries |
@@ -561,3 +576,9 @@ Automation/AppleEvents was not touched. Consequences and handling:
    tests. Repro: open Settings → Desktop Pet → Icon, choose a 144×144 PNG, set
    Icon style = Custom, verify the pet changes immediately; then click another
    app and verify the expanded panel collapses.
+
+## 2026-10-26 real permission and manual-view verification
+
+* Removed the stale Agent Monitor entry from macOS device-control settings and re-added the final dist/Agent Monitor.app, then restarted it. Its own Settings window reported Accessibility and Window Access granted. A shell-launched check is insufficient because its permission context can differ from the running GUI.
+* The user manually opened one unread completed Codex conversation without using a panel jump. The selected row lost its new-completion marker and the unread header changed from 10 to 9; other markers remained. No automated Codex UI navigation was used.
+* Hidden strips now share collapsed_size along the edge; native geometry tests cover all four edges and sizes 48/56/72/96, and UI tests verify immediate setting updates and rotation at the top edge.

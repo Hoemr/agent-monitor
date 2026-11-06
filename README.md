@@ -1,8 +1,26 @@
 # Agent Monitor — desktop pet for multi-agent coding sessions (macOS)
 
+Version **0.8.0**: expressive pixel pets, Antigravity monitoring, pinned and
+renamed conversations, and more reliable session status and jumps.
+See the [release notes](docs/releases/v0.8.0.md).
+
 A small, quiet **menu-bar/tray-only** desktop pet (no Dock icon) that shows every
-parallel coding-agent session in one place — newest activity first — and jumps to
+parallel coding-agent session in one place — pinned conversations first, then recent activity — and jumps to
 the right window/session when you click a task.
+
+Click the pencil beside a session title to give it a custom name. Names are
+saved per session in `session-names.json` in the app data directory and survive
+refreshes and restarts. Save an empty name to restore the source title; naming
+does not change the source conversation or its jump target.
+
+VSCode sessions show a `VSCode` label. Codex distinguishes extension sessions
+from desktop sessions using the rollout originator and reads committed SQLite
+WAL updates. Both VSCode integrations open the workspace and then the specified
+chat through the extension URI. L3 requires an exact session identifier or the
+unique source title in the focused chat webview; otherwise the result reports
+window level only. VSCode may ask permission to open an extension URI. Claude
+Code uses the first user prompt when no explicit title exists. The configured
+history window is unchanged.
 
 It is built to look like a native macOS popover: real **vibrancy material**
 (NSVisualEffectView `popover`), SF system typography, semantic system colours,
@@ -55,7 +73,7 @@ focus (see [`docs/ATTENTION.md`](docs/ATTENTION.md)).
 
 Settings → Jump is now a setup page: live Accessibility / Automation / window-read
 status, buttons that open the exact System Settings pane or reveal the app for the
-Accessibility list, a self-check, the ad-hoc re-grant note and a per-agent
+Accessibility list, a self-check, the one-time signing migration note and a per-agent
 capability table (see [`docs/JUMP.md`](docs/JUMP.md)).
 
 | Attention alerts | Jump permissions & self-check |
@@ -71,8 +89,8 @@ Reset this app's permissions):
 
 ### New completions, status dots & in-app updates (0.7.0)
 
-Opening the panel now marks the rows that completed since your last look with a
-green dot, so you can see *which* sessions are new. While the pet is collapsed a
+Unread completions carry a green dot until that task is opened by a confirmed jump or identified as the foreground conversation; opening
+the panel does not mark any conversation read. While the pet is collapsed a
 three-dot status cluster shows **yellow** (someone is waiting on a question),
 **green** (new completions) and **red** (failed/interrupted sessions) at the same
 time, with the jump-notice dot moved to the bottom-right corner.
@@ -108,7 +126,7 @@ right click opens the menu (localized from the Settings language; `System` follo
 | **Codex** (ChatGPT app + VSCode extension) | `~/.codex/state_5.sqlite` + rollout JSONL + `thread_history_1.sqlite` | thread id | **L3** `codex://threads/<id>` (verified) |
 | **DSH** (DeepSeek Harness) | `~/.dsh/storages/session_projcache/sessions/*.json` | session dir | **L3** — sidebar session click via macOS AX (verified, needs Accessibility) |
 | **ZCode** | `~/.zcode/v2/tasks-index.sqlite` | `task_id` | **blocked** on this host (`ZCode.app` exits immediately); data/mapping implemented |
-| **Claude Code** (`anthropic.claude-code` **VSCode extension**) | `~/.claude/projects/**/*.jsonl`, `file-history/`, `ide/*.lock` | transcript UUID | **L2** — project-precise VSCode window via `code --reuse-window` (verified) |
+| **Claude Code** (`anthropic.claude-code` **VSCode extension**) | `~/.claude/projects/**/*.jsonl` parent-turn events | transcript UUID | **L3** — extension session URI with focused-chat verification; L2 if unconfirmed |
 
 Full matrix with evidence and limitations: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) ·
 jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md).
@@ -138,8 +156,9 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
 * **Project/session-precise jump**: DSH sessions are selected directly in its
   sidebar (macOS AX row match on session title + project/cwd + relative time, then
   a verified synthetic click → L3); VSCode windows are focused by workspace with
-  `code --reuse-window <path>` (the right window even with many projects open,
-  AX raise as fallback) → L2. The current window is checked first, so a session
+  `code --reuse-window <path>`, then the extension URI selects the requested
+  chat. Focused chat identity or a unique source title confirms L3; the project
+  window alone confirms L2. The current window is checked first, so a session
   that is already visible opens without a click.
 * **Jump setup & self-check in Settings → Jump**: live Accessibility /
   Automation / window-read status, one-click buttons to open the exact System
@@ -158,11 +177,17 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
   visible rows with scroll, quiet idle dot. The footer shows
   `visible / total` sessions (e.g. `5 / 119`) so the count matches what the
   window can display.
-* **New-completion indicator**: the expanded header chip shows how many tasks
-  completed since you last looked at the panel, and the rows that are new carry
-  a green “newly completed” dot, so you can see *which* ones changed — not just
-  the count (switchable with `new_badge`; there is no collapsed count ring any
-  more).
+* **Pinned conversations**: use the pin beside a title to keep a conversation at
+  the top, including after restart or beyond the ordinary retention window.
+  Pinning and unpinning do not open the conversation or mark it read.
+* **Latest model**: each row displays the full latest recorded model id. Missing
+  evidence is labelled unknown; a planned future model is never presented as used.
+  DSH sessions whose projection omits the used model read it from actual replies
+  in `~/.dsh/sessions/*/*/session.v4.jsonl.zstd`; unchanged logs are cached.
+* **New-completion indicator**: the expanded header counts unread completions.
+  Each row keeps its green dot across panel opens and restarts until a successful
+  jump or a precisely identified manual conversation view acknowledges it. A later completion of the same task lights
+  it again (switchable with `new_badge`; there is no collapsed count ring).
 * **macOS-style status capsule while collapsed**: a small translucent
   traffic-light capsule at the top-left holds **amber** (a session is waiting on
   a question, gently breathing), **green** (new completions since your last
@@ -178,6 +203,12 @@ jump probes: [`docs/JUMP.md`](docs/JUMP.md) · acceptance: [`docs/ACCEPTANCE.md`
   Settings → Desktop Pet → Icon, and the collapsed pet / hidden tab use your
   artwork — built-in glyph remains the fallback. Spec and extension points:
   [`docs/ICONS.md`](docs/ICONS.md).
+* **Rust pet engine (mascot mode)**: choose Nailoong, Doraemon, Ti Hun or the
+  British blue cat, with artwork that reacts to running tasks, pending questions,
+  completions and quiet time. State-image pets keep the same edge-snapping
+  geometry as the capsule. Imported Shimeji-ee packs can roam, fall, and be
+  dragged and thrown (validated in memory before installation). Architecture,
+  supported subset and pack spec: [`docs/PETS.md`](docs/PETS.md).
   Clicking anywhere outside the expanded popover collapses it immediately (an
   explicit click focuses the panel; hover never steals focus).
   The collapsed/snapped pet size is adjustable (48–96 px) and it can hide itself
@@ -227,6 +258,24 @@ check described above). Full key-by-key contract:
 
 ## Build and run
 
+Codex account homes can be listed in
+`~/Library/Application Support/agent-monitor/codex-homes.json` as a JSON array of
+absolute directories. This is the complete list, including the default
+`~/.codex` directory; restart after editing it. Without this file only the
+default home is read. Each home retains its own database/rollout cache, and
+duplicate thread IDs appear once. Interactive CLI sessions carry a Terminal
+label and activate Terminal at L1 rather than opening a desktop Codex chat.
+
+Antigravity desktop reads `~/.gemini/antigravity/conversation_summaries.db`;
+Antigravity CLI (`agy`) reads the corresponding index under
+`~/.gemini/antigravity-cli`. Both use read-only SQLite with live WAL support and
+per-conversation final-response evidence; empty and child sessions are excluded.
+The Antigravity switch controls both sources. Desktop and CLI conversations stay
+separate, contribute to the same task panel/pet status, and target Antigravity or
+Terminal respectively when clicked (L1; exact-session navigation is unverified).
+Model labels come from the latest parent turn's recorded generator metadata;
+new turns without model evidence show “Model unknown” until the record arrives.
+
 Requirements: macOS 14.5+ (for `light-dark()` appearance support), Rust (stable), Command Line Tools. No Xcode project and
 no Node build step are required.
 
@@ -246,7 +295,8 @@ src-tauri/target/release/agent-monitor --jump 'codex:<thread-id>'
 ### macOS .app bundle
 
 ```bash
-bash scripts/bundle-mac.sh     # → dist/Agent Monitor.app (ad-hoc signed, LSUIElement)
+python3 scripts/sign-mac.py --setup  # once: fixed local identity in login Keychain
+bash scripts/bundle-mac.sh     # → dist/Agent Monitor.app (persistent signature, LSUIElement)
 open "dist/Agent Monitor.app"
 ```
 
@@ -292,7 +342,7 @@ AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
   <workspace>` and then AX window matching.
 * Updates are **full-artifact in-app updates** (like cc-switch), not binary
   deltas: the normal ~9 MB `.app` tarball is downloaded and swapped in place.
-  The bundle is ad-hoc signed, so every update/rebuild can invalidate the
+  An old ad-hoc bundle or a change of signing identity can invalidate the
   Accessibility/Automation grant; System Settings may still show the old
   checkbox. Settings → Jump shows the live status, auto-refreshes on return and
   offers **Request permission** plus a **Reset this app's permissions** action to
@@ -316,10 +366,11 @@ AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
 * Settings P1 items (click-through in collapsed state, tint strength, launch at
   login, global shortcut, diagnostic export) are intentionally **not** in this
   release; reasons and the safe follow-up path are listed in `docs/SETTINGS.md`.
-* The packaged app is **ad-hoc signed**; macOS ties Accessibility/Automation
-  grants to the code signature, so after rebuilding/replacing
-  `Agent Monitor.app` the grants may need to be repeated once (Settings → Jump
-  shows the live status and the exact panes).
+* Local bundles use a persistent certificate stored in the login Keychain.
+  Moving from the old ad-hoc build requires one new permission grant. Subsequent
+  builds keep the same certificate and bundle identifier. Do not delete the key
+  or replace the bundle with a differently signed download. Local builds block
+  online replacement; rebuild them locally instead. See `docs/UPDATING.md`.
 * `retention_hours` now applies uniformly: completing an IDE-hosted Claude Code
   session older than the configured window (default 6 h, previously fixed 24 h
   for IDE sessions) hides it, and ZCode no longer keeps the newest three rows

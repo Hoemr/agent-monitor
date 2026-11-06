@@ -12,7 +12,7 @@ use crate::agents::{self, ProcessTable, ScanCtx, Source};
 use crate::model::{now_millis, AgentDescriptor, Snapshot, TaskRecord, TaskStatus, TargetValidity};
 use crate::settings::EnabledAgents;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -64,6 +64,10 @@ pub struct Monitor {
     /// Where dismissals are persisted. `None` = memory only (used by the
     /// headless `--dump-tasks` paths and by tests that do not care).
     dismissed_path: Option<PathBuf>,
+    pins: HashSet<String>,
+    pins_path: Option<PathBuf>,
+    custom_names: std::collections::BTreeMap<String, String>,
+    custom_names_path: Option<PathBuf>,
     /// The switches the current registry was built from, so a settings save
     /// that did not touch them cannot needlessly rebuild every adapter.
     enabled_agents: EnabledAgents,
@@ -90,7 +94,14 @@ impl Monitor {
     /// The developer-only simulated adapter is appended last exactly as before
     /// (it is env-gated inside `SimulatedSource::enabled`).
     pub fn new(enabled_agents: &EnabledAgents) -> Self {
-        Self::with_sources(build_sources(enabled_agents), enabled_agents.clone())
+        let mut monitor = Self::with_sources(build_sources(enabled_agents), enabled_agents.clone());
+        if let Err(error) = monitor.load_pins(crate::settings::data_dir().join("pins.json")) {
+            eprintln!("pins: {error}");
+        }
+        if let Err(error) = monitor.load_custom_names(crate::settings::data_dir().join("session-names.json")) {
+            eprintln!("session names: {error}");
+        }
+        monitor
     }
 
     fn with_sources(sources: Vec<Box<dyn Source>>, enabled_agents: EnabledAgents) -> Self {
@@ -102,6 +113,10 @@ impl Monitor {
             last_hash: 0,
             dismissed: HashMap::new(),
             dismissed_path: None,
+            pins: HashSet::new(),
+            pins_path: None,
+            custom_names: Default::default(),
+            custom_names_path: None,
             enabled_agents,
             question_fingerprints: HashMap::new(),
             question_alert_at: HashMap::new(),
@@ -157,11 +172,16 @@ impl Monitor {
                 s.invalidate();
             }
         }
-        let ctx = ScanCtx::new(now, self.processes.clone(), retention_secs);
+        let mut ctx = ScanCtx::new(now, self.processes.clone(), retention_secs);
+        ctx.pinned_ids = Arc::new(self.pins.clone());
 
         let mut tasks: Vec<TaskRecord> = Vec::new();
         for source in &mut self.sources {
-            tasks.extend(source.scan(&ctx));
+            for mut task in source.scan(&ctx) {
+                task.enforce_completion();
+                task.pinned = self.pins.contains(&task.id);
+                tasks.push(task);
+            }
         }
 
         // Dismissed records stay hidden until they show new activity. The
@@ -197,7 +217,8 @@ impl Monitor {
         }
 
         agents::sort_tasks(&mut tasks);
-        let snapshot = Snapshot::new(tasks, self.descriptors());
+        let mut snapshot = Snapshot::new(tasks, self.descriptors());
+        snapshot.custom_names = self.custom_names.clone();
         // Detection runs on the *visible* rows only: dismissed tasks were
         // filtered above and disabled agents were never collected.
         self.detect_new_questions(&snapshot.tasks, now);
@@ -247,7 +268,7 @@ impl Monitor {
                 task_id: task.id.clone(),
                 agent_key: task.agent_key.clone(),
                 agent_name: task.agent_name.clone(),
-                title: task.title.clone(),
+                title: self.custom_names.get(&task.id).unwrap_or(&task.title).clone(),
                 status: task.status.key().to_string(),
                 status_reason: task.status_reason.clone(),
             });
@@ -281,6 +302,78 @@ impl Monitor {
     /// call this right after a scan; an empty result means "nothing new".
     pub fn take_new_questions(&mut self) -> Vec<PendingAlert> {
         std::mem::take(&mut self.pending_questions)
+    }
+
+    pub fn load_custom_names(&mut self, path: PathBuf) -> Result<(), String> {
+        self.custom_names_path = Some(path.clone());
+        self.custom_names = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("invalid session-names.json: {e}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(e) => return Err(format!("cannot read session-names.json: {e}")),
+        };
+        Ok(())
+    }
+
+    pub fn set_custom_name(&mut self, id: &str, name: &str) -> Result<(), String> {
+        if !self.snapshot.tasks.iter().any(|task| task.id == id) {
+            return Err("task_gone".into());
+        }
+        let name = name.trim();
+        if name.chars().count() > 120 || name.chars().any(char::is_control) {
+            return Err("Use at most 120 characters on one line.".into());
+        }
+        let mut next = self.custom_names.clone();
+        if name.is_empty() { next.remove(id); } else { next.insert(id.to_string(), name.to_string()); }
+        if let Some(path) = &self.custom_names_path {
+            // Refuse to overwrite an unreadable existing file after a load error.
+            if path.exists() {
+                let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+                serde_json::from_str::<std::collections::BTreeMap<String, String>>(&text).map_err(|e| e.to_string())?;
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let temp = path.with_extension("json.tmp");
+            std::fs::write(&temp, serde_json::to_vec_pretty(&next).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            std::fs::rename(temp, path).map_err(|e| e.to_string())?;
+        }
+        self.custom_names = next;
+        self.snapshot.custom_names = self.custom_names.clone();
+        self.last_hash = 0;
+        Ok(())
+    }
+
+    pub fn load_pins(&mut self, path: PathBuf) -> Result<(), String> {
+        self.pins_path = Some(path.clone());
+        self.pins = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("invalid pins.json: {e}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+            Err(e) => return Err(format!("cannot read pins.json: {e}")),
+        };
+        Ok(())
+    }
+
+    pub fn set_pinned(&mut self, id: &str, pinned: bool) -> Result<(), String> {
+        if !self.snapshot.tasks.iter().any(|task| task.id == id) {
+            return Err("task_gone".into());
+        }
+        let mut next = self.pins.clone();
+        if pinned { next.insert(id.to_string()); } else { next.remove(id); }
+        if let Some(path) = &self.pins_path {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut ids: Vec<_> = next.iter().collect();
+            ids.sort();
+            let temp = path.with_extension("json.tmp");
+            std::fs::write(&temp, serde_json::to_vec(&ids).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            std::fs::rename(temp, path).map_err(|e| e.to_string())?;
+        }
+        self.pins = next;
+        for task in &mut self.snapshot.tasks { task.pinned = self.pins.contains(&task.id); }
+        agents::sort_tasks(&mut self.snapshot.tasks);
+        self.last_hash = 0;
+        Ok(())
     }
 
     pub fn dismiss(&mut self, id: &str) -> bool {
@@ -402,6 +495,10 @@ impl Monitor {
     fn for_tests(sources: Vec<Box<dyn Source>>) -> Self {
         let descriptors: Vec<AgentDescriptor> = sources.iter().map(|s| s.descriptor()).collect();
         Self {
+            pins: HashSet::new(),
+            pins_path: None,
+            custom_names: Default::default(),
+            custom_names_path: None,
             sources,
             processes: Arc::new(ProcessTable {
                 entries: Vec::new(),
@@ -512,10 +609,13 @@ mod tests {
             task_id: None,
             title: id.into(),
             status,
+            completion_id: Some("100".into()),
+            completion: (status == TaskStatus::Completed).then_some(CompletionEvidence::TaskEnd),
             status_reason: "fixture".into(),
             last_activity_secs: activity_secs,
             collected_at_secs: activity_secs,
             summary: None,
+            model: None,
             origin: DataOrigin::Synthetic,
             target: JumpTarget::default(),
             target_validity: TargetValidity::Valid,
@@ -562,6 +662,79 @@ mod tests {
     // ── Registry / injection ────────────────────────────────────
 
     #[test]
+    fn custom_names_survive_scans_restart_and_reset_without_changing_source_titles() {
+        let (path, dir) = temp_path("names");
+        let records = Arc::new(Mutex::new(vec![task("fake:one", TaskStatus::Completed, 100), task("fake:two", TaskStatus::Running, 200)]));
+        let probe = Probe::default();
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.load_custom_names(path.clone()).unwrap();
+        monitor.scan(false, u64::MAX);
+        let hash = monitor.snapshot().render_hash();
+        monitor.set_custom_name("fake:one", "  我的研究  ").unwrap();
+        assert_ne!(hash, monitor.snapshot().render_hash());
+        monitor.scan(false, u64::MAX);
+        assert_eq!(monitor.snapshot().custom_names["fake:one"], "我的研究");
+        assert_eq!(monitor.task("fake:one").unwrap().title, "fake:one");
+        assert!(!monitor.snapshot().custom_names.contains_key("fake:two"));
+        let mut restarted = monitor_with(records, &probe);
+        restarted.load_custom_names(path.clone()).unwrap();
+        restarted.scan(false, u64::MAX);
+        assert_eq!(restarted.snapshot().custom_names["fake:one"], "我的研究");
+        assert!(restarted.set_custom_name("fake:one", &"字".repeat(121)).is_err());
+        assert!(restarted.set_custom_name("missing", "name").is_err());
+        restarted.set_custom_name("fake:one", " ").unwrap();
+        assert!(restarted.snapshot().custom_names.is_empty());
+        assert_eq!(read_entries(&path), serde_json::json!({}));
+        // A failed atomic save must not update the visible name.
+        restarted.custom_names_path = Some(dir.join("missing-parent").join("names.json"));
+        std::fs::write(dir.join("missing-parent"), "file, not directory").unwrap();
+        assert!(restarted.set_custom_name("fake:one", "unsaved").is_err());
+        assert!(restarted.snapshot().custom_names.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pins_survive_restart_and_scans_and_unpin_restores_activity_order() {
+        let (path, dir) = temp_path("pins");
+        let pins = path.with_file_name("pins.json");
+        let records = Arc::new(Mutex::new(vec![
+            task("fake:old", TaskStatus::Completed, 1),
+            task("fake:new", TaskStatus::Running, 100),
+        ]));
+        let probe = Probe::default();
+        let mut monitor = monitor_with(records.clone(), &probe);
+        monitor.load_pins(pins.clone()).unwrap();
+        monitor.scan(false, u64::MAX);
+        monitor.set_pinned("fake:old", true).unwrap();
+        monitor.scan(false, u64::MAX);
+        assert_eq!(monitor.snapshot().tasks[0].id, "fake:old");
+        assert!(monitor.snapshot().tasks[0].pinned);
+        let mut restarted = monitor_with(records, &probe);
+        restarted.load_pins(pins).unwrap();
+        restarted.scan(false, u64::MAX);
+        assert_eq!(restarted.snapshot().tasks[0].id, "fake:old");
+        restarted.set_pinned("fake:old", false).unwrap();
+        restarted.scan(false, u64::MAX);
+        assert_eq!(restarted.snapshot().tasks[0].id, "fake:new");
+        assert!(restarted.set_pinned("missing", true).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn every_adapter_must_provide_final_completion_evidence() {
+        let mut unsupported = task("future:unsupported", TaskStatus::Completed, 100);
+        unsupported.completion = None;
+        let confirmed = task("future:confirmed", TaskStatus::Completed, 100);
+        let records = Arc::new(Mutex::new(vec![unsupported, confirmed]));
+        let mut monitor = monitor_with(records, &Probe::default());
+        monitor.scan(false, u64::MAX);
+        let find = |id| monitor.snapshot().tasks.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(find("future:unsupported").status, TaskStatus::Unknown);
+        assert!(find("future:unsupported").status_reason.contains("unconfirmed"));
+        assert_eq!(find("future:confirmed").status, TaskStatus::Completed);
+    }
+
+    #[test]
     fn scan_carries_the_injected_retention_into_every_adapter() {
         let probe = Probe::default();
         let mut monitor = monitor_with(Arc::new(Mutex::new(Vec::new())), &probe);
@@ -593,7 +766,7 @@ mod tests {
             .iter()
             .map(|d| d.key.clone())
             .collect();
-        assert_eq!(keys, vec!["claude-code", "zcode"]);
+        assert_eq!(keys, vec!["claude-code", "zcode", "antigravity"]);
 
         // Re-applying the same value is a no-op.
         assert!(!monitor.set_enabled_agents(&enabled));
@@ -616,7 +789,7 @@ mod tests {
             .iter()
             .map(|d| d.key.clone())
             .collect();
-        assert_eq!(keys, vec!["claude-code", "dsh"]);
+        assert_eq!(keys, vec!["claude-code", "dsh", "antigravity"]);
     }
 
     // ── Dismissal persistence ───────────────────────────────────

@@ -27,3 +27,6 @@ src-tauri/gen/
 # Local build artifacts
 dist/
 docs/perf/*.csv
+
+# Local pet validation reports (may contain machine-specific data paths)
+output/pet-art/*.txt

@@ -5,7 +5,7 @@
 //! `lib.rs`; this module never talks to Tauri.
 
 use crate::model::{Edge, PetMode, PetPosition, PetPrefs, PetState};
-use crate::settings::Settings;
+use crate::settings::{PetKind, Settings};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -212,22 +212,22 @@ pub fn finish_drag_with(rect: Rect, visible: &Rect, distance: f64) -> (Rect, Edg
     }
 }
 
-/// Hide the pet as a small square tab attached to `edge`.
-///
-/// The tab is `sliver × sliver` points: the snapped side sits flush with the
-/// screen edge (so it reads as invisible), and the two perpendicular sides only
-/// show that small length. The tab keeps the pet's position along the edge so
-/// expanding again grows from where the user left it.
-pub fn hide_tab_rect(rect: Rect, visible: &Rect, edge: Edge, sliver: f64) -> Rect {
-    let size = sliver.max(1.0);
+/// Hide as a narrow strip; its along-edge length follows collapsed_size.
+pub fn hide_tab_rect(rect: Rect, visible: &Rect, edge: Edge, sliver: f64, collapsed_size: f64) -> Rect {
+    let short = sliver.max(1.0);
+    let long = collapsed_size.max(1.0);
+    let (w, h) = match edge {
+        Edge::Top | Edge::Bottom => (long, short),
+        _ => (short, long),
+    };
     let (cx, cy) = rect.center();
-    let along_y = (cy - size / 2.0).clamp(visible.y, (visible.bottom() - size).max(visible.y));
-    let along_x = (cx - size / 2.0).clamp(visible.x, (visible.right() - size).max(visible.x));
+    let along_y = (cy - h / 2.0).clamp(visible.y, (visible.bottom() - h).max(visible.y));
+    let along_x = (cx - w / 2.0).clamp(visible.x, (visible.right() - w).max(visible.x));
     match edge {
-        Edge::Left => Rect::new(visible.x, along_y, size, size),
-        Edge::Right => Rect::new(visible.right() - size, along_y, size, size),
-        Edge::Top => Rect::new(along_x, visible.y, size, size),
-        Edge::Bottom => Rect::new(along_x, visible.bottom() - size, size, size),
+        Edge::Left => Rect::new(visible.x, along_y, w, h),
+        Edge::Right => Rect::new(visible.right() - w, along_y, w, h),
+        Edge::Top => Rect::new(along_x, visible.y, w, h),
+        Edge::Bottom => Rect::new(along_x, visible.bottom() - h, w, h),
         Edge::None => constrain(rect, visible),
     }
 }
@@ -272,6 +272,9 @@ pub struct PetStateView {
     /// True when the window is ordered out (tray-hidden) instead of parked at
     /// the screen edge.
     pub hidden_to_tray: bool,
+    /// True when the collapsed pet is a roaming mascot (docs/PETS.md); the
+    /// frontend then renders the `pet-frame` sprite instead of the capsule.
+    pub mascot: bool,
     pub settings: Settings,
 }
 
@@ -301,6 +304,7 @@ pub fn state_view(state: &PetState, settings: &Settings) -> PetStateView {
         edge: edge_key(state.edge),
         hidden: state.hidden,
         hidden_to_tray: state.mode == PetMode::TrayHidden,
+        mascot: settings.pet_kind == PetKind::Mascot,
         settings: settings.clone(),
     }
 }
@@ -393,30 +397,22 @@ mod tests {
     }
 
     #[test]
-    fn hidden_tab_is_a_sliver_square_flush_with_each_edge() {
-        let vis = Rect::new(0.0, 0.0, 1920.0, 1080.0);
-        let r = Rect::new(1500.0, 400.0, 360.0, 400.0);
-        for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
-            let h = hide_tab_rect(r, &vis, edge, HIDDEN_SLIVER);
-            assert_eq!(h.w, HIDDEN_SLIVER);
-            assert_eq!(h.h, HIDDEN_SLIVER);
-            // The snapped side is flush with the screen edge: nothing of it is
-            // off in a gap, and only the small square is on screen.
-            let visible_w = h.right().min(vis.right()) - h.x.max(vis.x);
-            let visible_h = h.bottom().min(vis.bottom()) - h.y.max(vis.y);
-            assert!(
-                (visible_w - HIDDEN_SLIVER).abs() < 0.001 && (visible_h - HIDDEN_SLIVER).abs() < 0.001,
-                "edge {:?} should expose only a {}px square, got {:?}",
-                edge,
-                HIDDEN_SLIVER,
-                h
-            );
-            match edge {
-                Edge::Left => assert_eq!(h.x, vis.x),
-                Edge::Right => assert_eq!(h.right(), vis.right()),
-                Edge::Top => assert_eq!(h.y, vis.y),
-                Edge::Bottom => assert_eq!(h.bottom(), vis.bottom()),
-                Edge::None => {}
+    fn hidden_strip_matches_collapsed_size_and_stays_flush_with_each_edge() {
+        let visible = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        let rect = Rect::new(1500.0, 400.0, 360.0, 400.0);
+        for size in [48.0, 56.0, 72.0, 96.0] {
+            for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
+                let hidden = hide_tab_rect(rect, &visible, edge, HIDDEN_SLIVER, size);
+                let expected = if matches!(edge, Edge::Left | Edge::Right) { (HIDDEN_SLIVER, size) } else { (size, HIDDEN_SLIVER) };
+                assert_eq!((hidden.w, hidden.h), expected);
+                assert_eq!(constrain(hidden, &visible), hidden);
+                match edge {
+                    Edge::Left => assert_eq!(hidden.x, visible.x),
+                    Edge::Right => assert_eq!(hidden.right(), visible.right()),
+                    Edge::Top => assert_eq!(hidden.y, visible.y),
+                    Edge::Bottom => assert_eq!(hidden.bottom(), visible.bottom()),
+                    Edge::None => unreachable!(),
+                }
             }
         }
     }
@@ -426,7 +422,7 @@ mod tests {
         let vis = Rect::new(0.0, 0.0, 1920.0, 1080.0);
         let r = Rect::new(1848.0, 500.0, 72.0, 72.0);
         let (_, cy) = r.center();
-        let h = hide_tab_rect(r, &vis, Edge::Right, HIDDEN_SLIVER);
+        let h = hide_tab_rect(r, &vis, Edge::Right, HIDDEN_SLIVER, COLLAPSED_SIZE);
         assert!((h.center().1 - cy).abs() < 0.001);
         // And it never leaves the visible frame.
         assert!(h.y >= vis.y && h.bottom() <= vis.bottom());
@@ -437,7 +433,7 @@ mod tests {
         let vis = Rect::new(0.0, 0.0, 1920.0, 1080.0);
         let expanded = (360.0, 400.0);
         for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
-            let hidden = hide_tab_rect(Rect::new(1500.0, 400.0, 360.0, 400.0), &vis, edge, HIDDEN_SLIVER);
+            let hidden = hide_tab_rect(Rect::new(1500.0, 400.0, 360.0, 400.0), &vis, edge, HIDDEN_SLIVER, COLLAPSED_SIZE);
             let out = unhide_rect(hidden, edge, expanded, &vis);
             assert!(out.x >= vis.x - 0.001 && out.right() <= vis.right() + 0.001);
             assert!(out.y >= vis.y - 0.001 && out.bottom() <= vis.bottom() + 0.001);

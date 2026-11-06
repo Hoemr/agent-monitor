@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 pub const SETTINGS_VERSION: u32 = 1;
 pub const MAX_VISIBLE_ROWS_CAP: u32 = 8;
-pub const RETENTION_CHOICES: [u32; 4] = [1, 6, 24, 72];
+pub const RETENTION_CHOICES: [u32; 6] = [1, 6, 24, 72, 168, 720];
 pub const ROW_CHOICES: [u32; 3] = [3, 5, 8];
 pub const HOVER_RANGE: (u64, u64) = (100, 1000);
 pub const COLLAPSE_RANGE: (u64, u64) = (300, 2000);
@@ -142,6 +142,23 @@ impl Default for IconStyle {
     }
 }
 
+/// How the collapsed pet presents itself: the classic capsule or a roaming
+/// Shimeji-style mascot driven by the Rust pet engine (docs/PETS.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PetKind {
+    /// Capsule / bead presentation (the historical behaviour).
+    Classic,
+    /// Roaming mascot: walks, falls, reacts to task state.
+    Mascot,
+}
+
+impl Default for PetKind {
+    fn default() -> Self {
+        PetKind::Classic
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Animations {
@@ -165,6 +182,7 @@ pub struct EnabledAgents {
     pub dsh: bool,
     pub zcode: bool,
     pub claude_code: bool,
+    pub antigravity: bool,
 }
 
 impl Default for EnabledAgents {
@@ -174,6 +192,7 @@ impl Default for EnabledAgents {
             dsh: true,
             zcode: true,
             claude_code: true,
+            antigravity: true,
         }
     }
 }
@@ -185,6 +204,7 @@ impl EnabledAgents {
             "dsh" => self.dsh,
             "zcode" => self.zcode,
             "claude-code" | "claude_code" => self.claude_code,
+            "antigravity" => self.antigravity,
             // Unknown adapters (simulated/future) are never disabled by a
             // settings file that predates them.
             _ => true,
@@ -192,7 +212,7 @@ impl EnabledAgents {
     }
 
     pub fn any(&self) -> bool {
-        self.codex || self.dsh || self.zcode || self.claude_code
+        self.codex || self.dsh || self.zcode || self.claude_code || self.antigravity
     }
 }
 
@@ -241,6 +261,12 @@ pub struct Settings {
     pub animations: Animations,
     /// Built-in glyph vs. uploaded custom images.
     pub icon_style: IconStyle,
+    /// Collapsed-pet presentation: the classic capsule or a roaming Shimeji
+    /// mascot driven by the Rust pet engine (docs/PETS.md).
+    pub pet_kind: PetKind,
+    /// Which mascot pack to use when `pet_kind` is `mascot` (built-in name or
+    /// a directory under `pets/`).
+    pub mascot_pack: String,
 
     // Jump
     pub toast_on_degraded: bool,
@@ -280,6 +306,8 @@ impl Default for Settings {
             edge_hide_enabled: true,
             animations: Animations::System,
             icon_style: IconStyle::Builtin,
+            pet_kind: PetKind::Classic,
+            mascot_pack: "nailong".into(),
             toast_on_degraded: true,
             auto_dismiss_invalid: false,
             auto_check_updates: true,
@@ -294,6 +322,12 @@ impl Settings {
     /// never disagree.
     pub fn normalize(&mut self) {
         self.version = SETTINGS_VERSION;
+        self.mascot_pack = match self.mascot_pack.as_str() {
+            "agent-cat" => "nailong".into(),
+            "byte-slime" => "doraemon".into(),
+            name if name.trim().is_empty() => "nailong".into(),
+            _ => self.mascot_pack.clone(),
+        };
         self.retention_hours = snap_to(self.retention_hours, &RETENTION_CHOICES);
         self.max_visible_rows = snap_to(self.max_visible_rows, &ROW_CHOICES)
             .clamp(1, MAX_VISIBLE_ROWS_CAP);
@@ -589,7 +623,7 @@ mod tests {
             ..Default::default()
         };
         s.normalize();
-        assert_eq!(s.retention_hours, 72);
+        assert_eq!(s.retention_hours, 720);
         assert_eq!(s.max_visible_rows, 8);
         assert_eq!(s.hover_expand_ms, 100);
         assert_eq!(s.collapse_delay_ms, 2000);
@@ -680,6 +714,29 @@ mod tests {
     }
 
     #[test]
+    fn pet_kind_defaults_to_classic_and_fills_the_mascot_pack() {
+        let mut s = Settings::default();
+        s.normalize();
+        assert_eq!(s.pet_kind, PetKind::Classic);
+        assert_eq!(s.mascot_pack, "nailong");
+        // An emptied mascot_pack falls back instead of pointing nowhere.
+        s.mascot_pack = "  ".into();
+        s.normalize();
+        assert_eq!(s.mascot_pack, "nailong");
+        // A user choice survives normalization.
+        s.pet_kind = PetKind::Mascot;
+        s.mascot_pack = "tihun".into();
+        s.normalize();
+        assert_eq!(s.pet_kind, PetKind::Mascot);
+        assert_eq!(s.mascot_pack, "tihun");
+        for (old, new) in [("agent-cat", "nailong"), ("byte-slime", "doraemon")] {
+            s.mascot_pack = old.into();
+            s.normalize();
+            assert_eq!(s.mascot_pack, new);
+        }
+    }
+
+    #[test]
     fn enabled_agents_map_keys_and_keep_unknown_agents_enabled() {
         let mut s = EnabledAgents::default();
         assert!(s.enabled("codex") && s.enabled("claude-code"));
@@ -690,6 +747,9 @@ mod tests {
         s.codex = false;
         s.dsh = false;
         s.zcode = false;
+        assert!(s.enabled("antigravity"));
+        s.antigravity = false;
+        assert!(!s.enabled("antigravity"));
         assert!(!s.any());
     }
 

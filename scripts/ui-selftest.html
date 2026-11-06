@@ -115,7 +115,7 @@ function stateFixture(opts) {
   }
   tasks.push({
     id: 'st:old', agent_key: 'codex', agent_name: 'Codex', host: 'desktop',
-    title: 'Old completion', status: 'completed', status_reason: 'fixture',
+    completion_id: 'old-answer', title: 'Old completion', status: 'completed', status_reason: 'fixture',
     last_activity_secs: now - 3600, collected_at_secs: now, summary: null,
     origin: 'index', target: {}, target_validity: 'valid', invalid_reason: null,
     capability: { max_level: 'L2', notes: '', requires: [] }, level: 'L2', pinned: false
@@ -227,6 +227,14 @@ frame.addEventListener('load', async function () {
     // 3. aria label mentions agent, level and action
     var label = rows[0].getAttribute('aria-label') || '';
     check('aria-label is actionable', /L[0-3]/.test(label) && label.length > 10, label);
+
+    var initialSnapshot = T.snapshot;
+    var terminalSnapshot = JSON.parse(JSON.stringify(initialSnapshot));
+    terminalSnapshot.tasks[0].host = 'terminal';
+    T.setMockSnapshot(terminalSnapshot);
+    check('terminal Codex shows a terminal host label', /Terminal|终端/.test(doc.querySelector('.task .host').textContent));
+    T.setMockSnapshot(initialSnapshot);
+    rows = doc.querySelectorAll('.task');
 
     // 4. exactly one jump for two synchronous clicks
     T.applyPetState({ mode: 'expanded' });
@@ -342,6 +350,7 @@ frame.addEventListener('load', async function () {
 
     // 12c. hide-after-snapping fires once after the configured idle time
     var hidesBefore = T.hidePetCalls;
+    fire(win, app, 'mouseleave');
     T.setSettings({ auto_hide_after_s: 1 });
     T.applyPetState({ mode: 'collapsed', edge: 'right' });
     await sleep(1200);
@@ -352,6 +361,50 @@ frame.addEventListener('load', async function () {
     await sleep(1150);
     check('auto-hide Off never hides the pet',
       T.hidePetCalls - hidesBefore === 1, 'hides=' + (T.hidePetCalls - hidesBefore));
+
+    // Hover cancels hiding, including new state/settings events while hovered.
+    // Leaving before hover expansion must arm hiding again.
+    T.setSettings({ auto_hide_after_s: 1 });
+    fire(win, app, 'mouseenter');
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(40);
+    fire(win, app, 'mouseleave');
+    await sleep(1200);
+    check('short hover then leave resumes edge auto-hide',
+      T.hidePetCalls - hidesBefore === 2, 'hides=' + (T.hidePetCalls - hidesBefore));
+
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    fire(win, app, 'mouseenter');
+    await sleep(240);
+    // Force a collapse under the pointer, as with Escape, then a state refresh.
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    await sleep(1200);
+    check('state refresh under the pointer never auto-hides the pet',
+      T.hidePetCalls - hidesBefore === 2 && T.petState.mode === 'collapsed',
+      'hides=' + (T.hidePetCalls - hidesBefore));
+    fire(win, app, 'mouseleave');
+    await sleep(1200);
+    check('leaving after a hovered collapse resumes edge auto-hide',
+      T.hidePetCalls - hidesBefore === 3, 'hides=' + (T.hidePetCalls - hidesBefore));
+    T.applyPetState({ mode: 'collapsed', edge: 'none' });
+    await sleep(1200);
+    check('free-floating pet does not auto-hide',
+      T.hidePetCalls - hidesBefore === 3, 'hides=' + (T.hidePetCalls - hidesBefore));
+    T.setSettings({ auto_hide_after_s: 0 });
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+
+    // Regression: a timed hide must never make the pet disappear into the tray.
+    T.setSettings({ auto_hide_after_s: 1, edge_hide_enabled: false });
+    T.applyPetState({ mode: 'collapsed', edge: 'right' });
+    var trayHidesBefore = T.hidePetCalls;
+    await sleep(1200);
+    check('auto-hide stays visible when edge hiding is disabled',
+      T.hidePetCalls === trayHidesBefore && T.petState.mode === 'collapsed');
+    T.setSettings({ edge_hide_enabled: true });
+    await sleep(1200);
+    check('enabling edge hiding re-arms automatic hiding',
+      T.hidePetCalls === trayHidesBefore + 1);
+    T.setSettings({ auto_hide_after_s: 0 });
 
     // 12d. explicit click expansion asks for window focus; hover never does
     T.applyPetState({ mode: 'collapsed', edge: 'right' });
@@ -515,11 +568,10 @@ frame.addEventListener('load', async function () {
     var pet = doc.getElementById('pet');
     var statusGreenDot = doc.getElementById('status-dot-new');
 
-    // 21. the collapsed green count ring is gone; the baseline still only
-    //     advances while the panel is open
+    // 21. opening the panel never advances the unread-completion baseline
     T.applyPetState({ mode: 'expanded', edge: 'right' });
     await sleep(30);
-    var seenWhileOpen = T.seenAtSecs;
+    var seenWhileOpen = T.completionReads.since;
     T.applyPetState({ mode: 'collapsed', edge: 'right' });
     await sleep(1100); // cross a one-second boundary past the baseline
     var completedAt = Math.floor(Date.now() / 1000);
@@ -527,10 +579,10 @@ frame.addEventListener('load', async function () {
     await sleep(30);
     check('collapsed new-completion count ring is gone',
       doc.getElementById('new-badge') === null &&
-      T.petState.mode === 'collapsed' && T.seenAtSecs === seenWhileOpen &&
+      T.petState.mode === 'collapsed' && T.completionReads.since === seenWhileOpen &&
       statusGreenDot.hidden === false,
       'ring=' + doc.getElementById('new-badge') +
-      ' seen=' + T.seenAtSecs + '/' + seenWhileOpen +
+      ' seen=' + T.completionReads.since + '/' + seenWhileOpen +
       ' greenDotHidden=' + statusGreenDot.hidden);
     check('collapsed aria-label no longer announces a new-completion count',
       !/newly completed|个新完成/.test(pet.getAttribute('aria-label') || ''),
@@ -627,15 +679,25 @@ frame.addEventListener('load', async function () {
       petIcon.hidden === false && petIcon.getAttribute('src') === altIcon,
       'src=' + String(petIcon.getAttribute('src')).slice(0, 24));
 
-    // 26. edge-hidden tab: hidden_sliver square, 2×8 grip, nub rules
+    // 26. edge-hidden strip: collapsed size supplies the along-edge length.
     T.setMockSnapshot({ collected_at_secs: 0, attention_count: 0, agents: [], tasks: [] });
     await T.setSettings({ icon_style: 'builtin' });
     T.applyPetState({ mode: 'edge_hidden', edge: 'right' });
     await sleep(30);
     var appBox = doc.getElementById('app').getBoundingClientRect();
-    check('edge-hidden window is a hidden_sliver square',
-      Math.round(appBox.width) === 14 && Math.round(appBox.height) === 14,
+    check('edge-hidden strip height follows collapsed size',
+      Math.round(appBox.width) === 14 && Math.round(appBox.height) === 72,
       Math.round(appBox.width) + 'x' + Math.round(appBox.height));
+    await T.setSettings({ collapsed_size: 48 });
+    appBox = doc.getElementById('app').getBoundingClientRect();
+    check('changing collapsed size updates a hidden strip immediately',
+      Math.round(appBox.width) === 14 && Math.round(appBox.height) === 48);
+    T.applyPetState({ mode: 'edge_hidden', edge: 'top' });
+    appBox = doc.getElementById('app').getBoundingClientRect();
+    check('top-edge strip uses collapsed size as its width',
+      Math.round(appBox.width) === 48 && Math.round(appBox.height) === 14);
+    await T.setSettings({ collapsed_size: 72 });
+    T.applyPetState({ mode: 'edge_hidden', edge: 'right' });
     var nubRules = false;
     try {
       var sheets = doc.styleSheets;
@@ -1032,8 +1094,8 @@ frame.addEventListener('load', async function () {
     var markerEl = newRowEl && newRowEl.querySelector('.new-dot');
     check('newly completed row carries a labelled green marker',
       !!markerEl && newRowEl.classList.contains('new-completed') &&
-      markerEl.title === 'Newly completed' &&
-      markerEl.getAttribute('aria-label') === 'Newly completed' &&
+      markerEl.title === 'Mark as read' &&
+      markerEl.getAttribute('aria-label') === 'Mark as read: Freshly completed session' &&
       /Newly completed/.test(newRowEl.getAttribute('aria-label') || ''),
       'class=' + (newRowEl && newRowEl.className) +
       ' title=' + (markerEl && markerEl.title));
@@ -1042,8 +1104,8 @@ frame.addEventListener('load', async function () {
       !!doc.querySelector('[data-task-id="st:old"]') &&
       !doc.querySelector('[data-task-id="st:old"] .new-dot') &&
       !doc.querySelector('[data-task-id="st:run"] .new-dot') &&
-      T.pendingNewIds.join(',') === 'st:new',
-      'marked=' + markedIds().join(',') + ' pending=' + T.pendingNewIds.join(','));
+      T.unreadCompletionIds.join(',') === 'st:new',
+      'marked=' + markedIds().join(',') + ' pending=' + T.unreadCompletionIds.join(','));
 
     // 40. a completion while open joins the set without clearing the first
     var openSnapshot = stateFixture({ newCompleted: true });
@@ -1062,17 +1124,115 @@ frame.addEventListener('load', async function () {
       headerNew.hidden === false && /^2 new$/.test(headerNew.textContent.trim()),
       'marked=' + markedIds().join(',') + ' header=' + headerNew.textContent);
 
-    // 41. markers clear when the panel closes and the next open starts fresh
+    // 41. opening/closing the panel never acknowledges a conversation.
     T.applyPetState({ mode: 'collapsed', edge: 'right' });
     await sleep(20);
-    var clearedOnCollapse = T.pendingNewIds.length === 0 && headerNew.hidden === true;
-    T.setMockSnapshot(stateFixture({ newCompleted: true, newAt: Math.floor(Date.now() / 1000) - 120 }));
+    check('collapsed pet retains unread completions',
+      T.unreadCompletionIds.length === 2 && !dotNew.hidden && headerNew.hidden);
     T.applyPetState({ mode: 'expanded', edge: 'right' });
     await sleep(30);
-    check('row markers clear when the panel closes and reopens',
-      clearedOnCollapse && markedIds().length === 0 && headerNew.hidden === true,
-      'cleared=' + clearedOnCollapse + ' marked=' + markedIds().join(',') +
-      ' headerHidden=' + headerNew.hidden);
+    check('row markers survive closing and reopening without a task jump',
+      markedIds().join(',') === 'st:new,st:new2' && !headerNew.hidden);
+
+    var readSnapshot = JSON.parse(JSON.stringify(openSnapshot));
+    readSnapshot.tasks = readSnapshot.tasks.filter(function (task) {
+      return task.id === 'st:new' || task.id === 'st:new2';
+    });
+    readSnapshot.tasks.forEach(function (task, i) {
+      task.id = 'read:' + i;
+      task.last_activity_secs = Math.floor(Date.now() / 1000) + 100 + i;
+    });
+    T.setMockSnapshot(readSnapshot);
+    T.setMockJumpOutcome({ kind: 'degraded', requested: 'L3', achieved: 'L1', reason_key: 'opened_window' });
+    fire(win, doc.querySelector('[data-task-id="read:0"]'), 'click');
+    await sleep(30);
+    check('unconfirmed conversation jump keeps both green markers', markedIds().length === 2);
+    T.setMockJumpOutcome({ kind: 'failed', requested: 'L3', achieved: 'L0', reason_key: 'window_not_found' });
+    fire(win, doc.querySelector('[data-task-id="read:0"]'), 'click');
+    await sleep(30);
+    check('failed conversation jump keeps both green markers', markedIds().length === 2);
+    T.setMockJumpOutcome({ kind: 'success', requested: 'L2', achieved: 'L2' });
+    fire(win, doc.querySelector('[data-task-id="read:0"]'), 'click');
+    await sleep(30);
+    check('window-only success does not falsely mark a conversation read', markedIds().length === 2);
+    T.setMockJumpOutcome({ kind: 'success', requested: 'L3', achieved: 'L3' });
+    fire(win, doc.querySelector('[data-task-id="read:0"]'), 'click');
+    await sleep(30);
+    check('successful jump clears only the selected conversation marker',
+      markedIds().join(',') === 'read:1' && /^1 new$/.test(headerNew.textContent.trim()));
+    readSnapshot.tasks[0].last_activity_secs += 5;
+    T.setMockSnapshot(readSnapshot);
+    await sleep(20);
+    check('metadata activity after reading never revives the green marker',
+      markedIds().join(',') === 'read:1');
+    readSnapshot.tasks[0].last_activity_secs -= 5;
+    T.applyPetState({ mode: 'collapsed' });
+    T.reloadCompletionReads();
+    T.applyPetState({ mode: 'expanded' });
+    await sleep(20);
+    check('saved per-conversation read state survives reloading',
+      markedIds().join(',') === 'read:1');
+    readSnapshot.tasks[0].status = 'running';
+    T.setMockSnapshot(readSnapshot);
+    readSnapshot.tasks[0].status = 'completed';
+    readSnapshot.tasks[0].last_activity_secs += 20;
+    readSnapshot.tasks[0].completion_id = String(readSnapshot.tasks[0].last_activity_secs);
+    T.setMockSnapshot(readSnapshot);
+    await sleep(20);
+    check('a later completion of an already-read conversation gets a new green marker',
+      markedIds().join(',') === 'read:0,read:1');
+    T.emitCompletionViewed({ task_id: 'read:1', completion_id: readSnapshot.tasks[1].completion_id });
+    await sleep(20);
+    check('manually viewing a conversation clears only its own green marker',
+      markedIds().join(',') === 'read:0');
+    T.emitCompletionViewed({ task_id: 'read:0', completion_id: String(readSnapshot.tasks[0].last_activity_secs - 20) });
+    await sleep(20);
+    check('a delayed viewing receipt cannot clear a newer completion',
+      markedIds().join(',') === 'read:0');
+    T.emitCompletionViewed({ task_id: 'read:0', completion_id: readSnapshot.tasks[0].completion_id });
+    await sleep(20);
+    check('manual viewing clears the header when no unread completions remain',
+      markedIds().length === 0 && headerNew.hidden);
+    T.setMockJumpOutcome(null);
+    T.clearNotice();
+
+    // Bulk acknowledgement changes completed versions only, without jumps.
+    var bulkSnapshot = JSON.parse(JSON.stringify(readSnapshot));
+    bulkSnapshot.tasks.forEach(function (task, index) { task.id = 'bulk:' + index; });
+    bulkSnapshot.tasks.push(Object.assign({}, bulkSnapshot.tasks[0], {
+      id: 'bulk:running', status: 'running'
+    }));
+    bulkSnapshot.tasks.push(Object.assign({}, bulkSnapshot.tasks[0], {
+      id: 'bulk:question', status: 'waiting_input'
+    }));
+    bulkSnapshot.question_count = 1;
+    bulkSnapshot.attention_count = 1;
+    T.setMockSnapshot(bulkSnapshot);
+    var markAllRead = doc.getElementById('mark-all-read');
+    var jumpsBeforeBulk = T.jumpCalls.length;
+    check('mark-all-read button appears with unread completions',
+      !markAllRead.hidden && markAllRead.textContent === 'Mark all as read');
+    fire(win, markAllRead, 'click');
+    await sleep(20);
+    check('one click acknowledges all completed rows without jumping',
+      markedIds().length === 0 && headerNew.hidden && markAllRead.hidden && T.jumpCalls.length === jumpsBeforeBulk);
+    check('bulk read keeps questions and running tasks unacknowledged',
+      !T.completionReads.read['bulk:running'] && !T.completionReads.read['bulk:question'] &&
+      T.attention.questionCount === 1 && !doc.getElementById('header-question').hidden);
+    T.reloadCompletionReads();
+    check('bulk acknowledgement is saved', T.unreadCompletionIds.length === 0);
+    bulkSnapshot.tasks[2].status = 'completed';
+    bulkSnapshot.tasks[2].last_activity_secs += 30;
+    T.setMockSnapshot(bulkSnapshot);
+    await sleep(20);
+    check('completion after bulk read becomes unread again',
+      markedIds().join(',') === 'bulk:running' && !markAllRead.hidden);
+
+    var jumpsBeforeRead = T.jumpCalls.length;
+    fire(win, doc.querySelector('[data-task-id="bulk:running"] .new-dot'), 'click');
+    await sleep(20);
+    check('individual read action clears only the answer without jumping',
+      markedIds().length === 0 && T.jumpCalls.length === jumpsBeforeRead);
 
     // 42. collapsed cluster: all three semantic dots can coexist
     T.applyPetState({ mode: 'collapsed', edge: 'right' });
@@ -1234,7 +1394,7 @@ frame.addEventListener('load', async function () {
       return dot.hidden === false && win.getComputedStyle(dot).display !== 'none';
     });
     check('14 px tab shows one compact highest-priority dot',
-      Math.round(tabRectR3.width) === 14 && Math.round(tabRectR3.height) === 14 &&
+      Math.round(tabRectR3.width) === 14 && Math.round(tabRectR3.height) === 72 &&
       visibleDotsR3.length === 1 && visibleDotsR3[0] === dotQuestion &&
       rectInside(rectOf(pet), rectOf(statusDots)) &&
       rectInside(tabRectR3, rectOf(visibleDotsR3[0])) &&
@@ -1487,6 +1647,59 @@ frame.addEventListener('load', async function () {
     await sleep(20);
 
     // 28. no runtime errors in the mock path
+    var pinSnapshot = sessionFixture(3);
+    pinSnapshot.tasks[0].model = 'gpt-6.1-sol';
+    pinSnapshot.tasks[1].model = 'deepseek-v4.1-flash';
+    T.setMockSnapshot(pinSnapshot);
+    T.applyPetState({ mode: 'expanded', edge: 'right' });
+    await sleep(20);
+    var pinRow = doc.querySelector('[data-task-id="footer:2"]');
+    var beforePinJumps = T.jumpCalls.length;
+    fire(win, pinRow.querySelector('.pin'), 'click');
+    await sleep(30);
+    check('pinning moves the chosen conversation to the top without a jump',
+      doc.querySelector('.task').dataset.taskId === 'footer:2' &&
+      doc.querySelector('.task').classList.contains('pinned') && T.jumpCalls.length === beforePinJumps);
+    var pinnedButton = doc.querySelector('[data-task-id="footer:2"] .pin');
+    check('pinned action announces unpin and pressed state',
+      pinnedButton.getAttribute('aria-pressed') === 'true' && /Unpin/.test(pinnedButton.getAttribute('aria-label')));
+    pinnedButton.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await sleep(30);
+    check('unpin restores activity order and never jumps',
+      doc.querySelector('.task').dataset.taskId === 'footer:0' && T.jumpCalls.length === beforePinJumps);
+    check('rows display the full recorded model and an explicit unknown value',
+      doc.querySelector('[data-task-id="footer:0"] .task-model').textContent === 'gpt-6.1-sol' &&
+      doc.querySelector('[data-task-id="footer:1"] .task-model').textContent === 'deepseek-v4.1-flash' &&
+      doc.querySelector('[data-task-id="footer:2"] .task-model').textContent === 'Model unknown');
+    await T.setSettings({ show_summary: false });
+    check('model stays visible when progress summaries are disabled',
+      win.getComputedStyle(doc.querySelector('.task-model')).display !== 'none');
+    pinSnapshot.tasks[0].model = 'new-turn-model';
+    T.setMockSnapshot(pinSnapshot);
+    check('a new turn model update repaints an existing row',
+      doc.querySelector('[data-task-id="footer:0"] .task-model').textContent === 'new-turn-model');
+    var originalName = pinSnapshot.tasks[0].title;
+    var renameJumps = T.jumpCalls.length;
+    fire(win, doc.querySelector('[data-task-id="footer:0"] .rename'), 'click');
+    var nameInput = doc.querySelector('#session-name');
+    check('rename opens a focused editor', !!nameInput && doc.activeElement === nameInput);
+    nameInput.value = '我的研究 <b>原样文本</b>';
+    doc.querySelector('.name-dialog form').dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await sleep(30);
+    check('custom name is literal text and does not jump or modify source title',
+      doc.querySelector('[data-task-id="footer:0"] .title').textContent === '我的研究 <b>原样文本</b>' &&
+      pinSnapshot.tasks[0].title === originalName && T.jumpCalls.length === renameJumps && !doc.querySelector('.name-dialog'));
+    check('rename affects only the selected session',
+      doc.querySelector('[data-task-id="footer:1"] .title').textContent === pinSnapshot.tasks[1].title);
+    fire(win, doc.querySelector('[data-task-id="footer:0"] .rename'), 'click');
+    doc.querySelector('#session-name').value = 'discard this';
+    doc.querySelector('.name-dialog').dispatchEvent(new win.Event('cancel', { cancelable: true }));
+    check('cancel preserves the saved name', doc.querySelector('[data-task-id="footer:0"] .title').textContent === '我的研究 <b>原样文本</b>');
+    fire(win, doc.querySelector('[data-task-id="footer:0"] .rename'), 'click');
+    doc.querySelector('#session-name').value = '  ';
+    doc.querySelector('.name-dialog form').dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await sleep(30);
+    check('empty name restores the source title', doc.querySelector('[data-task-id="footer:0"] .title').textContent === originalName);
     check('no runtime errors in mock', runtimeErrors.length === 0, runtimeErrors.join(' | '));
   } catch (e) {
     check('selftest crashed', false, String(e && e.stack ? e.stack : e));

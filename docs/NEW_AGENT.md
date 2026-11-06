@@ -36,6 +36,8 @@ impl Source for MyAgentSource {
         // 5. last_activity_secs from the source timestamp (not ctx.now_secs)
         // 6. fill JumpTarget (app/bundle/window_title/workspace/deep_link)
         // 7. target_validity + capability + refresh_level()
+        // 8. honor ctx.pinned_ids before filtering by age
+        // 9. model = latest actual parent-turn model, or None if unavailable
         Vec::new()
     }
 }
@@ -45,6 +47,20 @@ Rules worth re-reading in `src-tauri/src/model.rs`:
 
 * `TaskStatus::WaitingInput` / `WaitingApproval` require an explicit signal.
   Silence, age, or “no output” must map to `Idle` / `Unknown` — never waiting.
+  Track unanswered interactive calls by call id (and question index for async
+  prompts). Acceptance, unrelated results and subagent completion cannot settle
+  a parent question. Clear it only on an explicit answer/cancellation or the end
+  of that parent turn.
+* `TaskStatus::Completed` requires explicit final completion of the current
+  **parent task or turn**, with `TaskRecord.completion = Some(CompletionEvidence::…)`.
+  Choose `TaskEnd`, `ClosedTurn`, `AssistantEndTurn`, or `TaskIndex` only when the
+  source actually provides that evidence. Tool results, step/item completion,
+  subagent results, ordinary assistant text, and silence are never evidence of
+  final completion. Keep an open task running, or report `Unknown` when its state
+  cannot be established. A new task/turn invalidates the previous completion.
+  Monitor applies `enforce_completion()` to every adapter, including future ones:
+  a completion with no evidence becomes `Unknown` before reaching the UI. This
+  internal evidence field is not part of the frontend JSON.
 * `last_activity_secs` and `collected_at_secs` are different things; the UI shows
   the former.
 * If the host can only be activated, declare `JumpLevel::L1` and set the notes
@@ -74,6 +90,9 @@ pub fn build_registry() -> Vec<Box<dyn Source>> {
 At minimum: status mapping from recorded event literals, stable-id derivation,
 and that two sessions of the same agent produce two records. Use synthetic
 fixtures — never copy real user titles or paths into tests.
+Completion tests must cover intermediate step/tool/subagent results, a previous
+completed turn followed by a new open turn, missing/partial source records,
+explicit final completion, and long silence without a final completion signal.
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -109,5 +128,8 @@ If a new agent shows up correctly through the snapshot, no UI change was needed.
 - [ ] `--dump-tasks` shows real records; two scans give identical ids (`stable=true`).
 - [ ] Two parallel sessions of the new agent appear as two task bars.
 - [ ] Status reasons cite evidence; no waiting state inferred from silence.
+- [ ] Only final parent-task/turn completion supplies `CompletionEvidence`; intermediate work never does.
 - [ ] No new dependency, no background process, no per-task timer.
 - [ ] `docs/CAPABILITIES.md` row added with the verified level and limitations.
+
+Completion notifications require a stable `TaskRecord.completion_id` from the final answer or turn. Never derive it from file mtime, collection time, title, or generic activity. Sources without answer-level identity must not fabricate new answer versions.

@@ -170,9 +170,9 @@ const AGENT_SPECS: [AgentSpec; 4] = [
         bundle_id: "com.microsoft.VSCode",
         app_name: "Visual Studio Code",
         ax_process: "Code",
-        max_level: JumpLevel::L2,
-        notes: "VSCode-hosted; project-precise window jump via `code --reuse-window <workspace>` (AX raise fallback)",
-        deep_link: false,
+        max_level: JumpLevel::L3,
+        notes: "VSCode /open?session=<id>; verify the focused chat identity before claiming L3",
+        deep_link: true,
     },
 ];
 
@@ -180,7 +180,7 @@ const AGENT_SPECS: [AgentSpec; 4] = [
 /// `mdfind` and `ps`); call it from a background thread, never from a scan.
 pub fn collect_jump_diagnostics() -> JumpDiagnostics {
     let accessibility = DiagnosticStatus {
-        granted: ax_is_process_trusted(),
+        granted: crate::ax::is_trusted(),
         detail: None,
     };
     let automation = automation_status();
@@ -261,23 +261,6 @@ fn automation_status() -> DiagnosticStatus {
             }),
         },
     }
-}
-
-/// `AXIsProcessTrusted()` from ApplicationServices (no extra crate).
-#[cfg(target_os = "macos")]
-fn ax_is_process_trusted() -> bool {
-    #[link(name = "ApplicationServices", kind = "framework")]
-    extern "C" {
-        /// Carbon `Boolean` (unsigned char): non-zero when the process is trusted.
-        fn AXIsProcessTrusted() -> u8;
-    }
-    // Safety: documented, side-effect-free system query.
-    unsafe { AXIsProcessTrusted() != 0 }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn ax_is_process_trusted() -> bool {
-    false
 }
 
 /// One `ps` sample shared by the install/run checks and `system_events`.
@@ -548,7 +531,7 @@ pub fn reset_app_permissions() -> Result<String, String> {
 
 // ── Public entry ────────────────────────────────────────────────
 
-pub fn jump(task: &TaskRecord) -> JumpOutcome {
+pub fn jump(task: &TaskRecord, peers: &[TaskRecord]) -> JumpOutcome {
     let requested = task.level;
     if task.target_validity == TargetValidity::Invalid {
         return JumpOutcome {
@@ -575,7 +558,8 @@ pub fn jump(task: &TaskRecord) -> JumpOutcome {
     // L3 — session / tab level. A deep link or a host-specific session route
     // (DSH sidebar AX row) is required; otherwise the ladder starts at L2.
     if max >= JumpLevel::L3 && has_session_route(task) {
-        match try_session_level(task) {
+        let unique_title = peers.iter().filter(|peer| peer.target.bundle_id == task.target.bundle_id && peer.title == task.title).count() == 1;
+        match try_session_level(task, unique_title) {
             Attempt::Done(outcome) => return outcome,
             Attempt::NotPossible(reason) => first_error = Some(reason),
         }
@@ -676,7 +660,10 @@ fn has_session_route(task: &TaskRecord) -> bool {
         || task.target.host_ref.as_deref() == Some(DSH_SIDEBAR_HOST_REF)
 }
 
-fn try_session_level(task: &TaskRecord) -> Attempt {
+fn try_session_level(task: &TaskRecord, unique_title: bool) -> Attempt {
+    if task.target.bundle_id.as_deref() == Some(VSCODE_BUNDLE_ID) {
+        return try_vscode_session(task, unique_title);
+    }
     // Terminal tab selection (Claude Code CLI and any terminal-hosted agent).
     if let Some(host) = task.target.terminal_host.as_deref() {
         if host == "Terminal" {
@@ -845,11 +832,39 @@ fn try_window_level(task: &TaskRecord) -> Attempt {
 
 /// VSCode project-precise window jump (L2).
 ///
-/// `code --reuse-window <workspace>` focuses the already-open window for that
-/// project (verified on this host with two windows open). Confirmed by the
-/// frontmost app plus the focused AX window title containing the workspace
-/// basename ("<file> — <folder>"); any failure falls through to the existing AX
-/// title/raise path so nothing regresses.
+/// Open the workspace before delivering the extension URI. A visible window
+/// alone cannot prove that the requested chat was selected.
+fn try_vscode_session(task: &TaskRecord, unique_title: bool) -> Attempt {
+    let (Some(workspace), Some(link), Some(id)) = (
+        task.target.workspace_path.as_deref(), task.target.deep_link.as_deref(), task.session_id.as_deref(),
+    ) else { return Attempt::NotPossible("no_session_route".into()); };
+    if let Attempt::NotPossible(reason) = try_vscode_reuse_window(task, workspace) {
+        return Attempt::NotPossible(reason);
+    }
+    if let Err(reason) = open_url(link) { return Attempt::NotPossible(reason); }
+    let matched = poll_until(DEEP_LINK_NAV_TIMEOUT_MS, || {
+        let context = crate::ax::focused_conversation(&[VSCODE_BUNDLE_ID.to_string()])?;
+        let identified = context.references.iter().any(|reference| reference_has_session(reference, id));
+        let titled = unique_title && !task.title.trim().is_empty()
+            && context.focused_web_title.as_deref() == Some(task.title.as_str());
+        (identified || titled).then_some(context.title)
+    });
+    if let Some(title) = matched {
+        Attempt::Done(JumpOutcome {
+            task_id: task.id.clone(), kind: JumpOutcomeKind::Success,
+            requested: task.level, achieved: JumpLevel::L3,
+            reason_key: "opened_session".into(), detail: Some(title),
+            next_step: None, permission_needed: None,
+        })
+    } else {
+        Attempt::NotPossible("deep_link_unverified".into())
+    }
+}
+
+fn reference_has_session(reference: &str, id: &str) -> bool {
+    !id.is_empty() && reference.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').any(|part| part == id)
+}
+
 fn try_vscode_reuse_window(task: &TaskRecord, workspace: &str) -> Attempt {
     let Some(basename) = workspace_basename(workspace) else {
         return Attempt::NotPossible("no_window_hint".into());
@@ -1623,6 +1638,22 @@ fn terminal_failure_reason() -> &'static str {
     })
 }
 
+/// Read the selected tab only while Terminal is the foreground application.
+/// No tab switching or app activation; a denied Automation grant returns None.
+pub fn focused_terminal_tty() -> Option<String> {
+    if crate::ax::foreground_bundle_id().as_deref() != Some("com.apple.Terminal") { return None; }
+    let tty = run_osascript(r#"with timeout of 2 seconds
+      tell application "Terminal"
+        if (count of windows) is 0 then return ""
+        return tty of selected tab of front window
+      end tell
+    end timeout"#).ok()?;
+    let tty = tty.trim();
+    let suffix = tty.strip_prefix("/dev/ttys")?;
+    if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) { return None; }
+    (crate::ax::foreground_bundle_id().as_deref() == Some("com.apple.Terminal")).then(|| tty.to_owned())
+}
+
 // ── Terminal tty resolution ─────────────────────────────────────
 
 /// Find the controlling TTY of a live agent CLI process whose working
@@ -2110,6 +2141,15 @@ fn open_url(url: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn session_reference_requires_the_exact_id() {
+        assert!(reference_has_session("vscode-webview://chat/index.html?session=abc-123&view=1", "abc-123"));
+        assert!(reference_has_session("/local/abc-123", "abc-123"));
+        assert!(!reference_has_session("/local/abc-123-other", "abc-123"));
+        assert!(!reference_has_session("/local/other", "abc-123"));
+        assert!(!reference_has_session("/local/", ""));
+    }
+
     fn task(level: JumpLevel, max: JumpLevel) -> TaskRecord {
         TaskRecord {
             id: "codex:x".into(),
@@ -2120,10 +2160,13 @@ mod tests {
             task_id: None,
             title: "Fix the parser".into(),
             status: TaskStatus::Running,
+            completion: None,
+            completion_id: None,
             status_reason: "task_started".into(),
             last_activity_secs: 0,
             collected_at_secs: 0,
             summary: None,
+            model: None,
             origin: DataOrigin::Index,
             target: JumpTarget {
                 app_name: Some("ChatGPT".into()),
@@ -2167,7 +2210,7 @@ mod tests {
         let mut t = task(JumpLevel::L2, JumpLevel::L3);
         t.target_validity = TargetValidity::Invalid;
         t.invalid_reason = Some("workspace_missing".into());
-        let out = jump(&t);
+        let out = jump(&t, &[t.clone()]);
         assert_eq!(out.kind, JumpOutcomeKind::Failed);
         assert_eq!(out.achieved, JumpLevel::L0);
         assert_eq!(out.reason_key, "workspace_missing");
@@ -2179,7 +2222,7 @@ mod tests {
         let mut t = task(JumpLevel::L1, JumpLevel::L1);
         t.target.bundle_id = None;
         t.target.app_name = None;
-        let out = jump(&t);
+        let out = jump(&t, &[t.clone()]);
         assert_eq!(out.kind, JumpOutcomeKind::Failed);
         assert_eq!(out.reason_key, "no_target");
     }
@@ -2473,8 +2516,8 @@ mod tests {
         assert_eq!(spec("claude-code").bundle_id, "com.microsoft.VSCode");
         assert_eq!(spec("claude-code").app_name, "Visual Studio Code");
         assert_eq!(spec("claude-code").ax_process, "Code");
-        assert_eq!(spec("claude-code").max_level, JumpLevel::L2);
-        assert!(!spec("claude-code").deep_link);
+        assert_eq!(spec("claude-code").max_level, JumpLevel::L3);
+        assert!(spec("claude-code").deep_link);
     }
 
     #[test]

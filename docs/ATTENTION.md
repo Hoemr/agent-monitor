@@ -22,6 +22,21 @@ A task is a **pending question** when its status is `waiting_input` or
 `waiting_approval`. (Failures never trigger this channel; they keep the normal
 attention rules.)
 
+Source evidence:
+
+* Codex: unanswered `request_user_input` / `request_user_input_async` calls in
+  the current open turn. Results settle their own call; async `accepted: true`
+  is not an answer. Replies settle individual question indices.
+* Claude Code: parent `AskUserQuestion` remains pending until its matching
+  `tool_result` or an explicit new user prompt. Unrelated results do not clear it.
+* DSH: the explicit `userQuestions.questions.active` projection, taking
+  precedence over open/closed turn status.
+* ZCode: explicit task-index waiting statuses. Additional tool names require
+  verified protocol evidence; prose mentioning “ask” is never a signal.
+
+File-event bursts wake the scanner within a bounded 700 ms debounce window,
+so continuous logging in other sessions cannot defer a new question indefinitely.
+
 The monitor keeps a fingerprint of every currently visible pending question:
 
 ```

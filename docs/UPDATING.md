@@ -24,9 +24,10 @@ in place and offers a restart. There is no installer and no manual re-download.
   Updates pane. Being up to date is silent; being offline is silent too.
 * Tray menu → **检查更新… / Check for Updates…** opens Settings directly on the
   Updates pane and runs a check.
-* Updating replaces `Agent Monitor.app`; macOS may then ask again for
-  Accessibility/Automation because the app is ad-hoc signed. Settings → Jump
-  shows the live permission state and the exact panes.
+* Updates must preserve the code-signing identity. Locally signed builds reject
+  online replacement and are updated through the local build script. Public
+  releases require a persistent Developer ID identity in CI, separately from
+  the Tauri updater signature.
 
 ## Settings key
 
@@ -155,5 +156,41 @@ AGENT_MONITOR_UPDATE_ENDPOINT=http://127.0.0.1:8765/latest.json \
 | "already up to date" although a release exists | version in `tauri.conf.json`/tag must be semver-higher; release must be published (not draft/prerelease); `latest.json` platform key must be `darwin-aarch64` |
 | check fails offline / 404 | expected: silent at launch, readable error in Settings → Updates |
 | signature error | artifact signed with a different private key than the configured public key, or the `.sig` file attached to the release is stale |
-| app won't launch after update | the updater artifact must contain `Agent Monitor.app` at the tarball root; macOS may require re-granting Accessibility/Automation (ad-hoc signature) |
+| app won't launch after update | the updater artifact must contain `Agent Monitor.app` at the tarball root; verify the macOS signature and preserve the original signing identity |
 | update installed but version unchanged | the app must be restarted (`Restart Now`); the running bundle is only replaced after the helper swaps it |
+
+## Persistent local signing
+
+Run `python3 scripts/sign-mac.py --setup` once. This creates a code-signing
+certificate and imports its private key into the login Keychain, restricted to
+`/usr/bin/codesign`. Temporary private-key files are removed after import.
+Only its fingerprint and keychain path are stored in
+`~/Library/Application Support/agent-monitor/signing.json`.
+
+`scripts/bundle-mac.sh` checks that identity before touching the bundle, then
+signs with a requirement containing the fixed bundle identifier and certificate
+fingerprint. It never falls back to ad-hoc signing. Preserve both the Keychain
+identity and signing.json; do not regenerate them during builds. The certificate
+is valid for ten years; losing or replacing it requires a new permission grant.
+
+Moving from an old ad-hoc signature requires one final remove/re-add of the exact
+App in macOS privacy settings. Verify permissions from the packaged GUI.
+To verify a future update, authorize build A, install a differently built B signed
+by the same identity at the same path, restart, and check that Accessibility and
+Window Access are still granted without changing system settings.
+
+The signed `Contents/Resources/local-signing` marker disables online replacement
+for local builds, preventing an unrelated release signature from discarding their
+permissions. Manual update checks explain that local builds must be rebuilt.
+No system trust roots or TCC database records are modified by the signing scripts.
+
+## Public release signing
+
+CI imports an existing signing identity from `MACOS_SIGNING_CERTIFICATE_P12`
+(base64 P12), `MACOS_SIGNING_CERTIFICATE_PASSWORD`, and `MACOS_SIGNING_IDENTITY`
+(certificate name or fingerprint). Use a Developer ID identity for distribution;
+do not upload the private local-development identity. The packaging script uses
+the explicit `AGENT_MONITOR_SIGNING_IDENTITY` environment variable in CI.
+Missing credentials stop the release; the workflow never creates a new identity
+or silently publishes an ad-hoc bundle. These secrets are distinct from
+`TAURI_SIGNING_PRIVATE_KEY`, which authenticates the update archive only.

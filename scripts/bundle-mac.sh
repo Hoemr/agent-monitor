@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Builds a minimal, runnable macOS .app bundle around the release binary.
 # Tauri embeds the frontend (custom-protocol), so no extra resources are needed
-# beyond the icon and Info.plist. Ad-hoc signed so TCC remembers the identity.
+# beyond the icon and Info.plist. A persistent signing identity is mandatory.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+python3 scripts/sign-mac.py --check
 VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
 MINOS=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['bundle']['macOS']['minimumSystemVersion'])")
 BIN=src-tauri/target/release/agent-monitor
@@ -46,6 +47,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+python3 scripts/sign-mac.py "$APP"
 echo "built: $APP"
 echo "run:   open \"$APP\""
+echo "Persistent signature: future builds must retain this identity and bundle identifier."

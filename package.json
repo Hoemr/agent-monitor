@@ -1,6 +1,6 @@
 {
   "name": "agent-monitor",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "scripts": {
     "build": "cargo build --release --manifest-path src-tauri/Cargo.toml",
     "run": "cargo run --manifest-path src-tauri/Cargo.toml",
@@ -10,5 +10,5 @@
     "jump-probe": "bash scripts/jump-probe.sh",
     "bundle:mac": "bash scripts/bundle-mac.sh"
   },
-  "description": "Lightweight macOS desktop pet that monitors Codex, DSH, ZCode and VSCode Claude Code sessions."
+  "description": "Lightweight macOS desktop pet that monitors Codex, DSH, ZCode, Claude Code and Antigravity sessions."
 }

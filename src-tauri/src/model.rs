@@ -260,6 +260,15 @@ impl JumpOutcome {
 
 // ── Task record ─────────────────────────────────────────────────
 
+/// Explicit end of the parent task/turn, never a tool or subagent result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionEvidence {
+    TaskEnd,
+    ClosedTurn,
+    AssistantEndTurn,
+    TaskIndex,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskRecord {
     /// Stable identity: `agent:session-id` (never derived from the title).
@@ -276,6 +285,12 @@ pub struct TaskRecord {
     pub task_id: Option<String>,
     pub title: String,
     pub status: TaskStatus,
+    /// Internal evidence checked by Monitor before publishing a completion.
+    #[serde(skip)]
+    pub completion: Option<CompletionEvidence>,
+    /// Stable source identity of the final answer; unrelated activity must not change it.
+    #[serde(default)]
+    pub completion_id: Option<String>,
     /// Evidence for the status: source event name or short reason ("turn/start").
     pub status_reason: String,
     /// When activity actually happened (source timestamp), not when we read it.
@@ -284,6 +299,8 @@ pub struct TaskRecord {
     pub collected_at_secs: u64,
     /// Optional, short, non-sensitive progress line.
     pub summary: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub origin: DataOrigin,
     pub target: JumpTarget,
     pub target_validity: TargetValidity,
@@ -303,6 +320,17 @@ fn is_cancelled_reason(status_reason: &str) -> bool {
 }
 
 impl TaskRecord {
+    pub fn enforce_completion(&mut self) {
+        if self.status == TaskStatus::Completed && self.completion.is_none() {
+            self.status = TaskStatus::Unknown;
+            self.status_reason = format!("final completion unconfirmed: {}", self.status_reason);
+        }
+        if self.status != TaskStatus::Completed {
+            self.completion = None;
+            self.completion_id = None;
+        }
+    }
+
     /// Status-class helper (see [`TaskStatus::needs_attention`]).
     pub fn needs_attention(&self) -> bool {
         self.status.needs_attention()
@@ -427,6 +455,9 @@ pub struct PetPrefs {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Snapshot {
     pub tasks: Vec<TaskRecord>,
+    /// Local display names; source titles remain intact for navigation.
+    #[serde(default)]
+    pub custom_names: std::collections::BTreeMap<String, String>,
     pub collected_at_secs: u64,
     /// Count of tasks that need user attention (precomputed for the collapsed badge).
     pub attention_count: usize,
@@ -441,6 +472,7 @@ impl Snapshot {
     pub fn new(tasks: Vec<TaskRecord>, agents: Vec<AgentDescriptor>) -> Self {
         let mut snapshot = Self {
             tasks,
+            custom_names: Default::default(),
             collected_at_secs: now_secs(),
             attention_count: 0,
             question_count: 0,
@@ -469,11 +501,14 @@ impl Snapshot {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.attention_count.hash(&mut h);
+        self.custom_names.hash(&mut h);
         for t in &self.tasks {
             t.id.hash(&mut h);
             t.status.key().hash(&mut h);
             t.title.hash(&mut h);
             t.summary.hash(&mut h);
+            t.model.hash(&mut h);
+            t.pinned.hash(&mut h);
             t.last_activity_secs.hash(&mut h);
             t.level.code().hash(&mut h);
             t.target_validity.hash(&mut h);
@@ -498,10 +533,13 @@ mod tests {
             task_id: None,
             title: title.into(),
             status,
+            completion_id: Some("100".into()),
+            completion: (status == TaskStatus::Completed).then_some(CompletionEvidence::TaskEnd),
             status_reason: "task_started".into(),
             last_activity_secs: 1,
             collected_at_secs: 2,
             summary: None,
+            model: None,
             origin: DataOrigin::Event,
             target: JumpTarget::default(),
             target_validity: TargetValidity::Valid,
@@ -641,6 +679,18 @@ mod tests {
         t.last_activity_secs = 99;
         let b = Snapshot::new(vec![t], vec![]);
         assert_ne!(a.render_hash(), b.render_hash());
+    }
+
+    #[test]
+    fn render_hash_distinguishes_model_and_pin_updates() {
+        let original = task("a", TaskStatus::Running, "t");
+        let base = Snapshot::new(vec![original.clone()], vec![]).render_hash();
+        let mut updated = original.clone();
+        updated.model = Some("gpt-6.1-sol".into());
+        assert_ne!(base, Snapshot::new(vec![updated], vec![]).render_hash());
+        let mut updated = original;
+        updated.pinned = true;
+        assert_ne!(base, Snapshot::new(vec![updated], vec![]).render_hash());
     }
 
     #[test]

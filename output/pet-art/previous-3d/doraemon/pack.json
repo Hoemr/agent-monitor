@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "id": "doraemon",
+  "name": "哆啦 A 梦",
+  "author": "AI-assisted fan artwork",
+  "version": "1.0.0",
+  "license": "Character rights reserved",
+  "source": "Built-in image_gen · 2026-11-05; see output/pet-art/PROMPTS.md",
+  "description": "透明背景立体角色桌宠，八种表情状态及轻微呼吸动画。",
+  "preview": "idle.png",
+  "states": {
+    "idle": "idle.png",
+    "working": "working.png",
+    "thinking": "thinking.png",
+    "interacting": "interacting.png",
+    "celebrating": "celebrating.png",
+    "alarmed": "alarmed.png",
+    "sleeping": "sleeping.png",
+    "watching": "watching.png"
+  }
+}

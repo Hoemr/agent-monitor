@@ -16,6 +16,7 @@ pub mod jump;
 pub mod model;
 pub mod monitor;
 pub mod pet;
+pub mod pet_engine;
 pub mod settings;
 pub mod update;
 
@@ -30,7 +31,7 @@ use pet::{
     pick_screen, position_from_rect, restore_rect, state_view, unhide_rect, PetStore, Rect,
     ScreenRect, EXPANDED_WIDTH,
 };
-use settings::{Appearance, Language, Settings, SettingsGroup, SettingsStore};
+use settings::{Appearance, Language, PetKind, Settings, SettingsGroup, SettingsStore};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -66,8 +67,17 @@ struct Runtime {
     /// Authoritative window rectangle: macOS applies set_position
     /// asynchronously, so reading it back immediately after a move is stale.
     last_rect: Option<Rect>,
+    /// Derived from the webview's authoritative, persisted per-task read state.
+    unread_completions: Vec<ViewedCompletion>,
     /// Wakes the scheduler immediately (file watcher events + settings changes).
     wake_tx: Sender<()>,
+    /// Roaming-mascot state (Rust pet engine); idle unless `pet_kind = mascot`.
+    mascot: pet_engine::mascot::MascotHost,
+    /// True while the pet window's vibrancy is cleared for mascot mode.
+    pet_effects_off: bool,
+    /// Consecutive fallback-dismissal checks while the expanded panel is
+    /// unfocused with the cursor elsewhere.
+    expanded_dismiss_grace: u32,
 }
 
 pub struct AppState {
@@ -110,7 +120,11 @@ impl AppState {
                 suppress_until_ms: 0,
                 mode_before_drag: PetMode::Collapsed,
                 last_rect: None,
+                unread_completions: Vec::new(),
                 wake_tx,
+                mascot: pet_engine::mascot::MascotHost::new("nailong"),
+                pet_effects_off: false,
+                expanded_dismiss_grace: 0,
             }),
             wake_rx: Mutex::new(Some(wake_rx)),
         }
@@ -201,8 +215,8 @@ fn screen_for(win: &WebviewWindow, rect: &Rect) -> (Vec<ScreenRect>, usize) {
 
 fn tracked_rect(app: &AppHandle, win: &WebviewWindow) -> Rect {
     let state = app.state::<AppState>();
-    let rt = state.inner.lock().unwrap();
-    rt.last_rect.unwrap_or_else(|| window_rect(win))
+    let rect = { state.inner.lock().unwrap().last_rect };
+    rect.unwrap_or_else(|| window_rect(win))
 }
 
 fn remember_rect(app: &AppHandle, rect: Rect) {
@@ -218,15 +232,17 @@ fn target_size(
     sliver: f64,
     scale: f64,
     current: Rect,
+    edge: Edge,
 ) -> (f64, f64) {
     match mode {
         PetMode::Expanded => (
             EXPANDED_WIDTH * scale,
             expanded_height_logical(rows) * scale,
         ),
-        // Edge-hidden is a small square tab (`hidden_sliver` per side), not the
-        // full collapsed square: only that nub stays visible.
-        PetMode::EdgeHidden => (sliver, sliver),
+        PetMode::EdgeHidden => match edge {
+            Edge::Top | Edge::Bottom => (collapsed_size * scale, sliver),
+            _ => (sliver, collapsed_size * scale),
+        },
         PetMode::Collapsed | PetMode::TrayHidden => {
             (collapsed_size * scale, collapsed_size * scale)
         }
@@ -235,11 +251,11 @@ fn target_size(
 }
 
 fn animate(win: &WebviewWindow, from: Rect, to: Rect, enabled: bool) {
+    let generation = ANIMATION_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if !enabled {
         set_rect(win, to);
         return;
     }
-    let generation = ANIMATION_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if (from.x - to.x).abs() < 1.0
         && (from.y - to.y).abs() < 1.0
         && (from.w - to.w).abs() < 1.0
@@ -287,6 +303,9 @@ fn persist(app: &AppHandle, rect: Rect, edge: Edge, mode: PetMode) {
 
 /// Apply a display mode to the real window, anchored to the current edge.
 fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
+    if std::env::var("AGENT_MONITOR_DEBUG_MASCOT").is_ok() {
+        eprintln!("mascot-debug: enter_mode {:?}", mode);
+    }
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
@@ -305,18 +324,21 @@ fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
         )
     };
     let collapsed_size = f64::from(settings.collapsed_size);
+    // Mascot pets use the CLASSIC geometry pipeline end to end (snap, edge
+    // hide, sliver) — "the pet is just different artwork" — so there is no
+    // special collapsed branch here anymore.
     let edge = if edge == Edge::None {
         nearest_edge(&current, &visible)
     } else {
         edge
     };
     let sliver = f64::from(settings.hidden_sliver) * scale;
-    let (tw, th) = target_size(mode, rows, collapsed_size, sliver, scale, current);
+    let (tw, th) = target_size(mode, rows, collapsed_size, sliver, scale, current, edge);
     let base = Rect::new(current.x, current.y, tw, th);
     let target = match mode {
         // The tab keeps the pet's position along the edge, so expanding again
         // grows from where the user left it.
-        PetMode::EdgeHidden => hide_tab_rect(current, &visible, edge, sliver),
+        PetMode::EdgeHidden => hide_tab_rect(current, &visible, edge, sliver, collapsed_size * scale),
         PetMode::Expanded => {
             if was_mode.is_offscreen() {
                 unhide_rect(current, edge, (tw, th), &visible)
@@ -344,7 +366,8 @@ fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
         rt.state.edge = edge;
         rt.state.hidden = mode.is_offscreen();
         rt.suppress_until_ms = now_millis() + 420;
-        let (screens, idx) = screen_for(&win, &target);
+        // Screen queries wait for the UI thread, whose window callbacks take
+        // this lock. Reuse the screen data collected before acquiring it.
         rt.prefs.position = position_from_rect(&target, &screens[idx], edge);
         rt.prefs.hidden = rt.state.hidden;
         let view = state_view(&rt.state, &rt.settings);
@@ -371,11 +394,7 @@ fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
         // is still honoured for CSS transitions in the page.
         settings::Animations::System => true,
     };
-    if animated && animate_window {
-        animate(&win, current, target, animate_window);
-    } else {
-        set_rect(&win, target);
-    }
+    animate(&win, current, target, animated && animate_window);
     persist(app, target, edge, mode);
 }
 
@@ -390,20 +409,21 @@ fn reconcile_screens(app: &AppHandle) {
         return;
     }
     let visible = screens[idx].visible;
-    let (mode, edge, sliver) = {
+    let (mode, edge, sliver, collapsed_size) = {
         let state = app.state::<AppState>();
         let rt = state.inner.lock().unwrap();
         (
             rt.state.mode,
             rt.state.edge,
             f64::from(rt.settings.hidden_sliver),
+            f64::from(rt.settings.collapsed_size),
         )
     };
     if mode == PetMode::Dragging || mode == PetMode::TrayHidden {
         return;
     }
     let target = if mode == PetMode::EdgeHidden && edge != Edge::None {
-        hide_tab_rect(current, &visible, edge, sliver * screens[idx].scale)
+        hide_tab_rect(current, &visible, edge, sliver * screens[idx].scale, collapsed_size * screens[idx].scale)
     } else {
         constrain(current, &visible)
     };
@@ -486,6 +506,7 @@ fn reset_pet_position(app: &AppHandle) {
     {
         let state = app.state::<AppState>();
         let mut rt = state.inner.lock().unwrap();
+        rt.mascot.invalidate();
         rt.state.edge = Edge::Right;
         rt.state.mode = PetMode::Collapsed;
         rt.state.hidden = false;
@@ -495,8 +516,14 @@ fn reset_pet_position(app: &AppHandle) {
     }
     let _ = win.show();
     remember_rect(app, rect);
-    set_rect(&win, rect);
+    animate(&win, window_rect(&win), rect, false);
     persist(app, rect, Edge::Right, PetMode::Collapsed);
+    let view = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        state_view(&rt.state, &rt.settings)
+    };
+    let _ = app.emit("pet-state", view);
 }
 
 // ── Settings application ────────────────────────────────────────
@@ -573,6 +600,7 @@ fn apply_settings(app: &AppHandle, previous: &Settings) {
     } else if mode == PetMode::Expanded || mode == PetMode::EdgeHidden {
         let geometry_changed = previous.max_visible_rows != current.max_visible_rows
             || previous.hidden_sliver != current.hidden_sliver
+            || previous.collapsed_size != current.collapsed_size
             || previous.edge_hide_enabled != current.edge_hide_enabled;
         if geometry_changed && !(mode == PetMode::EdgeHidden && !current.edge_hide_enabled) {
             enter_mode(app, mode, false);
@@ -725,9 +753,153 @@ fn get_snapshot(state: State<'_, AppState>) -> Snapshot {
     state.inner.lock().unwrap().monitor.snapshot().clone()
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct ViewedCompletion {
+    task_id: String,
+    completion_id: String,
+}
+
+#[tauri::command]
+fn watch_unread_completions(state: State<'_, AppState>, completions: Vec<ViewedCompletion>) {
+    let mut rt = state.inner.lock().unwrap();
+    rt.unread_completions = completions;
+    let _ = rt.wake_tx.send(());
+}
+
+fn normalized_conversation_title(title: &str) -> String {
+    title.trim().trim_start_matches('#').split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+fn viewed_completion(context: &ax::FocusedConversation, tasks: &[model::TaskRecord], unread: &[ViewedCompletion]) -> Option<ViewedCompletion> {
+    let in_app: Vec<_> = tasks.iter().filter(|task|
+        task.target.bundle_id.as_deref() == Some(context.bundle_id.as_str())
+    ).collect();
+    let by_id: Vec<_> = in_app.iter().copied().filter(|task|
+        task.session_id.as_deref().into_iter().chain(task.task_id.as_deref()).any(|id|
+            context.references.iter().any(|reference|
+                reference.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').any(|part| part == id)))
+    ).collect();
+    let candidates: Vec<_> = if !by_id.is_empty() { by_id } else {
+        in_app.into_iter().filter(|task| {
+            let title = normalized_conversation_title(&task.title);
+            let app = context.app_name.as_str();
+            let focused = [" — ", " – ", " - "].iter().find_map(|separator|
+                context.title.strip_suffix(&format!("{separator}{app}")))
+                .map(normalized_conversation_title).unwrap_or_else(|| normalized_conversation_title(&context.title));
+            !title.is_empty() && (title == focused || context.selected_titles.iter().any(|text| normalized_conversation_title(text) == title))
+        }).collect()
+    };
+    if candidates.len() != 1 { return None; }
+    let task = candidates[0];
+    if task.status != model::TaskStatus::Completed { return None; }
+    unread.iter().find(|item| item.task_id == task.id && task.completion_id.as_deref() == Some(item.completion_id.as_str())).cloned()
+}
+
+fn terminal_viewed_completion(paths: &[PathBuf], tasks: &[model::TaskRecord], unread: &[ViewedCompletion]) -> Option<ViewedCompletion> {
+    let candidates: Vec<_> = tasks.iter().filter(|task|
+        task.agent_key == "codex" && task.host == "terminal" && task.session_id.as_deref().is_some_and(|id|
+            paths.iter().any(|path| path.file_name().and_then(|n| n.to_str())
+                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(&format!("-{id}.jsonl")))))
+    ).collect();
+    if candidates.len() != 1 { return None; }
+    let task = candidates[0];
+    if task.status != model::TaskStatus::Completed { return None; }
+    unread.iter().find(|item| item.task_id == task.id
+        && task.completion_id.as_deref() == Some(item.completion_id.as_str())).cloned()
+}
+
+/// Reuse the pet heartbeat for a fast foreground check; OS queries run off the
+/// animation thread, with at most one probe running. No task scan or UI timer.
+fn schedule_terminal_read_check(app: &AppHandle) {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    let pending = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        rt.unread_completions.iter().any(|item| rt.monitor.snapshot().tasks.iter().any(|task|
+            task.id == item.task_id && task.agent_key == "codex" && task.host == "terminal"))
+    };
+    if !pending || ax::foreground_bundle_id().as_deref() != Some("com.apple.Terminal") { return; }
+    if RUNNING.swap(true, Ordering::SeqCst) { return; }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { RUNNING.store(false, Ordering::SeqCst); } }
+        let _reset = Reset;
+        let Some(tty) = jump::focused_terminal_tty() else { return; };
+        let paths = agents::codex::terminal_rollouts(&tty);
+        if std::env::var_os("AGENT_MONITOR_DEBUG_READS").is_some() {
+            eprintln!("terminal-read: tty={tty} rollouts={}", paths.len());
+        }
+        if paths.is_empty() { return; }
+        let viewed = {
+            let state = app.state::<AppState>();
+            let rt = state.inner.lock().unwrap();
+            terminal_viewed_completion(&paths, &rt.monitor.snapshot().tasks, &rt.unread_completions)
+        };
+        let Some(viewed) = viewed else { return; };
+        // A tab switch during lsof must not acknowledge the previous tab.
+        if jump::focused_terminal_tty().as_deref() != Some(tty.as_str()) { return; }
+        app.state::<AppState>().inner.lock().unwrap().unread_completions.retain(|item| item != &viewed);
+        let _ = app.emit("completion-viewed", viewed);
+    });
+}
+
+fn acknowledge_viewed_completions(app: &AppHandle) {
+    let (mut unread, tasks) = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        if rt.unread_completions.is_empty() { return; }
+        (rt.unread_completions.clone(), rt.monitor.snapshot().tasks.clone())
+    };
+    let pending: Vec<_> = tasks.iter().filter(|task| unread.iter().any(|item|
+        item.task_id == task.id && task.completion_id.as_deref() == Some(item.completion_id.as_str())
+    )).cloned().collect();
+    for (task_id, completion_id) in agents::codex::read_completions(&pending) {
+        let viewed = ViewedCompletion { task_id, completion_id };
+        unread.retain(|item| item != &viewed);
+        app.state::<AppState>().inner.lock().unwrap().unread_completions.retain(|item| item != &viewed);
+        let _ = app.emit("completion-viewed", viewed);
+    }
+    if unread.is_empty() { return; }
+    let bundles: Vec<String> = tasks.iter().filter(|task| unread.iter().any(|item| item.task_id == task.id))
+        .filter_map(|task| task.target.bundle_id.clone()).collect();
+    let Some(context) = ax::focused_conversation(&bundles) else { return; };
+    if let Some(viewed) = viewed_completion(&context, &tasks, &unread) {
+        app.state::<AppState>().inner.lock().unwrap().unread_completions.retain(|item| item != &viewed);
+        let _ = app.emit("completion-viewed", viewed);
+    }
+}
+
 #[tauri::command]
 fn get_agents(state: State<'_, AppState>) -> Vec<AgentDescriptor> {
     state.inner.lock().unwrap().monitor.descriptors()
+}
+
+#[tauri::command]
+fn set_task_name(app: AppHandle, state: State<'_, AppState>, task_id: String, name: String) -> Result<Snapshot, String> {
+    let snapshot = {
+        let mut rt = state.inner.lock().unwrap();
+        rt.monitor.set_custom_name(&task_id, &name)?;
+        rt.monitor.snapshot().clone()
+    };
+    let _ = app.emit("tasks-updated", &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_task_pinned(app: AppHandle, state: State<'_, AppState>, task_id: String, pinned: bool) -> Result<Snapshot, String> {
+    let snapshot = {
+        let mut rt = state.inner.lock().unwrap();
+        rt.monitor.set_pinned(&task_id, pinned)?;
+        let retention = rt.settings.retention_secs();
+        rt.monitor.scan(true, retention);
+        rt.monitor.snapshot().clone()
+    };
+    let _ = app.emit("tasks-updated", &snapshot);
+    update_tray_tooltip(&app, &snapshot);
+    drain_attention(&app);
+    wake(&app);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -790,15 +962,16 @@ fn clear_dismissed(app: AppHandle, state: State<'_, AppState>) -> usize {
 
 #[tauri::command]
 async fn jump_to_task(app: AppHandle, task_id: String) -> Result<JumpOutcome, String> {
-    let task = {
+    let tasks = {
         let state = app.state::<AppState>();
         let rt = state.inner.lock().unwrap();
-        rt.monitor.task(&task_id).cloned()
+        rt.monitor.snapshot().tasks.clone()
     };
-    let outcome = match task {
-        Some(task) => jump::jump(&task),
+    let outcome = match tasks.iter().find(|task| task.id == task_id) {
+        Some(task) => jump::jump(task, &tasks),
         None => JumpOutcome::failed(&task_id, JumpLevel::L0, "task_gone"),
     };
+    acknowledge_viewed_completions(&app);
     let _ = app.emit("jump-feedback", &outcome);
     Ok(outcome)
 }
@@ -823,12 +996,11 @@ fn set_expanded(
     if expanded {
         if mode != PetMode::Expanded {
             enter_mode(&app, PetMode::Expanded, true);
-            if focus == Some(true) {
-                if let Some(win) = app.get_webview_window("main") {
-                    // Making the window key is what lets macOS deliver the
-                    // outside-click blur that dismisses the popover.
-                    let _ = win.set_focus();
-                }
+        }
+        if focus == Some(true) {
+            if let Some(win) = app.get_webview_window("main") {
+                // Explicit clicks, including rename, must receive keyboard input.
+                let _ = win.set_focus();
             }
         }
     } else if mode == PetMode::Expanded {
@@ -851,8 +1023,18 @@ fn request_collapse(app: AppHandle, state: State<'_, AppState>, force: Option<bo
 }
 
 #[tauri::command]
-fn hide_pet(app: AppHandle) {
-    hide_pet_now(&app);
+fn hide_pet(app: AppHandle, automatic: Option<bool>) {
+    if automatic == Some(true) {
+        let can_hide = {
+            let state = app.state::<AppState>();
+            let rt = state.inner.lock().unwrap();
+            rt.settings.edge_hide_enabled && rt.settings.auto_hide_after_s > 0
+                && rt.state.mode == PetMode::Collapsed && rt.state.edge != Edge::None
+        };
+        if can_hide { hide_pet_to_edge(&app); }
+    } else {
+        hide_pet_now(&app);
+    }
 }
 
 #[tauri::command]
@@ -931,6 +1113,7 @@ fn reset_settings(app: AppHandle, scope: String) -> Result<Settings, String> {
 
 #[derive(serde::Serialize)]
 struct SettingsMeta {
+    local_build: bool,
     data_dir: String,
     settings_path: String,
     pet_path: String,
@@ -946,6 +1129,7 @@ struct SettingsMeta {
 fn get_settings_meta(state: State<'_, AppState>) -> SettingsMeta {
     let rt = state.inner.lock().unwrap();
     SettingsMeta {
+        local_build: update::require_release_build().is_err(),
         data_dir: settings::data_dir().display().to_string(),
         settings_path: settings::settings_path().display().to_string(),
         pet_path: settings::pet_path().display().to_string(),
@@ -1036,6 +1220,205 @@ fn broadcast_icons(app: &AppHandle) {
         rt.icons.load_all()
     };
     let _ = app.emit("icons-changed", payload);
+}
+
+// ── Mascot pack commands (docs/PETS.md) ─────────────────────────
+
+#[tauri::command]
+fn list_pet_packs() -> Vec<pet_engine::backend::BackendInfo> {
+    pet_engine::mascot::list_packs()
+}
+
+/// Frontend render-chain telemetry (headless diagnosis). Only printed while
+/// `AGENT_MONITOR_DEBUG_MASCOT` is set.
+#[tauri::command]
+fn pet_debug_log(msg: String) {
+    if std::env::var("AGENT_MONITOR_DEBUG_MASCOT").is_ok() {
+        eprintln!("pet-render: {msg}");
+    }
+}
+
+#[tauri::command]
+fn get_pet_pack_image(pack: String, image: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let bytes = pet_engine::mascot::pack_image(&pack, &image)
+        .ok_or_else(|| format!("帧 {image} 不在宠物包 {pack} 中"))?;
+    Ok(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct IncomingPackFile {
+    path: String,
+    /// base64 of the file content (the webview reads folders directly).
+    data_base64: String,
+}
+
+#[tauri::command]
+fn import_pet_pack(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    files: Vec<IncomingPackFile>,
+) -> Result<pet_engine::backend::BackendInfo, String> {
+    use base64::Engine as _;
+    let incoming: Vec<pet_engine::mascot::IncomingFile> = files
+        .into_iter()
+        .map(|f| {
+            Ok(pet_engine::mascot::IncomingFile {
+                path: f.path,
+                bytes: base64::engine::general_purpose::STANDARD
+                    .decode(f.data_base64.trim())
+                    .map_err(|e| format!("base64 解码失败: {e}"))?,
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    let info = pet_engine::mascot::import_pack(&name, &incoming)?;
+    // A settings switch to the new pack must see it immediately.
+    state.inner.lock().unwrap().mascot.invalidate();
+    let _ = app.emit("pet-packs-changed", ());
+    Ok(info)
+}
+
+/// Right-click action menu: trigger a named action the pack actually ships.
+#[tauri::command]
+fn set_mascot_action(state: State<'_, AppState>, action: String) -> bool {
+    let mut rt = state.inner.lock().unwrap();
+    rt.mascot.perform(&action)
+}
+
+/// Right-click menu utility: walk the mascot back to the middle of the floor.
+#[tauri::command]
+fn pet_center(state: State<'_, AppState>) -> bool {
+    let mut rt = state.inner.lock().unwrap();
+    rt.mascot.center();
+    true
+}
+
+/// Right-click action menu: a NATIVE popup at the cursor. Zero geometry
+/// impact — the pet never shifts, snaps or clips because of a menu.
+#[tauri::command]
+fn pet_menu_open(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+    let (ready, lang) = {
+        let rt = state.inner.lock().unwrap();
+        (
+            matches!(rt.state.mode, PetMode::Collapsed | PetMode::EdgeHidden),
+            resolved_language(&rt.settings),
+        )
+    };
+    if !ready {
+        return Ok(false);
+    }
+    let menu_actions = {
+        let rt = state.inner.lock().unwrap();
+        if rt.settings.pet_kind == PetKind::Mascot { rt.mascot.menu_actions() } else { Vec::new() }
+    };
+    let roaming = {
+        let rt = state.inner.lock().unwrap();
+        rt.settings.pet_kind == PetKind::Mascot && rt.mascot.ready()
+            && rt.mascot.window_policy() == pet_engine::backend::WindowPolicy::FollowsAnchor
+    };
+    let Some(win) = app.get_webview_window("main") else {
+        return Ok(false);
+    };
+    let menu = tauri::menu::Menu::new(&app).map_err(|e| e.to_string())?;
+    for entry in &menu_actions {
+        let item = tauri::menu::MenuItem::with_id(
+            &app,
+            format!("pet-action:{}", entry.action),
+            pet_menu_label(&entry.label_key, lang),
+            true,
+            None::<&str>,
+        ).map_err(|e| e.to_string())?;
+        menu.append(&item).map_err(|e| e.to_string())?;
+    }
+    if roaming {
+        let item = tauri::menu::MenuItem::with_id(
+            &app,
+            "pet-action:__center",
+            pet_menu_label("__center", lang),
+            true,
+            None::<&str>,
+        ).map_err(|e| e.to_string())?;
+        menu.append(&item).map_err(|e| e.to_string())?;
+    }
+    if !menu_actions.is_empty() || roaming {
+        menu.append(&tauri::menu::PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    }
+    for action in ["__tasks", "__keep_visible", "__reset", "__settings", "__hide"] {
+        let item = tauri::menu::MenuItem::with_id(
+            &app, format!("pet-action:{action}"), pet_menu_label(action, lang), true, None::<&str>,
+        ).map_err(|e| e.to_string())?;
+        menu.append(&item).map_err(|e| e.to_string())?;
+    }
+    // Pop up at the cursor. popup_at's position is RELATIVE TO THE WINDOW's
+    // top-left corner (docs) in logical units — convert the global cursor
+    // point through the window's physical rect and its screen scale.
+    let rect = tracked_rect(&app, &win);
+    let (screens, idx) = screen_for(&win, &rect);
+    let scale = if screens.is_empty() { 2.0 } else { screens[idx].scale };
+    let (cx, cy) = cursor_point().unwrap_or((0.0, 0.0));
+    let rel_x = (cx - rect.x / scale).clamp(0.0, rect.w / scale);
+    let rel_y = (cy - rect.y / scale).clamp(0.0, rect.h / scale);
+    win.popup_menu_at(
+        &menu,
+        tauri::Position::Logical(tauri::LogicalPosition::new(rel_x, rel_y)),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Localized labels for the pet's native menu (backend supplies i18n keys).
+fn pet_menu_label(label_key: &str, lang: settings::Language) -> String {
+    let zh = lang == settings::Language::Zh;
+    match (label_key, zh) {
+        ("menuJump", false) => "Jump".into(),
+        ("menuJump", true) => "跳一下".into(),
+        ("menuRun", false) => "Run".into(),
+        ("menuRun", true) => "跑步".into(),
+        ("menuWalk", false) => "Walk a bit".into(),
+        ("menuWalk", true) => "走两步".into(),
+        ("menuBounce", false) => "Celebrate".into(),
+        ("menuBounce", true) => "撒个欢".into(),
+        ("menuSit", false) => "Sit down".into(),
+        ("menuSit", true) => "坐下".into(),
+        ("menuTrip", false) => "Stumble".into(),
+        ("menuTrip", true) => "摔一跤".into(),
+        ("menuStand", false) => "Stand still".into(),
+        ("menuStand", true) => "站好".into(),
+        ("menuPet", false) => "Head pat".into(),
+        ("menuPet", true) => "摸摸头".into(),
+        ("menuNap", false) => "Nap".into(),
+        ("menuNap", true) => "打个盹".into(),
+        ("menuCelebrate", false) => "Celebrate".into(),
+        ("menuCelebrate", true) => "庆祝一下".into(),
+        ("menuWatch", false) => "Look around".into(),
+        ("menuWatch", true) => "看看四周".into(),
+        ("menuThink", false) => "Think for a bit".into(),
+        ("menuThink", true) => "思考一下".into(),
+        ("menuWork", false) => "Work together".into(),
+        ("menuWork", true) => "陪我工作".into(),
+        ("menuSurprise", false) => "Surprise!".into(),
+        ("menuSurprise", true) => "吓一跳".into(),
+        ("menuResume", false) => "Follow task status".into(),
+        ("menuResume", true) => "恢复跟随任务状态".into(),
+        ("__tasks", false) => "Show Tasks".into(),
+        ("__tasks", true) => "打开任务列表".into(),
+        ("__keep_visible", false) => "Keep Pet Visible".into(),
+        ("__keep_visible", true) => "保持桌宠显示".into(),
+        ("__reset", false) => "Bring Pet Back / Reset Position".into(),
+        ("__reset", true) => "找回桌宠 / 重置位置".into(),
+        ("__settings", false) => "Settings…".into(),
+        ("__settings", true) => "设置…".into(),
+        ("__hide", false) => "Hide Pet".into(),
+        ("__hide", true) => "隐藏桌宠".into(),
+        ("__center", false) => "Go to screen center".into(),
+        ("__center", true) => "回到屏幕中间".into(),
+        _ => label_key.to_string(),
+    }
 }
 
 #[tauri::command]
@@ -1240,16 +1623,16 @@ fn watch_roots() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let candidates = [
+    let mut candidates = vec![
         home.join(".claude/projects"),
-        home.join(".claude/file-history"),
-        home.join(".claude/ide"),
-        home.join(".codex"),
-        home.join(".codex/sessions"),
         home.join(".dsh/storages/session_projcache/sessions"),
         home.join(".dsh/sessions"),
         home.join(".zcode/v2"),
+        home.join(".gemini/antigravity-cli"),
+        home.join(".gemini/antigravity/conversations"),
     ];
+    candidates.push(home.join(".gemini/antigravity/conversation_summaries.db"));
+    candidates.extend(agents::codex::configured_homes());
     candidates.into_iter().filter(|p| p.exists()).collect()
 }
 
@@ -1279,11 +1662,11 @@ fn start_watcher(tx: Sender<()>) {
             if raw_rx.recv().is_err() {
                 return;
             }
-            loop {
-                match raw_rx.recv_timeout(Duration::from_millis(700)) {
-                    Ok(()) => continue,
-                    Err(_) => break,
-                }
+            // Bound each burst: activity in another agent must not postpone
+            // an unanswered-question update indefinitely.
+            let started = std::time::Instant::now();
+            while let Some(remaining) = Duration::from_millis(700).checked_sub(started.elapsed()) {
+                if raw_rx.recv_timeout(remaining).is_err() { break; }
             }
             let _ = tx.send(());
         }
@@ -1298,9 +1681,9 @@ fn start_worker(app: AppHandle, rx: Receiver<()>) {
             let hidden = rt.state.mode.is_offscreen() || rt.state.hidden;
             let empty = rt.monitor.snapshot().tasks.is_empty();
             let configured = rt.settings.active_refresh_secs();
-            // Hidden or empty work stays on the 30 s floor regardless of the
-            // configured active interval (battery/CPU contract).
-            let interval = if hidden || empty {
+            // Only unread completions need foreground-view checks while hidden.
+            // Once acknowledged, hidden/empty work returns to the 30 s floor.
+            let interval = if (hidden || empty) && rt.unread_completions.is_empty() {
                 30
             } else {
                 configured.unwrap_or(5)
@@ -1331,6 +1714,7 @@ fn start_worker(app: AppHandle, rx: Receiver<()>) {
         // New blocking questions are surfaced on every channel (UI event,
         // notification/sound, auto-reveal) — only when a scan produced some.
         drain_attention(&app);
+        acknowledge_viewed_completions(&app);
         if !(hidden && empty) {
             reconcile_screens(&app);
         }
@@ -1506,14 +1890,312 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
 // ── Window events ───────────────────────────────────────────────
 
+// ── Mascot (roaming pet) host ───────────────────────────────────
+
+/// Logical margin between the mascot's anchor (feet) and the window bottom.
+const MASCOT_BOTTOM_MARGIN: f64 = 6.0;
+
+/// Restore the pet window's vibrancy (mirrors tauri.conf.json: popover,
+/// active, radius 16). Clearing goes through `window_vibrancy` directly —
+/// tauri's `set_effects(None)` is a Windows-only no-op on macOS.
+fn restore_pet_vibrancy(win: &WebviewWindow) -> Result<(), String> {
+    window_vibrancy::apply_vibrancy(
+        win,
+        window_vibrancy::NSVisualEffectMaterial::Popover,
+        Some(window_vibrancy::NSVisualEffectState::Active),
+        Some(16.0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// One engine tick: advance the mascot, move the window with it, hand the
+/// frame to the webview. Self-pauses unless the collapsed pet is in mascot
+/// mode — the classic capsule and every other mode are untouched.
+fn mascot_ticker_step(app: &AppHandle) {
+    static TICKS: AtomicU64 = AtomicU64::new(0);
+    let step = TICKS.fetch_add(1, Ordering::Relaxed);
+    if step % 25 == 0 { schedule_terminal_read_check(app); }
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let scale_size_kind = {
+        let rt = state.inner.lock().unwrap();
+        let kind = rt.settings.pet_kind;
+        let size = f64::from(rt.settings.collapsed_size);
+        let mode = rt.state.mode;
+        let hidden = rt.state.hidden;
+        (kind, size, mode, hidden)
+    };
+    let (kind, size_logical, mode, hidden) = scale_size_kind;
+    let debug = std::env::var("AGENT_MONITOR_DEBUG_MASCOT").is_ok();
+    if debug && step % 50 == 0 {
+        eprintln!(
+            "mascot-debug: tick={} kind={:?} mode={:?} hidden={} ready={}",
+            step, kind, mode, hidden, {
+                let rt = state.inner.lock().unwrap();
+                rt.mascot.ready()
+            }
+        );
+    }
+    // Mascot active: the engine runs and frames flow in every collapsed-like
+    // state INCLUDING EdgeHidden — the sliver tab shows a cropped piece of
+    // the pet, which requires the backend to be painting. Only the expanded
+    // panel and tray-hidden window replace the pet. The vibrancy clear uses
+    // the same condition (a roaming/fixed pet window is fully transparent;
+    // the frosted material would paint over nothing and just add a card).
+    // The objc calls MUST run on the main thread: window_vibrancy aborts
+    // when called from a background thread, so the work is dispatched and
+    // the flag flips inside the dispatched closure.
+    let showing_mascot = kind == PetKind::Mascot
+        && matches!(
+            mode,
+            PetMode::Collapsed | PetMode::EdgeHidden | PetMode::Dragging
+        );
+    {
+        let needs_sync = state.inner.lock().unwrap().pet_effects_off != showing_mascot;
+        if needs_sync {
+            let app_handle = app.clone();
+            let win_handle = win.clone();
+            let _ = win.run_on_main_thread(move || {
+                let state = app_handle.state::<AppState>();
+                let mut rt = state.inner.lock().unwrap();
+                if rt.pet_effects_off == showing_mascot {
+                    return;
+                }
+                let result = if showing_mascot {
+                    window_vibrancy::clear_vibrancy(&win_handle)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                } else {
+                    restore_pet_vibrancy(&win_handle)
+                };
+                if std::env::var("AGENT_MONITOR_DEBUG_MASCOT").is_ok() {
+                    eprintln!("mascot-debug: vibrancy -> {showing_mascot} result {:?}", result);
+                }
+                if result.is_ok() {
+                    rt.pet_effects_off = showing_mascot;
+                }
+            });
+        }
+    }
+    let needs_mood = {
+        let rt = state.inner.lock().unwrap();
+        step % 25 == 0 || (showing_mascot && (!rt.mascot.ready() || rt.mascot.pack_name != rt.settings.mascot_pack))
+    };
+    let task_mood = if needs_mood {
+        let mut rt = state.inner.lock().unwrap();
+        let tasks = rt.monitor.snapshot().tasks.clone();
+        Some(rt.mascot.task_mood.update(&tasks, now_millis()))
+    } else {
+        None
+    };
+    if !showing_mascot {
+        expanded_outside_dismissal(app, &win, step);
+        return;
+    }
+    let rect = tracked_rect(app, &win);
+    let (screens, idx) = screen_for(&win, &rect);
+    if screens.is_empty() {
+        return;
+    }
+    let scale = screens[idx].scale;
+    let visible = screens[idx].visible;
+
+    // Lazy activation / pack switch (settings can change the pack any time).
+    // A fresh roaming mascot spawns on the floor, never mid-air where the
+    // restored window happened to be. Activation also waits out the launch
+    // placement window: the ticker can tick before the startup code has
+    // placed the window, and spawning from a not-yet-placed rect pins the
+    // pet to a screen corner.
+    let anchor = pet_engine::mascot::MascotHost::anchor_of(
+        (rect.x, rect.y, rect.w, rect.h),
+        MASCOT_BOTTOM_MARGIN * scale,
+    );
+    let spawn = (anchor.0, visible.y + visible.h);
+    let frame = {
+        let mut rt = state.inner.lock().unwrap();
+        if !rt.mascot.ready() || rt.mascot.pack_name != rt.settings.mascot_pack {
+            // Wait out launch placement only when the window is actually
+            // being placed from prefs (Collapsed restore); an app that
+            // launches edge-hidden has no placement to wait for.
+            if mode == PetMode::Collapsed && now_millis() < rt.suppress_until_ms {
+                return;
+            }
+            let pack_name = rt.settings.mascot_pack.clone();
+            let seed = now_millis();
+            if !rt.mascot.activate(&pack_name, spawn, seed) {
+                // Broken pack: fall back to the classic presentation instead
+                // of an invisible pet.
+                rt.settings.pet_kind = PetKind::Classic;
+                rt.settings_store.save(&rt.settings);
+                drop(rt);
+                let view = {
+                    let rt = state.inner.lock().unwrap();
+                    state_view(&rt.state, &rt.settings)
+                };
+                let _ = app.emit("pet-state", view);
+                return;
+            }
+        }
+        rt.mascot.set_world(pet_engine::behavior::World {
+            left: visible.x,
+            right: visible.x + visible.w,
+            top: visible.y,
+            bottom: visible.y + visible.h,
+        });
+        if let Some(mood) = task_mood { rt.mascot.set_mood(mood); }
+        let f = rt.mascot.tick();
+        if std::env::var("AGENT_MONITOR_DEBUG_MASCOT").is_ok() && step >= 40 && step <= 45 {
+            eprintln!("mascot-debug: tick({step}) -> {:?}", f);
+        }
+        f
+    };
+    let Some(frame) = frame else { return };
+    let policy = state.inner.lock().unwrap().mascot.window_policy();
+    // Only roaming pets move the window from the ticker. State pets use the
+    // classic geometry pipeline (snap / edge hide / sliver), so the ticker
+    // just hands the frame to the webview.
+    if let (
+        pet_engine::backend::PetFrame::Sprite { anchor, .. },
+        pet_engine::backend::WindowPolicy::FollowsAnchor,
+    ) = (&frame, policy)
+    {
+        // Move the window only while collapsed; in EdgeHidden the classic
+        // sliver geometry owns the window and the frame must still reach the
+        // webview so the pet peeks out of the strip.
+        if mode == PetMode::Collapsed {
+        let size_logical = state.inner.lock().unwrap().mascot.window_size(size_logical);
+        let size_phys = size_logical * scale;
+        let (x, y) = pet_engine::mascot::MascotHost::window_pos_for(
+            *anchor,
+            size_phys,
+            MASCOT_BOTTOM_MARGIN * scale,
+        );
+        {
+            let mut rt = state.inner.lock().unwrap();
+            rt.suppress_until_ms = now_millis() + 120;
+            rt.last_rect = Some(Rect::new(x as f64, y as f64, size_phys, size_phys));
+        }
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        let _ = win.set_size(tauri::PhysicalSize::new(
+            size_phys.round() as u32,
+            size_phys.round() as u32,
+        ));
+        }
+    }
+    {
+        use std::sync::atomic::{AtomicU64 as AU64, Ordering as AOrd};
+        static EMIT_LOGGED: AU64 = AU64::new(0);
+        if std::env::var("AGENT_MONITOR_DEBUG_MASCOT").is_ok()
+            && EMIT_LOGGED.fetch_add(1, AOrd::Relaxed) < 5
+        {
+            eprintln!("mascot-debug: emit pet-frame {:?}", frame);
+        }
+    }
+    let _ = app.emit("pet-frame", &frame);
+}
+
+/// Global cursor position in logical screen points. Uses `CGEventGetLocation`,
+/// which needs no accessibility permission (unlike event taps).
+fn cursor_point() -> Option<(f64, f64)> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+    let event = CGEvent::new(source).ok()?;
+    let p = event.location();
+    Some((p.x, p.y))
+}
+
+/// Expanded-panel dismissal fallback. The panel closes on window blur
+/// ("click anywhere else"); if the blur never reaches the webview — focus
+/// was never acquired, or the event was lost — an unfocused panel with the
+/// cursor parked elsewhere is exactly "the user clicked somewhere else", so
+/// collapse it too. Hover-expanded panels keep the pointer inside and still
+/// close through the mouse-leave path, so they are untouched.
+fn expanded_outside_dismissal(app: &AppHandle, win: &WebviewWindow, step: u64) {
+    if step % 5 != 0 {
+        return; // ≈200 ms cadence
+    }
+    let state = app.state::<AppState>();
+    let mode = state.inner.lock().unwrap().state.mode;
+    if mode != PetMode::Expanded {
+        state.inner.lock().unwrap().expanded_dismiss_grace = 0;
+        return;
+    }
+    let rect = tracked_rect(app, win);
+    let (screens, idx) = screen_for(win, &rect);
+    if screens.is_empty() {
+        return;
+    }
+    let scale = screens[idx].scale;
+    let focused = win.is_focused().unwrap_or(true);
+    let debug = std::env::var("AGENT_MONITOR_DEBUG_MASCOT").is_ok();
+    if focused {
+        state.inner.lock().unwrap().expanded_dismiss_grace = 0;
+        return;
+    }
+    let Some((cx, cy_up)) = cursor_point() else {
+        return;
+    };
+    // CG reports a bottom-left origin; windows use top-left. Flip against
+    // the virtual screen's lowest bottom edge.
+    let max_bottom = screens
+        .iter()
+        .map(|s| s.visible.y + s.visible.h)
+        .fold(0.0f64, f64::max);
+    let cy = max_bottom - cy_up;
+    // Window rects are physical px; the cursor is logical points.
+    let rx = rect.x / scale;
+    let ry = rect.y / scale;
+    let rw = rect.w / scale;
+    let rh = rect.h / scale;
+    let inside = cx >= rx && cx <= rx + rw && cy >= ry && cy <= ry + rh;
+    if debug {
+        eprintln!(
+            "mascot-debug: expanded dismissal check focused={focused} cursor=({cx},{cy}) rect=({rx},{ry},{rw},{rh}) inside={inside}"
+        );
+    }
+    let mut rt = state.inner.lock().unwrap();
+    if inside {
+        rt.expanded_dismiss_grace = 0;
+        return;
+    }
+    rt.expanded_dismiss_grace += 1;
+    let grace = rt.expanded_dismiss_grace;
+    drop(rt);
+    if grace >= 3 {
+        // ≈600 ms of unfocused + cursor elsewhere: the user went somewhere
+        // else; collapse whether or not the webview saw the blur.
+        enter_mode(app, PetMode::Collapsed, false);
+    }
+}
+
 fn handle_window_moved(app: AppHandle) {
-    let suppressed = {
+    // Geometry written by us echoes back as Moved events (macOS applies
+    // set_position/set_size asynchronously, so they can land outside the
+    // suppression window). Reading those as user drags caused a thrash loop
+    // (Dragging → settle → Collapsed → move → Moved …) that pinned the CPU,
+    // and polluted the mascot's throw history with its own steps.
+    let current = {
+        let Some(win) = app.get_webview_window("main") else {
+            return;
+        };
+        window_rect(&win)
+    };
+    {
         let state = app.state::<AppState>();
         let rt = state.inner.lock().unwrap();
-        now_millis() < rt.suppress_until_ms
-    };
-    if suppressed {
-        return;
+        let suppressed = now_millis() < rt.suppress_until_ms;
+        let own_echo = rt.last_rect.map(|last| {
+            (current.x - last.x).abs() < 2.0
+                && (current.y - last.y).abs() < 2.0
+                && (current.w - last.w).abs() < 2.0
+                && (current.h - last.h).abs() < 2.0
+        });
+        if suppressed || own_echo == Some(true) {
+            return;
+        }
     }
     let generation = DRAG_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     {
@@ -1523,6 +2205,14 @@ fn handle_window_moved(app: AppHandle) {
             rt.mode_before_drag = rt.state.mode;
             rt.state.mode = PetMode::Dragging;
             rt.state.hidden = false;
+        }
+        // Mascot throws need the recent window trajectory.
+        if rt.settings.pet_kind == PetKind::Mascot {
+            if let Some(rect) = rt.last_rect {
+                rt.mascot.drag_history.push((now_millis(), rect.x, rect.y));
+                let keep = rt.mascot.drag_history.len().saturating_sub(12);
+                rt.mascot.drag_history.drain(..keep);
+            }
         }
     }
     std::thread::spawn(move || {
@@ -1547,6 +2237,47 @@ fn handle_window_moved(app: AppHandle) {
                 f64::from(rt.settings.hidden_sliver) * scale,
             )
         };
+        // Mascot release: no edge snapping — the engine takes the recorded
+        // trajectory as a throw and the ticker re-places the window.
+        let is_mascot = {
+            let state = app.state::<AppState>();
+            let rt = state.inner.lock().unwrap();
+            rt.settings.pet_kind == PetKind::Mascot && rt.mascot.ready()
+        };
+        // Only ROAMING pets bypass the classic settle (they throw from the
+        // drag trajectory instead of snapping). State pets are the classic
+        // pet with different artwork: they snap and persist like before.
+        let is_roaming = {
+            let state = app.state::<AppState>();
+            let rt = state.inner.lock().unwrap();
+            rt.settings.pet_kind == PetKind::Mascot
+                && rt.mascot.ready()
+                && rt.mascot.window_policy() == pet_engine::backend::WindowPolicy::FollowsAnchor
+        };
+        if is_roaming {
+            let size_phys = collapsed_size * scale;
+            let anchor = pet_engine::mascot::MascotHost::anchor_of(
+                (current.x, current.y, current.w, current.h),
+                MASCOT_BOTTOM_MARGIN * scale,
+            );
+            {
+                let state = app.state::<AppState>();
+                let mut rt = state.inner.lock().unwrap();
+                rt.state.mode = PetMode::Collapsed;
+                rt.state.edge = Edge::None;
+                rt.state.hidden = false;
+                rt.suppress_until_ms = now_millis() + 350;
+                rt.mascot.drag_ended(anchor, now_millis());
+                let view = state_view(&rt.state, &rt.settings);
+                drop(rt);
+                let _ = app.emit("pet-state", view);
+            }
+            let target = Rect::new(current.x, current.y, size_phys, size_phys);
+            remember_rect(&app, target);
+            set_rect(&win, target);
+            persist(&app, target, Edge::None, PetMode::Collapsed);
+            return;
+        }
         let (snapped, edge) = finish_drag_with(current, &visible, snap_distance * scale);
         let (mode, rows) = {
             let state = app.state::<AppState>();
@@ -1557,7 +2288,7 @@ fn handle_window_moved(app: AppHandle) {
             };
             (mode, rt.settings.visible_rows(rt.monitor.snapshot().tasks.len()))
         };
-        let (tw, th) = target_size(mode, rows, collapsed_size, sliver, scale, snapped);
+        let (tw, th) = target_size(mode, rows, collapsed_size, sliver, scale, snapped, edge);
         let target = anchored_resize(
             Rect::new(snapped.x, snapped.y, tw, th),
             edge,
@@ -1623,7 +2354,7 @@ pub fn jump_task(task_id: &str) {
     let mut monitor = Monitor::new(&settings.enabled_agents);
     monitor.scan(true, settings.retention_secs());
     match monitor.task(task_id) {
-        Some(task) => match serde_json::to_string_pretty(&jump::jump(task)) {
+        Some(task) => match serde_json::to_string_pretty(&jump::jump(task, &monitor.snapshot().tasks)) {
             Ok(json) => println!("{json}"),
             Err(e) => eprintln!("failed to serialise outcome: {e}"),
         },
@@ -1659,13 +2390,21 @@ pub fn dump_ax_rows(pid: u32) {
         pid: u32,
         trusted: bool,
         focused_window_title: Option<String>,
+        focused_conversation: Option<ax::FocusedConversation>,
+        terminal_tty: Option<String>,
+        terminal_rollouts: Vec<PathBuf>,
         window_titles: Vec<String>,
         rows: Vec<ax::Row>,
     }
+    let terminal_tty = jump::focused_terminal_tty();
+    let terminal_rollouts = terminal_tty.as_deref().map(agents::codex::terminal_rollouts).unwrap_or_default();
     let dump = AxRowsDump {
+        terminal_tty,
+        terminal_rollouts,
         pid,
         trusted: ax::is_trusted(),
         focused_window_title: ax::focused_window_title(pid),
+        focused_conversation: ax::focused_conversation(&["com.openai.codex".into(), "com.deepseek.dsh".into(), "com.microsoft.VSCode".into(), "dev.zcode.app".into()]),
         window_titles: ax::window_titles(pid),
         rows: ax::rows(pid),
     };
@@ -1733,7 +2472,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ping,
             get_snapshot,
+            watch_unread_completions,
             get_agents,
+            set_task_pinned,
+            set_task_name,
             refresh,
             dismiss_task,
             restore_dismissed_task,
@@ -1757,6 +2499,13 @@ pub fn run() {
             get_custom_icons,
             save_custom_icon,
             clear_custom_icon,
+            list_pet_packs,
+            pet_debug_log,
+            get_pet_pack_image,
+            import_pet_pack,
+            set_mascot_action,
+            pet_center,
+            pet_menu_open,
             import_legacy_settings,
             open_settings,
             close_settings,
@@ -1789,10 +2538,10 @@ pub fn run() {
 
             // Initial position from persisted prefs, constrained to a live screen.
             let (screens, idx, prefs, hidden) = {
-                let state = app.state::<AppState>();
-                let rt = state.inner.lock().unwrap();
                 let screens = build_screens(&win);
                 let idx = pick_screen(&screens, 0.0, 0.0);
+                let state = app.state::<AppState>();
+                let rt = state.inner.lock().unwrap();
                 (screens, idx, rt.prefs.clone(), rt.prefs.hidden)
             };
             let scale = screens[idx].scale;
@@ -1804,9 +2553,9 @@ pub fn run() {
             set_rect(&win, rect);
             remember_rect(&handle, rect);
             {
+                let (screens, idx) = screen_for(&win, &rect);
                 let state = app.state::<AppState>();
                 let mut rt = state.inner.lock().unwrap();
-                let (screens, idx) = screen_for(&win, &rect);
                 rt.prefs.position = position_from_rect(&rect, &screens[idx], prefs.position.edge);
                 rt.state.edge = prefs.position.edge;
                 rt.state.mode = if hidden {
@@ -1847,6 +2596,66 @@ pub fn run() {
                 }
                 _ => {}
             });
+
+            // Roaming mascot: one ticker drives the pet engine and both the
+            // window position and the sprite frames. It self-pauses whenever
+            // the pet is not in collapsed mascot mode.
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_millis(
+                        pet_engine::behavior::TICK_MS,
+                    ));
+                    mascot_ticker_step(&h);
+                });
+            }
+
+            // Right-click action menu selections (native popup, see
+            // pet_menu_open). Tray menu ids carry a different prefix.
+            {
+                let h = handle.clone();
+                app.on_menu_event(move |app, event| {
+                    let Some(action) = event.id().as_ref().strip_prefix("pet-action:") else {
+                        return;
+                    };
+                    match action {
+                        "__tasks" => {
+                            enter_mode(app, PetMode::Expanded, false);
+                            if let Some(win) = app.get_webview_window("main") { let _ = win.set_focus(); }
+                            return;
+                        }
+                        "__keep_visible" => {
+                            let mut next = settings_snapshot(app);
+                            next.auto_hide_after_s = 0;
+                            commit_settings(app, next);
+                            show_pet(app);
+                            return;
+                        }
+                        "__reset" => { reset_pet_position(app); return; }
+                        "__settings" => { show_settings_window(app); return; }
+                        "__hide" => { hide_pet_now(app); return; }
+                        _ => {}
+                    }
+                    let state = app.state::<AppState>();
+                    let mut rt = state.inner.lock().unwrap();
+                    if action == "__center" {
+                        rt.mascot.center();
+                    } else {
+                        rt.mascot.perform(action);
+                    }
+                });
+            }
+
+            // Headless diagnosis: surface webview script errors in stderr
+            // (AGENT_MONITOR_DEBUG_MASCOT) — a crashed bootstrap leaves the
+            // pet window blank with no other trace.
+            {
+                let h = handle.clone();
+                let _ = win.eval(
+                    "window.addEventListener('error', function(e){ try { __TAURI__.core.invoke('pet_debug_log', { msg: 'JSERR ' + e.message + ' @' + e.filename + ':' + e.lineno }); } catch (_) {} }); window.addEventListener('unhandledrejection', function(e){ try { __TAURI__.core.invoke('pet_debug_log', { msg: 'JSREJ ' + e.reason }); } catch (_) {} });",
+                );
+                let _ = h;
+            }
 
             // First collection before the UI asks for a snapshot.
             {
@@ -1926,6 +2735,98 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn completed_task(id: &str, title: &str) -> model::TaskRecord {
+        model::TaskRecord {
+            id: format!("codex:{id}"), agent_key: "codex".into(), agent_name: "Codex".into(),
+            host: "desktop".into(), session_id: Some(id.into()), task_id: None,
+            title: title.into(), status: model::TaskStatus::Completed,
+            completion_id: Some("100".into()),
+            completion: Some(model::CompletionEvidence::TaskEnd), status_reason: "task_complete".into(),
+            last_activity_secs: 100, collected_at_secs: 100, summary: None, model: None,
+            origin: model::DataOrigin::Event,
+            target: model::JumpTarget { app_name: Some("ChatGPT".into()), bundle_id: Some("com.openai.codex".into()), ..Default::default() },
+            target_validity: model::TargetValidity::Valid, invalid_reason: None,
+            capability: model::JumpCapability::default(), level: model::JumpLevel::L3, pinned: false,
+        }
+    }
+
+    #[test]
+    fn terminal_view_matches_the_open_rollout_even_with_duplicate_titles() {
+        let mut first = completed_task("one", "Same title"); first.host = "terminal".into();
+        let mut second = completed_task("two", "Same title"); second.host = "terminal".into();
+        let tasks = vec![first, second];
+        let unread = vec![ViewedCompletion { task_id: "codex:one".into(), completion_id: "100".into() },
+            ViewedCompletion { task_id: "codex:two".into(), completion_id: "100".into() }];
+        let paths = vec![PathBuf::from("/home/sessions/2026/11/03/rollout-2026-11-03-one.jsonl")];
+        assert_eq!(terminal_viewed_completion(&paths, &tasks, &unread), Some(unread[0].clone()));
+        let other = vec![PathBuf::from("/home/sessions/rollout-date-one-longer.jsonl")];
+        assert_eq!(terminal_viewed_completion(&other, &tasks, &unread), None);
+        let ambiguous = vec![paths[0].clone(), PathBuf::from("/home/sessions/rollout-date-two.jsonl")];
+        assert_eq!(terminal_viewed_completion(&ambiguous, &tasks, &unread), None);
+    }
+
+    #[test]
+    fn terminal_view_does_not_read_running_tasks_or_newer_answers() {
+        let mut task = completed_task("one", "Task"); task.host = "terminal".into();
+        let paths = vec![PathBuf::from("/home/sessions/rollout-date-one.jsonl")];
+        let old = vec![ViewedCompletion { task_id: task.id.clone(), completion_id: "99".into() }];
+        assert_eq!(terminal_viewed_completion(&paths, &[task.clone()], &old), None);
+        let current = vec![ViewedCompletion { task_id: task.id.clone(), completion_id: "100".into() }];
+        task.status = model::TaskStatus::Running;
+        assert_eq!(terminal_viewed_completion(&paths, &[task.clone()], &current), None);
+        task.status = model::TaskStatus::Completed;
+        task.host = "desktop".into();
+        assert_eq!(terminal_viewed_completion(&paths, &[task], &current), None);
+    }
+
+    #[test]
+    fn manual_view_requires_the_exact_conversation_in_the_foreground_app() {
+        let tasks = vec![completed_task("one", "First task"), completed_task("two", "Second task")];
+        let unread = vec![ViewedCompletion { task_id: "codex:one".into(), completion_id: "100".into() }];
+        let mut context = ax::FocusedConversation { app_name: "ChatGPT".into(), bundle_id: "com.openai.codex".into(), title: "First task — ChatGPT".into(), ..Default::default() };
+        assert_eq!(viewed_completion(&context, &tasks, &unread), Some(unread[0].clone()));
+        context.app_name = "Renamed Codex".into();
+        context.title = "First task — Renamed Codex".into();
+        assert_eq!(viewed_completion(&context, &tasks, &unread), Some(unread[0].clone()));
+        context.app_name = "ChatGPT".into();
+        context.title = "First".into();
+        assert_eq!(viewed_completion(&context, &tasks, &unread), None);
+        context.title = "First task".into();
+        context.bundle_id = "other.app".into();
+        assert_eq!(viewed_completion(&context, &tasks, &unread), None);
+        context.bundle_id = "com.openai.codex".into();
+        context.title = "Some workspace".into();
+        assert_eq!(viewed_completion(&context, &tasks, &unread), None);
+        context.selected_titles.push("First task".into());
+        assert_eq!(viewed_completion(&context, &tasks, &unread), Some(unread[0].clone()));
+    }
+
+    #[test]
+    fn duplicate_titles_require_a_session_identifier_even_if_only_one_is_unread() {
+        let tasks = vec![completed_task("one", "Same title"), completed_task("two", "Same title")];
+        let unread = vec![ViewedCompletion { task_id: "codex:one".into(), completion_id: "100".into() }];
+        let mut context = ax::FocusedConversation { app_name: "ChatGPT".into(), bundle_id: "com.openai.codex".into(), title: "Same title".into(), ..Default::default() };
+        assert_eq!(viewed_completion(&context, &tasks, &unread), None);
+        context.references.push("codex://threads/one-longer".into());
+        assert_eq!(viewed_completion(&context, &tasks, &unread), None);
+        context.references = vec!["codex://threads/one".into()];
+        assert_eq!(viewed_completion(&context, &tasks, &unread), Some(unread[0].clone()));
+    }
+
+    #[test]
+    fn manual_view_does_not_acknowledge_running_or_a_different_completion_version() {
+        let mut tasks = vec![completed_task("one", "Task")];
+        let unread = vec![ViewedCompletion { task_id: "codex:one".into(), completion_id: "99".into() }];
+        let context = ax::FocusedConversation { app_name: "ChatGPT".into(), bundle_id: "com.openai.codex".into(), title: "Task".into(), ..Default::default() };
+        assert_eq!(viewed_completion(&context, &tasks, &unread), None);
+        tasks[0].completion_id = Some("99".into());
+        tasks[0].last_activity_secs = 999;
+        assert_eq!(viewed_completion(&context, &tasks, &unread), Some(unread[0].clone()));
+        tasks[0].last_activity_secs = 99;
+        tasks[0].status = model::TaskStatus::Running;
+        assert_eq!(viewed_completion(&context, &tasks, &unread), None);
+    }
 
     fn alert(agent: &str, title: &str, status: &str) -> PendingAlert {
         PendingAlert {

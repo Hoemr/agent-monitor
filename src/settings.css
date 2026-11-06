@@ -412,6 +412,24 @@ body {
   margin-top: 7px;
 }
 
+/* Pet pack picker rows: radio + name + author/license meta. */
+.row.pack-row {
+  cursor: default;
+}
+.row.pack-row input[type="radio"] {
+  margin-right: 10px;
+  accent-color: var(--accent, #4a90d9);
+}
+.pack-preview {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 56px;
+  margin-right: 12px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+.pack-preview[hidden] { display: none; }
+
 /* The file input stays focusable (keyboard access) but is visually hidden; the
  * adjacent label acts as the macOS-style button and shows the focus ring. */
 .icon-file {

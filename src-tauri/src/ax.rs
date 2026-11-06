@@ -20,6 +20,32 @@
 
 use serde::Serialize;
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct FocusedConversation {
+    pub app_name: String,
+    pub bundle_id: String,
+    pub title: String,
+    pub selected_titles: Vec<String>,
+    pub references: Vec<String>,
+    pub focused_web_title: Option<String>,
+}
+
+/// Foreground identity without an AX permission requirement.
+pub fn foreground_bundle_id() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    { platform::foreground_application().map(|(_, _, bundle)| bundle) }
+    #[cfg(not(target_os = "macos"))]
+    { None }
+}
+
+/// Foreground application only; never infer viewing from a background window.
+pub fn focused_conversation(bundle_ids: &[String]) -> Option<FocusedConversation> {
+    #[cfg(target_os = "macos")]
+    { platform::focused_conversation(bundle_ids) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = bundle_ids; None }
+}
+
 /// Global screen rectangle, top-left origin (AX `AXPosition`/`AXSize` units).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct Rect {
@@ -155,8 +181,8 @@ pub fn click(_rect: Rect) -> bool {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{Rect, Row, TextRun};
-    use std::ffi::{c_char, c_void, CString};
+    use super::{FocusedConversation, Rect, Row, TextRun};
+    use std::ffi::{c_char, c_void, CStr, CString};
     use std::time::Duration;
 
     type CfType = *const c_void;
@@ -218,6 +244,8 @@ mod platform {
         fn CFGetTypeID(cf: CfType) -> usize;
         fn CFStringGetTypeID() -> usize;
         fn CFArrayGetTypeID() -> usize;
+        fn CFURLGetTypeID() -> usize;
+        fn CFURLGetString(url: CfType) -> CfString;
         fn CFStringCreateWithCString(
             alloc: CfAllocator,
             c_str: *const c_char,
@@ -531,6 +559,107 @@ mod platform {
         copy_attribute(app, "AXWindows")
             .map(|value| array_items(&value))
             .unwrap_or_default()
+    }
+
+    fn references(element: AxElement, out: &mut Vec<String>) {
+        for name in ["AXIdentifier", "AXDOMIdentifier", "AXDocument", "AXURL"] {
+            if let Some(value) = copy_attribute(element, name) {
+                let text = if type_id_matches(&value, unsafe { CFURLGetTypeID() }) {
+                    retain(unsafe { CFURLGetString(value.as_ptr()) }).and_then(|s| string_value(&s))
+                } else { string_value(&value) };
+                if let Some(text) = text { out.push(text); }
+            }
+        }
+    }
+
+    fn collect_selected(element: AxElement, depth: usize, budget: &mut usize, selected: bool, out: &mut FocusedConversation) {
+        if depth > MAX_DEPTH || *budget == 0 { return; }
+        *budget -= 1;
+        let role = attribute_string(element, "AXRole").unwrap_or_default();
+        let selected = selected || (matches!(role.as_str(), "AXRow" | "AXTab" | "AXRadioButton")
+            && copy_attribute(element, "AXSelected").map(|v| v.as_ptr() == unsafe { kCFBooleanTrue }).unwrap_or(false));
+        if selected {
+            references(element, &mut out.references);
+            if let Some(text) = element_text(element) { out.selected_titles.push(text); }
+        }
+        for child in children(element) {
+            collect_selected(child.as_ptr(), depth + 1, budget, selected, out);
+        }
+    }
+
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    #[link(name = "AppKit", kind = "framework")]
+    extern "C" {}
+
+    /// NSWorkspace supplies the real foreground PID and bundle identity.
+    /// AX application titles are optional and are not application identities.
+    pub(super) fn foreground_application() -> Option<(i32, String, String)> {
+        struct Pool(*mut c_void);
+        impl Drop for Pool {
+            fn drop(&mut self) { unsafe { objc_autoreleasePoolPop(self.0) }; }
+        }
+        unsafe fn message(object: *mut c_void, name: &[u8]) -> *mut c_void {
+            if object.is_null() { return std::ptr::null_mut(); }
+            let send: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+                std::mem::transmute(objc_msgSend as *const ());
+            send(object, sel_registerName(name.as_ptr().cast()))
+        }
+        unsafe fn string(object: *mut c_void) -> Option<String> {
+            let utf8 = message(object, b"UTF8String\0") as *const c_char;
+            (!utf8.is_null()).then(|| CStr::from_ptr(utf8).to_string_lossy().into_owned())
+        }
+        // Calls below use AppKit's documented zero-argument selectors. Objects
+        // are borrowed inside one autorelease pool; strings are copied out.
+        unsafe {
+            let _pool = Pool(objc_autoreleasePoolPush());
+            let workspace = message(objc_getClass(b"NSWorkspace\0".as_ptr().cast()), b"sharedWorkspace\0");
+            let app = message(workspace, b"frontmostApplication\0");
+            if app.is_null() { return None; }
+            let send_pid: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 =
+                std::mem::transmute(objc_msgSend as *const ());
+            let pid = send_pid(app, sel_registerName(b"processIdentifier\0".as_ptr().cast()));
+            let name = string(message(app, b"localizedName\0"))?;
+            let bundle = string(message(app, b"bundleIdentifier\0"))?;
+            (pid > 0).then_some((pid, name, bundle))
+        }
+    }
+
+    pub fn focused_conversation(bundle_ids: &[String]) -> Option<FocusedConversation> {
+        if !is_trusted() { return None; }
+        let (pid, app_name, bundle_id) = foreground_application()?;
+        if !bundle_ids.iter().any(|id| id == &bundle_id) { return None; }
+        let app = app_element(pid as u32)?;
+        let window = copy_attribute(app.as_ptr(), "AXFocusedWindow")?;
+        let mut out = FocusedConversation {
+            app_name,
+            bundle_id,
+            title: attribute_string(window.as_ptr(), "AXTitle").unwrap_or_default(),
+            ..Default::default()
+        };
+        references(window.as_ptr(), &mut out.references);
+        // A VSCode chat input lives inside a webview whose URL identifies the
+        // active session. Read the focused branch, never background chat tabs.
+        if let Some(mut focused) = copy_attribute(app.as_ptr(), "AXFocusedUIElement") {
+            for _ in 0..MAX_DEPTH {
+                references(focused.as_ptr(), &mut out.references);
+                if out.focused_web_title.is_none() && attribute_string(focused.as_ptr(), "AXRole").as_deref() == Some("AXWebArea") {
+                    out.focused_web_title = attribute_string(focused.as_ptr(), "AXTitle").filter(|s| !s.trim().is_empty());
+                }
+                let Some(parent) = copy_attribute(focused.as_ptr(), "AXParent") else { break; };
+                focused = parent;
+            }
+        }
+        let mut budget = 2_000;
+        collect_selected(window.as_ptr(), 0, &mut budget, false, &mut out);
+        Some(out)
     }
 
     pub fn is_trusted() -> bool {

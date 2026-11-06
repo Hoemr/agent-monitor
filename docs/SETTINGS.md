@@ -59,7 +59,7 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 | key | 类型 | 默认 | 范围 | 生效 |
 |---|---|---|---|---|
 | `refresh_interval` | `auto \| 3s \| 5s \| 10s` | `auto` | 自动 = 可见 5s / 隐藏或空 30s；显式值最低 3s（硬下限 2s，任何输入不会更小） | 即时：唤醒调度线程，下一轮按新间隔执行；隐藏/空闲仍保持 30s 下限 |
-| `retention_hours` | u32 | `6` | `1 / 6 / 24 / 72`（就近吸附） | 即时：下一轮扫描传入所有适配器；`running` / `waiting_input` / `waiting_approval` 永不因保留期隐藏 |
+| `retention_hours` | u32 | `6` | `1 / 6 / 24 / 72 / 168 / 720`（就近吸附；168=一周，720=一个月） | 即时：下一轮扫描传入所有适配器；`running` / `waiting_input` / `waiting_approval` 永不因保留期隐藏 |
 | `enabled_agents` | 对象 | 全 `true` | `codex` / `dsh` / `zcode` / `claude_code` 布尔 | 即时：重建 registry，关闭的适配器**不再采集**（不是采集后过滤） |
 | `max_visible_rows` | u32 | `5` | `3 / 5 / 8`（就近吸附；几何层支持 1..=8） | 即时：展开窗口高度 = `44 + rows×64 + 26`，列表 max-height 同步，仍受屏幕 visible frame 钳制 |
 
@@ -70,11 +70,13 @@ Agent 阻塞在询问（`waiting_input` / `waiting_approval`）时，除桌宠�
 | `hover_expand_ms` | u64 | `150` | `100..=1000` | 即时：悬停展开延迟 |
 | `collapse_delay_ms` | u64 | `800` | `300..=2000` | 即时：离开后收起延迟 |
 | `snap_distance` | u32 | `16` | `0..=40`（0 = 不吸附） | 即时：拖拽结束吸附判定（逻辑点 × 屏幕缩放） |
-| `hidden_sliver` | u32 | `14` | `8..=24` | 即时：边缘隐藏后露出的小方块边长（该方块贴在屏幕边上：吸附的那条边完全不可见，垂直两条边只露出这么多）；已隐藏时重新贴边 |
+| `hidden_sliver` | u32 | `14` | `8..=24` | 即时：边缘隐藏条的窄边宽度；长边跟随 collapsed_size，已隐藏时立即更新 |
 | `collapsed_size` | u32 | `72` | `48..=96`（px） | 即时：收起/吸附后桌宠的边长；窗口尺寸与 CSS 同步（实测 48/72/96 → 窗口 48/72/96，右锚定） |
-| `auto_hide_after_s` | u32 | `0`（关闭） | `0..=60`（秒） | 即时：吸附到屏幕边缘后，空闲该时长即自动隐藏（跟随 `edge_hide_enabled`：贴边半隐藏或收起到托盘）。悬停、拖拽、展开会取消；未吸附（`edge=none`）不触发；单次计时器，无轮询 |
+| `auto_hide_after_s` | u32 | `0`（关闭） | `0..=60`（秒） | 即时：吸附到屏幕边缘后，仅在 `edge_hide_enabled=true` 时，空闲该时长即收成可见边缘条；关闭贴边隐藏时不会自动收进托盘。悬停、拖拽、展开会取消；未吸附（`edge=none`）不触发；单次计时器，无轮询 |
 | `edge_hide_enabled` | bool | `true` | — | 即时：关闭后“隐藏”= **收起到托盘**（`hide()`，不移动窗口）；托盘“显示桌宠”/再次启动恢复；正在边缘隐藏时切到托盘隐藏 |
 | `icon_style` | `builtin \| custom` | `builtin` | — | 即时：使用内置三条杠图案，或使用上传的自定义图片（未上传则回退内置）；见 [`docs/ICONS.md`](ICONS.md) |
+| `pet_kind` | `classic \| mascot` | `classic` | — | 即时：收起态呈现方式。`mascot` = Rust 宠物引擎驱动的活动桌宠（走动/掉落/拖拽抛掷/任务状态联动）；包加载失败时自动回退 `classic` 并写回设置；见 [`docs/PETS.md`](PETS.md) |
+| `mascot_pack` | 字符串 | `nailong` | 非空（空值归一为默认）；旧 `agent-cat` / `byte-slime` 分别迁移为 `nailong` / `doraemon` | 即时：活动桌宠使用的宠物包（内置名或 `pets/` 下的目录名）；设置页可导入 Shimeji-ee 格式包 |
 | `animations` | `system \| always \| off` | `system` | — | 即时：`off` 关闭桌宠窗口几何动画与两个窗口的 CSS 过渡；`always` 忽略 `prefers-reduced-motion`；`system` 尊重系统减弱动态效果 |
 | 位置重置 | 动作 | — | — | 设置页“重置桌宠位置”调用既有 reset 逻辑（右侧 45% 高度） |
 

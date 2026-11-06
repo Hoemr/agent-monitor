@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "id": "tihun",
+  "name": "啼魂",
+  "author": "AI-assisted fan artwork",
+  "version": "1.1.0",
+  "license": "Character rights reserved",
+  "source": "Built-in image_gen · 2026-11-05; see output/pet-art/PROMPTS.md",
+  "description": "参照皮蛋、豆花、花卷的精细像素风格制作，八种表情状态及逐像素呼吸动画。",
+  "preview": "idle.png",
+  "states": {
+    "idle": "idle.png",
+    "working": "working.png",
+    "thinking": "thinking.png",
+    "interacting": "interacting.png",
+    "celebrating": "celebrating.png",
+    "alarmed": "alarmed.png",
+    "sleeping": "sleeping.png",
+    "watching": "watching.png"
+  }
+}

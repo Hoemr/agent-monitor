@@ -47,7 +47,35 @@ jobs:
       - name: Build release binary
         run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
+      - name: Import persistent macOS release signing identity
+        shell: python
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          import base64, os, pathlib, secrets, subprocess, sys, tempfile
+          if not os.environ.get('CERTIFICATE') or not os.environ.get('SIGNING_IDENTITY'):
+              sys.exit('Configure MACOS_SIGNING_CERTIFICATE_P12 and MACOS_SIGNING_IDENTITY; ad-hoc releases are no longer allowed.')
+          def run(*args):
+              result = subprocess.run(args, capture_output=True, text=True)
+              if result.returncode:
+                  sys.exit(result.stderr or 'Code signing setup failed')
+          folder = pathlib.Path(tempfile.mkdtemp())
+          p12 = folder / 'identity.p12'
+          p12.write_bytes(base64.b64decode(os.environ['CERTIFICATE'], validate=True))
+          keychain = str(folder / 'release.keychain-db')
+          password = secrets.token_urlsafe(32)
+          run('security', 'create-keychain', '-p', password, keychain)
+          run('security', 'unlock-keychain', '-p', password, keychain)
+          run('security', 'import', str(p12), '-k', keychain, '-P', os.environ['CERTIFICATE_PASSWORD'], '-T', '/usr/bin/codesign')
+          run('security', 'set-key-partition-list', '-S', 'apple-tool:,apple:', '-s', '-k', password, keychain)
+          run('security', 'default-keychain', '-d', 'user', '-s', keychain)
+          p12.unlink()
+
       - name: Assemble .app bundle
+        env:
+          AGENT_MONITOR_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: bash scripts/bundle-mac.sh
 
       - name: Package (manual download zip)

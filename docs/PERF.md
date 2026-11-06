@@ -110,8 +110,10 @@ the trend direction is downward.
 
 * File changes arrive via `notify` (FSEvents) with a 700 ms debounce; the periodic
   fallback is configurable (`refresh_interval`, default auto = **5 s** while
-  visible with tasks; 3 s / 5 s / 10 s options) and always **30 s** while hidden
-  or empty. A settings change wakes the scheduler immediately.
+  visible with tasks; 3 s / 5 s / 10 s options) and **30 s** while hidden or empty
+  with no unread completions. Unread completions keep the active interval so a
+  manually viewed foreground conversation can be acknowledged; the existing
+  scheduler returns to 30 s once they are read. No extra timer is added.
 * Every adapter checks its source’s mtime (or byte offset) before parsing; an
   unchanged source costs a stat + a string comparison, no JSON/SQLite read.
 * The UI re-renders only when the snapshot’s render hash changes; relative times

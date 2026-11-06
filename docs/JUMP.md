@@ -5,6 +5,19 @@ All results below were produced by running the **real release/debug binary** wit
 `scripts/jump-probe.sh`. An action is only reported as a level when a read-back
 signal confirmed it; “command sent” is never counted.
 
+## VSCode session routes (2026-10-28)
+
+The installed extensions expose `vscode://openai.chatgpt/local/<id>` and
+`vscode://anthropic.claude-code/open?session=<id>`. The monitor opens the project
+first, then the route. L3 requires a session ID in the focused chat ancestry or
+an exact, unique source title on that focused webview. Background tabs and
+workspace titles are not session proof. VSCode may show its extension-URI
+confirmation dialog before opening the chat.
+
+Live UI verification opened Codex “完善 Related Works 结构” and Claude Code
+“arXiv 投稿版颜色标记清理”, including the latter transcript UUID in the webview URL.
+The older L2 observations below describe the previous implementation.
+
 ## Implemented ladder
 
 1. `TargetValidity::Invalid` → fail immediately (`workspace_missing`, `rollout_missing`, …) with next step `dismiss`. No blind app activation.

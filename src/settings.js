@@ -74,7 +74,7 @@ function queryParam(name) {
 var GROUPS = ['general', 'attention', 'monitor', 'pet', 'jump', 'update', 'data'];
 var GROUP_KEY = 'am-settings-group';
 
-var RETENTION_CHOICES = [1, 6, 24, 72];
+var RETENTION_CHOICES = [1, 6, 24, 72, 168, 720];
 var ROW_CHOICES = [3, 5, 8];
 var RANGES = {
   hover_expand_ms: { min: 100, max: 1000, step: 10 },
@@ -109,7 +109,7 @@ function defaultSettings() {
     auto_check_updates: true,
     refresh_interval: 'auto',
     retention_hours: 6,
-    enabled_agents: { codex: true, dsh: true, zcode: true, claude_code: true },
+    enabled_agents: { codex: true, dsh: true, zcode: true, claude_code: true, antigravity: true },
     max_visible_rows: 5,
     hover_expand_ms: 150,
     collapse_delay_ms: 800,
@@ -120,6 +120,8 @@ function defaultSettings() {
     edge_hide_enabled: true,
     animations: 'system',
     icon_style: 'builtin',
+    pet_kind: 'classic',
+    mascot_pack: 'nailong',
     toast_on_degraded: true,
     auto_dismiss_invalid: false,
     legacy_imported: false
@@ -166,6 +168,9 @@ function normalizeSettings(settings) {
   out.auto_show_on_question = !!out.auto_show_on_question;
   out.auto_check_updates = !!out.auto_check_updates;
   if (out.icon_style !== 'custom') out.icon_style = 'builtin';
+  if (out.pet_kind !== 'mascot') out.pet_kind = 'classic';
+  if (typeof out.mascot_pack !== 'string' || !out.mascot_pack.trim() || out.mascot_pack === 'agent-cat') out.mascot_pack = 'nailong';
+  if (out.mascot_pack === 'byte-slime') out.mascot_pack = 'doraemon';
   return out;
 }
 
@@ -200,6 +205,8 @@ function resetScope(settings, scope) {
     out.edge_hide_enabled = d.edge_hide_enabled;
     out.animations = d.animations;
     out.icon_style = d.icon_style;
+    out.pet_kind = d.pet_kind;
+    out.mascot_pack = d.mascot_pack;
   } else if (scope === 'jump') {
     out.toast_on_degraded = d.toast_on_degraded;
     out.auto_dismiss_invalid = d.auto_dismiss_invalid;
@@ -278,10 +285,12 @@ var I18N = {
       refreshNote: 'File events are the main source. Auto polls every 5 s while the panel is visible and every 30 s when it is hidden or idle.',
       retention: { label: 'Keep finished sessions' },
       retention1: '1 h', retention6: '6 h', retention24: '24 h', retention72: '3 d',
+      retention168: '1 week', retention720: '1 month',
       retentionNote: 'Finished sessions are removed after this long. Running and waiting sessions are always kept.',
       agents: 'Agents',
       agentNote: 'Turn off agents you do not use. Their sessions are not collected or shown.',
       codex: { label: 'Codex', desc: 'Collect Codex CLI and app sessions.' },
+      antigravity: { label: 'Antigravity', desc: 'Collect desktop and agy CLI sessions from their local databases.' },
       dsh: { label: 'DSH', desc: 'Collect DSH sessions.' },
       zcode: { label: 'ZCode', desc: 'Collect ZCode sessions.' },
       claude: { label: 'Claude Code', desc: 'Collect Claude Code CLI and VS Code sessions.' },
@@ -299,9 +308,9 @@ var I18N = {
       edges: 'Edges',
       snap: { label: 'Snap distance', desc: 'Snap to a screen edge within this distance. 0 disables snapping.' },
       sliver: { label: 'Edge sliver width', desc: 'Visible strip when the pet is hidden at an edge.' },
-      size: { label: 'Collapsed size', desc: 'Edge length of the pet when collapsed or snapped (48–96 px).' },
+      size: { label: 'Collapsed size', desc: 'Pet size and hidden strip length share this value (48–96 px).' },
       autoHideSection: 'Auto-hide',
-      autoHide: { label: 'Hide after snapping', desc: 'After snapping to an edge, hide the pet once it has been idle for this long. Off keeps it visible.' },
+      autoHide: { label: 'Hide after snapping', desc: 'After snapping to an edge, tuck the idle pet into a visible edge strip. Requires Hide to edge; Off keeps it visible.' },
       autoHideOff: 'Off',
       edgeHide: {
         label: 'Hide to edge',
@@ -330,6 +339,19 @@ var I18N = {
         save: 'Could not save the icon.',
         remove: 'Could not remove the icon.'
       },
+      kindSection: 'Pet style',
+      kind: { label: 'Presentation' },
+      kindClassic: 'Capsule', kindMascot: 'Mascot',
+      kindNote: 'The mascot is a roaming Shimeji-style pet driven by the Rust engine: it walks, falls, can be dragged and thrown, and reacts to task state. The capsule keeps the classic status beads.',
+      pack: { label: 'Mascot pack' },
+      packNote: 'Import a Shimeji-ee pack folder (conf/*.xml + img/*.png). Built-in packs: Agent Cat, Byte Slime.',
+      packBuiltin: 'Built-in',
+      packMissing: 'not installed',
+      packImport: 'Import pack…',
+      packImporting: 'Importing…',
+      packImported: 'Pet pack imported',
+      packImportError: 'Import failed',
+      packBroken: 'unusable',
       reset: { label: 'Reset Desktop Pet…', confirm: 'Restore the Desktop Pet section to defaults?' }
     },
     jump: {
@@ -346,7 +368,7 @@ var I18N = {
       setup: 'Permissions & setup',
       appLocation: 'App location',
       appLocationDesc: 'The bundle this window is running from — the copy System Settings must contain.',
-      staleGrant: 'Checked in System Settings but still “Not granted”? The grant is usually bound to an older build or another copy (ad-hoc signatures change on every rebuild). Press “Reset this app’s permissions…” to clear the old record, add this build with “Reveal App”, and quit and reopen Agent Monitor if needed.',
+      staleGrant: 'Checked in System Settings but still “Not granted”? The grant may belong to an old ad-hoc build or another copy. Current local builds keep a fixed signing identity. Press “Reset this app’s permissions…” to clear the old record, add this build with “Reveal App”, and quit and reopen Agent Monitor if needed.',
       status: {
         accessibility: 'Accessibility',
         automation: 'Automation',
@@ -405,7 +427,7 @@ var I18N = {
         step1: 'Open System Settings → Privacy & Security → Accessibility, then add Agent Monitor.app with + — or drag it in from Finder after “Reveal App”.',
         step2: 'Come back here and press “Check again” until Accessibility and Window access read “Granted”.',
         step3: 'The first jump that needs System Events triggers macOS’s Automation prompt — allow Agent Monitor to control System Events.',
-        adhoc: 'Agent Monitor.app is ad-hoc signed, so macOS may forget these grants after an update: if jumping suddenly stops, re-add the new copy once.',
+        adhoc: 'Local builds now use a persistent signing certificate. Moving from an old ad-hoc build requires one new grant; subsequent builds using the same certificate retain their identity.',
         appPath: 'App bundle: {path}'
       },
       agents: {
@@ -427,6 +449,8 @@ var I18N = {
       currentVersion: 'Current version',
       releases: 'Releases',
       releasesNote: 'Release notes and downloads are published on GitHub. Opening the page is left to your browser; the URL above is shown for copying.',
+      localBuild: 'Locally maintained version',
+      localBuildNote: 'This version is updated locally to preserve its saved permissions. Online replacement is disabled. Use the local build script when updating.',
       autoChecks: 'Automatic checks',
       autoCheck: {
         label: 'Check for updates automatically',
@@ -551,10 +575,12 @@ var I18N = {
       refreshNote: '文件事件是主要来源。自动模式在面板可见时每 5 秒轮询，隐藏或空闲时每 30 秒。',
       retention: { label: '保留已结束会话' },
       retention1: '1 小时', retention6: '6 小时', retention24: '24 小时', retention72: '3 天',
+      retention168: '1 周', retention720: '1 个月',
       retentionNote: '结束的会话在此时间后移除；运行中和等待中的会话始终保留。',
       agents: 'Agent',
       agentNote: '关闭不使用的 Agent，它们的会话不会被采集和显示。',
       codex: { label: 'Codex', desc: '采集 Codex 命令行与应用会话。' },
+      antigravity: { label: 'Antigravity', desc: '采集桌面版和 agy CLI 的本地会话。' },
       dsh: { label: 'DSH', desc: '采集 DSH 会话。' },
       zcode: { label: 'ZCode', desc: '采集 ZCode 会话。' },
       claude: { label: 'Claude Code', desc: '采集 Claude Code 命令行与 VS Code 会话。' },
@@ -572,9 +598,9 @@ var I18N = {
       edges: '边缘',
       snap: { label: '吸附距离', desc: '距屏幕边缘小于该值时自动吸附，0 表示不吸附。' },
       sliver: { label: '边缘隐藏宽度', desc: '在屏幕边缘隐藏时保留的可见条宽度。' },
-      size: { label: '收起尺寸', desc: '收起或吸附后的桌宠边长（48–96 px）。' },
+      size: { label: '收起尺寸', desc: '同时调整收起后的尺寸与边缘隐藏条的高度（上下吸附时为宽度），48–96 px。' },
       autoHideSection: '自动隐藏',
-      autoHide: { label: '吸附后自动隐藏', desc: '吸附到屏幕边缘后，空闲超过该时长就自动隐藏（贴边或收托盘，跟随“隐藏到屏幕边缘”）。关闭则保持显示。' },
+      autoHide: { label: '吸附后自动隐藏', desc: '吸附到屏幕边缘后，空闲超过该时长就收成可见的边缘条。仅在开启“隐藏到屏幕边缘”时生效；关闭则保持显示。' },
       autoHideOff: '关闭',
       edgeHide: {
         label: '隐藏到屏幕边缘',
@@ -603,6 +629,19 @@ var I18N = {
         save: '无法保存图标。',
         remove: '无法移除图标。'
       },
+      kindSection: '宠物形态',
+      kind: { label: '呈现方式' },
+      kindClassic: '经典胶囊', kindMascot: '活动宠物',
+      kindNote: '活动宠物是 Rust 引擎驱动的 Shimeji 式宠物：会走动、掉落、可拖拽抛掷，并对任务状态做出反应。经典胶囊保留状态珠显示。',
+      pack: { label: '宠物包' },
+      packNote: '导入 Shimeji-ee 格式的宠物包文件夹（conf/*.xml + img/*.png）。内置：Agent Cat、Byte Slime。',
+      packBuiltin: '内置',
+      packMissing: '未安装',
+      packImport: '导入宠物包…',
+      packImporting: '导入中…',
+      packImported: '宠物包已导入',
+      packImportError: '导入失败',
+      packBroken: '不可用',
       reset: { label: '恢复桌宠默认设置…', confirm: '将“桌宠”恢复为默认设置？' }
     },
     jump: {
@@ -619,7 +658,7 @@ var I18N = {
       setup: '权限与配置',
       appLocation: 'App 位置',
       appLocationDesc: '当前窗口正在运行的 App 副本——也就是系统设置里需要包含的那一份。',
-      staleGrant: '系统设置里勾选了但仍显示未授权？通常是授权绑定到了旧版本或另一个副本（ad-hoc 签名每次重建都会变）。点“重新授权”清除旧记录，并用“显示 App”把当前版本加进辅助功能列表；必要时退出并重开 Agent Monitor。',
+      staleGrant: '系统设置里勾选了但仍显示未授权？可能是授权仍绑定旧 ad-hoc 版本或另一个副本。当前本机构建使用固定签名身份。点“重新授权”清除旧记录，并用“显示 App”把当前版本加进辅助功能列表；必要时退出并重开 Agent Monitor。',
       status: {
         accessibility: '辅助功能',
         automation: '自动化',
@@ -678,7 +717,7 @@ var I18N = {
         step1: '打开“系统设置”→“隐私与安全性”→“辅助功能”，点“+”加入 Agent Monitor.app；或先点“显示 App”再从访达拖入。',
         step2: '回到这里点“重新检查”，直到“辅助功能”和“窗口读取”都显示“已授权”。',
         step3: '第一次需要 System Events 的跳转会触发 macOS 自动化授权弹窗——允许 Agent Monitor 控制 System Events。',
-        adhoc: 'Agent Monitor.app 使用 ad-hoc 签名，macOS 可能在应用更新后忘记这些授权：如果跳转突然失效，重新添加一次新的副本即可。',
+        adhoc: '本机构建现已使用固定签名证书。从旧 ad-hoc 版本切换时需授权一次；后续使用同一证书重建时，应用身份保持不变。',
         appPath: 'App 位置：{path}'
       },
       agents: {
@@ -700,6 +739,8 @@ var I18N = {
       currentVersion: '当前版本',
       releases: '发布页面',
       releasesNote: '发布说明与下载包都发布在 GitHub。打开网页请使用浏览器；上方地址可直接复制。',
+      localBuild: '本机维护版本',
+      localBuildNote: '这个版本通过本机更新来保留已授予的权限，不使用在线覆盖。后续更新请使用本项目的打包脚本。',
       autoChecks: '自动检查',
       autoCheck: {
         label: '自动检查更新',
@@ -878,6 +919,7 @@ var state = {
   bootError: null,
   icons: { collapsed: null, hidden: null },
   iconMeta: {},
+  petPacks: [],               // list_pet_packs result, normalized
   diagnostics: null,          // get_jump_diagnostics result, normalized
   diagnosticsLoaded: false,   // one successful read
   diagnosticsLoading: false,
@@ -1086,7 +1128,7 @@ function segRow(opts) {
         'data-setting': opts.key,
         'data-value': option.value,
         'data-focus': 'seg:' + opts.key + ':' + option.value,
-        'aria-label': i(opts.titleKey) + ': ' + i(option.labelKey),
+        'aria-label': i(opts.titleKey) + ': ' + (option.label || i(option.labelKey)),
         onchange: function () {
           if (!input.checked) return;
           if (opts.agent) commitAgent(opts.agent, option.value);
@@ -1096,7 +1138,7 @@ function segRow(opts) {
       input.checked = option.value === opts.value;
       group.appendChild(h('label', { class: 'seg' }, [
         input,
-        h('span', { class: 'seg-label', text: i(option.labelKey) })
+        h('span', { class: 'seg-label', text: option.label || i(option.labelKey) })
       ]));
     })(option);
   }
@@ -1292,6 +1334,151 @@ function loadCustomIcons() {
     // Backend unavailable (older build / window closing): keep what we show.
     if (window.console) console.warn('get_custom_icons unavailable', err);
   });
+}
+
+// ── Mascot packs (Rust pet engine, docs/PETS.md) ────────────────
+
+function applyPetPacks(packs) {
+  var next = Array.isArray(packs) ? packs : [];
+  var changed = JSON.stringify(next) !== JSON.stringify(state.petPacks || []);
+  state.petPacks = next;
+  if (changed) renderAll();
+  return changed;
+}
+
+var petPackPreviewUrls = {};
+
+function loadPetPacks() {
+  return invoke('list_pet_packs').then(function (packs) {
+    return Promise.all((packs || []).map(function (pack) {
+      if (petPackPreviewUrls[pack.name] || !pack.frame_size || !pack.frame_size[0]) return;
+      return invoke('get_pet_pack_image', {
+        pack: pack.name, image: pack.kind === 'state' ? 'idle' : '/shime1.png'
+      }).then(function (url) {
+        petPackPreviewUrls[pack.name] = url;
+      }).catch(function () { /* Metadata remains usable without a preview. */ });
+    })).then(function () { applyPetPacks(packs); });
+  }).catch(function (err) {
+    if (window.console) console.warn('list_pet_packs unavailable', err);
+  });
+}
+
+function readPackFileAsBase64(file) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function () { resolve(String(reader.result || '').split(',')[1] || ''); };
+    reader.onerror = function () { reject(new Error('read failed: ' + file.name)); };
+    reader.readAsDataURL(file);
+  });
+}
+
+function importPetPackFolder(input) {
+  var files = Array.prototype.slice.call(input.files || []).filter(function (file) {
+    var path = file.webkitRelativePath || file.name;
+    if (/__MACOSX|\/\./.test(path)) return false;
+    return /conf\/[^/]+\.xml$/i.test(path) || /img\/[^/]+\.png$/i.test(path);
+  });
+  if (!files.length) {
+    flashStatus('error', i('pet.packImportError'), 5000);
+    return;
+  }
+  var packName = (files[0].webkitRelativePath || files[0].name).split('/')[0];
+  flashStatus('info', i('pet.packImporting'), 12000);
+  Promise.all(files.map(function (file) {
+    return readPackFileAsBase64(file).then(function (data) {
+      return { path: file.webkitRelativePath || file.name, data_base64: data };
+    });
+  })).then(function (payload) {
+    return invoke('import_pet_pack', { name: packName, files: payload });
+  }).then(function () {
+    flashStatus('saved', i('pet.packImported'), 3000);
+    return loadPetPacks();
+  }).catch(function (err) {
+    flashStatus('error', i('pet.packImportError') + ': ' + (err && err.message ? err.message : err), 8000);
+  });
+}
+
+function buildMascotSection() {
+  var settings = state.settings;
+  var packs = state.petPacks || [];
+  var cards = [segRow({
+    key: 'pet_kind',
+    titleKey: 'pet.kind.label',
+    value: settings.pet_kind,
+    options: [
+      { value: 'classic', labelKey: 'pet.kindClassic' },
+      { value: 'mascot', labelKey: 'pet.kindMascot' }
+    ]
+  })];
+  if (settings.pet_kind === 'mascot') {
+    // Pack picker: vertical radio list (names are long; a horizontal
+    // segmented row overflows with more than a couple of packs).
+    var usable = packs.filter(function (pack) {
+      return pack.frame_size && pack.frame_size[0] > 0;
+    });
+    usable.forEach(function (pack) {
+      var bits = [];
+      if (pack.builtin) bits.push(i('pet.packBuiltin'));
+      if (pack.author) bits.push(pack.author);
+      if (pack.license) bits.push(pack.license);
+      cards.push(h('label', { class: 'row pack-row' }, [
+        h('input', {
+          type: 'radio',
+          name: 'mascot-pack',
+          value: pack.name,
+          'aria-label': pack.display_name || pack.name,
+          checked: settings.mascot_pack === pack.name,
+          'data-setting': 'mascot_pack',
+          'data-value': pack.name,
+          onchange: function () {
+            if (this.checked) commitTop('mascot_pack', pack.name);
+          }
+        }),
+        h('img', { class: 'pack-preview', src: petPackPreviewUrls[pack.name] || '', alt: '', hidden: !petPackPreviewUrls[pack.name] }),
+        h('span', { class: 'row-text' }, [
+          h('span', { class: 'row-title', text: pack.display_name || pack.name }),
+          h('span', { class: 'row-desc', text: bits.join(' · ') || pack.name })
+        ])
+      ]));
+    });
+    if (!usable.some(function (pack) { return pack.name === settings.mascot_pack; })) {
+      cards.push(h('div', { class: 'row' }, [
+        h('span', { class: 'row-text' }, [
+          h('span', { class: 'row-title', text: settings.mascot_pack + ' — ' + i('pet.packMissing') })
+        ])
+      ]));
+    }
+    var broken = packs.filter(function (pack) {
+      return !pack.frame_size || pack.frame_size[0] === 0;
+    });
+    broken.forEach(function (pack) {
+      cards.push(h('div', { class: 'row' }, [
+        h('span', { class: 'row-text' }, [
+          h('span', { class: 'row-title', text: pack.name + ' — ' + i('pet.packBroken') }),
+          h('span', { class: 'row-desc', text: (pack.warnings || []).join('；') })
+        ])
+      ]));
+    });
+    // Import: same visually-hidden input pattern as the icon picker.
+    var importInput = h('input', {
+      type: 'file',
+      class: 'icon-file',
+      id: 'pet-pack-import',
+      webkitdirectory: '',
+      multiple: '',
+      onchange: function () { importPetPackFolder(importInput); importInput.value = ''; }
+    });
+    cards.push(h('div', { class: 'row' }, [
+      h('span', { class: 'row-text' }, [
+        h('span', { class: 'row-title', text: i('pet.packNote') })
+      ]),
+      h('span', { class: 'control' }, [
+        importInput,
+        h('label', { class: 'btn icon-choose', for: 'pet-pack-import', text: i('pet.packImport') })
+      ])
+    ]));
+  }
+  return section('pet.kindSection', card(cards), [i('pet.kindNote')]);
 }
 
 function dataUrlBytes(dataUrl) {
@@ -2016,6 +2203,7 @@ function applyUpdateInstalled(raw) {
 }
 
 function checkForUpdate() {
+  if (state.meta && state.meta.local_build) return;
   // Idempotent: a click and the tray event must never start two checks.
   if (state.update.checking || state.update.phase === 'installing') return;
   state.update.checking = true;
@@ -2235,6 +2423,13 @@ function buildUpdate() {
     pathRow('update.releases', RELEASES_URL)
   ]), i('update.releasesNote')));
 
+  if (state.meta && state.meta.local_build) {
+    frag.appendChild(section('update.localBuild', card([
+      h('div', { class: 'row row-stacked', text: i('update.localBuildNote') })
+    ])));
+    return frag;
+  }
+
   frag.appendChild(section('update.autoChecks', card([
     switchRow({
       key: 'auto_check_updates',
@@ -2357,13 +2552,16 @@ function buildMonitor() {
         { value: 1, labelKey: 'monitor.retention1' },
         { value: 6, labelKey: 'monitor.retention6' },
         { value: 24, labelKey: 'monitor.retention24' },
-        { value: 72, labelKey: 'monitor.retention72' }
+        { value: 72, labelKey: 'monitor.retention72' },
+        { value: 168, labelKey: 'monitor.retention168' },
+        { value: 720, labelKey: 'monitor.retention720' }
       ]
     })
   ]), [i('monitor.refreshNote'), i('monitor.retentionNote')]));
 
   frag.appendChild(section('monitor.agents', card([
     switchRow({ key: 'enabled_agents.codex', agent: 'codex', titleKey: 'monitor.codex.label', descKey: 'monitor.codex.desc', checked: settings.enabled_agents.codex }),
+    switchRow({ key: 'enabled_agents.antigravity', agent: 'antigravity', titleKey: 'monitor.antigravity.label', descKey: 'monitor.antigravity.desc', checked: settings.enabled_agents.antigravity }),
     switchRow({ key: 'enabled_agents.dsh', agent: 'dsh', titleKey: 'monitor.dsh.label', descKey: 'monitor.dsh.desc', checked: settings.enabled_agents.dsh }),
     switchRow({ key: 'enabled_agents.zcode', agent: 'zcode', titleKey: 'monitor.zcode.label', descKey: 'monitor.zcode.desc', checked: settings.enabled_agents.zcode }),
     switchRow({ key: 'enabled_agents.claude_code', agent: 'claude_code', titleKey: 'monitor.claude.label', descKey: 'monitor.claude.desc', checked: settings.enabled_agents.claude_code })
@@ -2390,6 +2588,7 @@ function buildPet() {
   var settings = state.settings;
   var frag = document.createDocumentFragment();
   frag.appendChild(buildIconSection());
+  frag.appendChild(buildMascotSection());
   frag.appendChild(section('pet.gestures', card([
     sliderRow(Object.assign({ key: 'hover_expand_ms', titleKey: 'pet.hover.label', descKey: 'pet.hover.desc', value: settings.hover_expand_ms, unit: 'ms' }, RANGES.hover_expand_ms)),
     sliderRow(Object.assign({ key: 'collapse_delay_ms', titleKey: 'pet.collapse.label', descKey: 'pet.collapse.desc', value: settings.collapse_delay_ms, unit: 'ms' }, RANGES.collapse_delay_ms))
@@ -2796,6 +2995,31 @@ function mockInvoke(cmd, args) {
       mockEmit('icons-changed', clone(mockState.icons));
       return null;
     }
+    case 'list_pet_packs':
+      return [
+        { name: 'nailong', display_name: '奶龙', kind: 'state', builtin: true, frame_size: [512, 512], window_size: 0, warnings: [],
+          menu: [{ action: 'interact', label_key: 'menuPet' }], actions: ['interact'] },
+        { name: 'doraemon', display_name: '哆啦 A 梦', kind: 'state', builtin: true, frame_size: [512, 512], window_size: 0, warnings: [],
+          menu: [{ action: 'interact', label_key: 'menuPet' }], actions: ['interact'] },
+        { name: 'tihun', display_name: '啼魂', kind: 'state', builtin: true, frame_size: [512, 512], window_size: 0, warnings: [],
+          menu: [{ action: 'interact', label_key: 'menuPet' }], actions: ['interact'] },
+        { name: 'british-blue', kind: 'state', builtin: true, frame_size: [1024, 1024], window_size: 132, warnings: [],
+          menu: [{ action: 'interact', label_key: 'menuPet' }], actions: ['interact'] }
+      ];
+    case 'get_pet_pack_image':
+      if (['nailong', 'doraemon', 'tihun', 'british-blue'].indexOf(args.pack) !== -1) {
+        return '../src-tauri/pets/' + args.pack + '/' + args.image + '.png';
+      }
+      if (args.pack !== 'agent-cat' && args.pack !== 'byte-slime') {
+        throw new Error('帧 ' + args.image + ' 不在宠物包 ' + args.pack + ' 中');
+      }
+      return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    case 'import_pet_pack': {
+      var packName = String(args.name || '').trim();
+      if (!packName || !/^[\w\- ]+$/.test(packName)) throw new Error('宠物包名只能包含字母、数字、空格、- 和 _');
+      mockEmit('pet-packs-changed', null);
+      return { name: packName, builtin: false, frame_size: [32, 32], warnings: [] };
+    }
     case 'clear_dismissed': {
       var count = mockState.dismissed;
       mockState.dismissed = 0;
@@ -2918,6 +3142,7 @@ if (MOCK) {
   window.__AM_SETTINGS_TEST__ = {
     get settings() { return clone(state.settings); },
     get meta() { return clone(state.meta); },
+    setLocalBuild: function (value) { state.meta.local_build = value; renderPane(); },
     get group() { return state.group; },
     get confirm() { return clone(state.confirm); },
     get status() { return clone(state.status); },
@@ -3019,6 +3244,11 @@ function boot() {
   }).catch(function (err) {
     if (window.console) console.warn('icons-changed listener unavailable', err);
   });
+  listen('pet-packs-changed', function () {
+    loadPetPacks();
+  }).catch(function (err) {
+    if (window.console) console.warn('pet-packs-changed listener unavailable', err);
+  });
 
   // In-app updater: startup notice, install progress, installed, tray trigger.
   listen('update-available', function (event) {
@@ -3047,6 +3277,7 @@ function boot() {
     state.meta = results[1] || {};
     renderAll();
     loadCustomIcons();
+    loadPetPacks();
     // A tray “Check for Updates…” can arrive before the first settings read.
     if (state.pendingUpdatePane) openUpdatePane();
     var selected = sidebarEl.querySelector('.nav-item[aria-selected="true"]');
@@ -3069,6 +3300,7 @@ function boot() {
         state.meta = results[1] || state.meta;
         applySettings(results[0]);
         loadCustomIcons();
+        loadPetPacks();
       }).catch(function () { /* keep the last known settings */ });
     };
     window.addEventListener('focus', refresh);
