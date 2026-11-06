@@ -150,7 +150,16 @@ impl Monitor {
     }
 
     pub fn descriptors(&self) -> Vec<AgentDescriptor> {
-        self.sources.iter().map(|s| s.descriptor()).collect()
+        self.sources.iter().map(|s| {
+            let descriptor = s.descriptor();
+            #[cfg(target_os = "windows")]
+            let descriptor = AgentDescriptor {
+                max_level: descriptor.max_level.min(crate::model::JumpLevel::L1),
+                notes: "Windows: application focus only; conversation selection is not verified.".into(),
+                ..descriptor
+            };
+            descriptor
+        }).collect()
     }
 
     pub fn snapshot(&self) -> &Snapshot {

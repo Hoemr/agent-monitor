@@ -109,9 +109,14 @@ fn vscode_executable() -> Option<PathBuf> {
 
 pub fn jump(task: &TaskRecord) -> JumpOutcome {
     if task.target_validity == TargetValidity::Invalid {
-        return JumpOutcome::failed(&task.id, task.level, task.invalid_reason.as_deref().unwrap_or("target_invalid"));
+        let mut outcome = JumpOutcome::failed(&task.id, task.level, task.invalid_reason.as_deref().unwrap_or("target_invalid"));
+        outcome.next_step = Some("dismiss".into());
+        return outcome;
     }
-    if task.level == JumpLevel::L0 { return JumpOutcome::failed(&task.id, task.level, "no_target"); }
+    if task.level == JumpLevel::L0 || (task.target.app_name.is_none()
+        && task.target.bundle_id.is_none() && task.target.terminal_host.is_none()) {
+        return JumpOutcome::failed(&task.id, task.level, "no_target");
+    }
     // A source-confirmed VSCode session can request its workspace and URI. The
     // first Windows release verifies app focus only, so it never claims L3.
     if task.host == "vscode" {

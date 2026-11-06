@@ -529,7 +529,9 @@ mod tests {
 
         // macOS resolves the target as `darwin-aarch64` (with an optional
         // `-app` bundle-type suffix tried first).
-        assert_eq!(tauri_plugin_updater::target().as_deref(), Some("darwin-aarch64"));
+        let os = if cfg!(target_os = "macos") { "darwin" } else { std::env::consts::OS };
+        let expected_target = format!("{os}-{}", std::env::consts::ARCH);
+        assert_eq!(tauri_plugin_updater::target().as_deref(), Some(expected_target.as_str()));
         assert_eq!(
             release.download_url("darwin-aarch64").unwrap().as_str(),
             "https://github.com/Hoemr/agent-monitor/releases/download/v0.7.1/Agent-Monitor-macos-arm64.app.tar.gz"

@@ -49,7 +49,7 @@ From the repository root:
 
 ```powershell
 cargo test --release --locked --manifest-path src-tauri/Cargo.toml
-npx --yes @tauri-apps/cli@2.11.4 build --target x86_64-pc-windows-msvc --bundles nsis
+npx --yes @tauri-apps/cli@2.11.4 build --bundles nsis
 ```
 
 The `Build Windows` GitHub Actions workflow runs Rust and UI tests, creates the
