@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Reduced motion selftest</title></head>
+<body><iframe id="frame" src="../src/index.html?mock=1" style="width:620px;height:560px"></iframe>
+<pre id="results">PENDING</pre>
+<script>
+var results = [], failed = 0;
+function check(name, ok) { results.push((ok ? 'PASS ' : 'FAIL ') + name); if (!ok) failed++; }
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+(async function () {
+  try {
+    var frame = document.getElementById('frame'), w, t;
+    for (var n = 0; n < 100; n++) {
+      w = frame.contentWindow; t = w.__AM_TEST__;
+      if (t) break;
+      await sleep(20);
+    }
+    var d = frame.contentDocument;
+    check('browser actually requests reduced motion', w.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    await t.setSettings({ animations: 'auto' });
+    t.applyPetState({ mode: 'collapsed', edge: 'right' });
+    t.emitAttention({ alerts: [{ task_id: 'reduced-question', title: 'Question', agent_name: 'Codex' }], question_count: 2, auto_show: false });
+    await sleep(30);
+    check('pending questions retain the visible amber state', d.getElementById('badge').classList.contains('question'));
+    check('reduced motion suppresses JavaScript pulse classes', !t.attention.pulsing && !d.getElementById('badge').classList.contains('alerting'));
+    check('reduced motion disables CSS breathing', w.getComputedStyle(d.getElementById('status-dot-question')).animationName === 'none');
+    check('reduced motion never expands the task panel', t.petState.mode === 'collapsed');
+  } catch (error) { check('runtime exception: ' + error.message, false); }
+  document.getElementById('results').textContent = (failed ? 'FAILED' : 'ALL PASS') + '\n' + results.join('\n');
+})();
+</script></body></html>

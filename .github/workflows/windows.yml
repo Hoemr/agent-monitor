@@ -26,7 +26,32 @@ jobs:
       - name: Rust tests
         run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
       - name: Browser UI tests
-        run: python scripts/ui-test.py
+        shell: pwsh
+        run: |
+          # The normal-animation suite must not inherit this ephemeral runner's
+          # Reduce Motion setting. The separate reduced-motion suite forces it
+          # in Chrome, and the runner setting is restored even if tests fail.
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class TestAnimationPreference {
+            [DllImport("user32.dll", EntryPoint="SystemParametersInfoW")]
+            public static extern bool Read(uint action, uint param, out bool value, uint flags);
+            [DllImport("user32.dll", EntryPoint="SystemParametersInfoW")]
+            public static extern bool Write(uint action, uint param, IntPtr value, uint flags);
+          }
+          '@
+          $before = $false
+          if (-not [TestAnimationPreference]::Read(0x1042, 0, [ref]$before, 0)) { throw 'Cannot read test animation preference' }
+          try {
+            if (-not [TestAnimationPreference]::Write(0x1043, 0, [IntPtr]1, 0)) { throw 'Cannot set test animation preference' }
+            python scripts/ui-test.py
+            $testExit = $LASTEXITCODE
+          } finally {
+            $restore = if ($before) { [IntPtr]1 } else { [IntPtr]0 }
+            [TestAnimationPreference]::Write(0x1043, 0, $restore, 0) | Out-Null
+          }
+          if ($testExit -ne 0) { exit $testExit }
       - name: Build the Windows installer
         run: npx --yes @tauri-apps/cli@2.11.4 build --bundles nsis
       - name: Check native startup and package portable download

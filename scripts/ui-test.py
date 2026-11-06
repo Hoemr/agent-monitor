@@ -20,10 +20,12 @@ def main():
     if not chrome.is_file():
         raise SystemExit("Chrome not found; set CHROME to the browser executable")
     passed = True
-    for suite in ["ui-selftest.html", "ui-selftest-settings.html", "ui-selftest-windows.html"]:
+    for suite in ["ui-selftest.html", "ui-selftest-settings.html", "ui-selftest-windows.html", "ui-selftest-reduced-motion.html"]:
+        media_flags = ["--force-prefers-reduced-motion"] if "reduced-motion" in suite else []
         result = subprocess.run([
             str(chrome), "--headless=new", "--disable-gpu", "--allow-file-access-from-files",
             "--window-size=900,760", "--virtual-time-budget=25000", "--dump-dom",
+            *media_flags,
             (ROOT / "scripts" / suite).as_uri(),
         ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=90)
         dom = result.stdout.decode("utf-8", errors="replace")
