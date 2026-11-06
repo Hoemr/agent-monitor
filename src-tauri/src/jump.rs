@@ -178,6 +178,10 @@ const AGENT_SPECS: [AgentSpec; 4] = [
 
 /// Collect the real permission/self-check state. Blocking (spawns `osascript`,
 /// `mdfind` and `ps`); call it from a background thread, never from a scan.
+#[cfg(target_os = "windows")]
+pub fn collect_jump_diagnostics() -> JumpDiagnostics { crate::windows::diagnostics() }
+
+#[cfg(not(target_os = "windows"))]
 pub fn collect_jump_diagnostics() -> JumpDiagnostics {
     let accessibility = DiagnosticStatus {
         granted: crate::ax::is_trusted(),
@@ -531,6 +535,10 @@ pub fn reset_app_permissions() -> Result<String, String> {
 
 // ── Public entry ────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
+pub fn jump(task: &TaskRecord, _peers: &[TaskRecord]) -> JumpOutcome { crate::windows::jump(task) }
+
+#[cfg(not(target_os = "windows"))]
 pub fn jump(task: &TaskRecord, peers: &[TaskRecord]) -> JumpOutcome {
     let requested = task.level;
     if task.target_validity == TargetValidity::Invalid {
@@ -2091,8 +2099,8 @@ fn window_title_contains_workspace(window_title: &str, workspace_basename: &str)
 /// Find `code` in PATH first, then the given install directories.
 fn resolve_code_cli(path_env: Option<&str>, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
     if let Some(path_env) = path_env {
-        for dir in path_env.split(':').filter(|dir| !dir.is_empty()) {
-            let candidate = Path::new(dir).join("code");
+        for dir in std::env::split_paths(path_env).filter(|dir| !dir.as_os_str().is_empty()) {
+            let candidate = dir.join("code");
             if candidate.is_file() {
                 return Some(candidate);
             }

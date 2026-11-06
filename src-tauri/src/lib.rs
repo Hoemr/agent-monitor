@@ -19,6 +19,8 @@ pub mod pet;
 pub mod pet_engine;
 pub mod settings;
 pub mod update;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use model::{
     now_millis, AgentDescriptor, Edge, JumpLevel, JumpOutcome, PermissionKind, PetMode, PetPrefs,
@@ -1113,6 +1115,7 @@ fn reset_settings(app: AppHandle, scope: String) -> Result<Settings, String> {
 
 #[derive(serde::Serialize)]
 struct SettingsMeta {
+    platform: &'static str,
     local_build: bool,
     data_dir: String,
     settings_path: String,
@@ -1129,6 +1132,7 @@ struct SettingsMeta {
 fn get_settings_meta(state: State<'_, AppState>) -> SettingsMeta {
     let rt = state.inner.lock().unwrap();
     SettingsMeta {
+        platform: std::env::consts::OS,
         local_build: update::require_release_build().is_err(),
         data_dir: settings::data_dir().display().to_string(),
         settings_path: settings::settings_path().display().to_string(),
@@ -1433,10 +1437,8 @@ fn close_settings(app: AppHandle) {
 
 #[tauri::command]
 fn open_data_dir() -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(settings::data_dir())
-        .spawn()
-        .map(|_| ())
+    std::fs::create_dir_all(settings::data_dir()).map_err(|e| e.to_string())?;
+    tauri_plugin_opener::open_path(settings::data_dir(), None::<&str>)
         .map_err(|e| format!("failed to open data directory: {e}"))
 }
 
@@ -1502,10 +1504,27 @@ fn question_notification_script(title: &str, body: &str, sound: bool) -> String 
 
 /// Play the alert on a detached thread: a missing helper binary, a denied
 /// notification banner or a slow `osascript` can never block a scan.
-fn spawn_question_alert(alerts: Vec<PendingAlert>, notify: bool, sound: bool, zh: bool) {
+fn spawn_question_alert(app: &AppHandle, alerts: Vec<PendingAlert>, notify: bool, sound: bool, zh: bool) {
     if alerts.is_empty() || (!notify && !sound) {
         return;
     }
+    #[cfg(target_os = "windows")]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        let app = app.clone();
+        std::thread::spawn(move || {
+            if notify {
+                let (title, body) = attention_alert_text(&alerts, zh);
+                let builder = app.notification().builder().title(title).body(body);
+                let _ = builder.sound(if sound { "Default" } else { "Silent" }).show();
+            } else if sound {
+                unsafe { windows_sys::Win32::System::Diagnostics::Debug::MessageBeep(0); }
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+    let _ = app;
     std::thread::spawn(move || {
         if notify {
             let (title, body) = attention_alert_text(&alerts, zh);
@@ -1522,6 +1541,7 @@ fn spawn_question_alert(alerts: Vec<PendingAlert>, notify: bool, sound: bool, zh
                 .output();
         }
     });
+    }
 }
 
 /// `auto_show_on_question`: reveal a collapsed/edge-hidden/tray-hidden pet as an
@@ -1575,7 +1595,7 @@ fn drain_attention(app: &AppHandle) {
     if auto_show {
         auto_reveal_for_questions(app);
     }
-    spawn_question_alert(alerts, notify, sound, zh);
+    spawn_question_alert(app, alerts, notify, sound, zh);
 }
 
 /// Menu-bar tooltip text. Waiting questions get their own wording because
@@ -1722,6 +1742,10 @@ fn start_worker(app: AppHandle, rx: Receiver<()>) {
 }
 
 fn system_is_chinese() -> bool {
+    #[cfg(target_os = "windows")]
+    { return windows::system_is_chinese(); }
+    #[cfg(not(target_os = "windows"))]
+    {
     // Cached: this is consulted on every snapshot change by the tray updater.
     static ZH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ZH.get_or_init(|| {
@@ -1736,6 +1760,7 @@ fn system_is_chinese() -> bool {
             })
             .unwrap_or(false)
     })
+    }
 }
 
 fn update_tray_tooltip(app: &AppHandle, snapshot: &Snapshot) {
@@ -1898,6 +1923,7 @@ const MASCOT_BOTTOM_MARGIN: f64 = 6.0;
 /// Restore the pet window's vibrancy (mirrors tauri.conf.json: popover,
 /// active, radius 16). Clearing goes through `window_vibrancy` directly —
 /// tauri's `set_effects(None)` is a Windows-only no-op on macOS.
+#[cfg(target_os = "macos")]
 fn restore_pet_vibrancy(win: &WebviewWindow) -> Result<(), String> {
     window_vibrancy::apply_vibrancy(
         win,
@@ -1906,6 +1932,18 @@ fn restore_pet_vibrancy(win: &WebviewWindow) -> Result<(), String> {
         Some(16.0),
     )
     .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restore_pet_vibrancy(_win: &WebviewWindow) -> Result<(), String> {
+    Ok(())
+}
+
+fn clear_pet_vibrancy(win: &WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    { window_vibrancy::clear_vibrancy(win).map(|_| ()).map_err(|e| e.to_string()) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = win; Ok(()) }
 }
 
 /// One engine tick: advance the mascot, move the window with it, hand the
@@ -1964,9 +2002,7 @@ fn mascot_ticker_step(app: &AppHandle) {
                     return;
                 }
                 let result = if showing_mascot {
-                    window_vibrancy::clear_vibrancy(&win_handle)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
+                    clear_pet_vibrancy(&win_handle)
                 } else {
                     restore_pet_vibrancy(&win_handle)
                 };
@@ -2098,6 +2134,7 @@ fn mascot_ticker_step(app: &AppHandle) {
 
 /// Global cursor position in logical screen points. Uses `CGEventGetLocation`,
 /// which needs no accessibility permission (unlike event taps).
+#[cfg(target_os = "macos")]
 fn cursor_point() -> Option<(f64, f64)> {
     use core_graphics::event::CGEvent;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -2106,6 +2143,14 @@ fn cursor_point() -> Option<(f64, f64)> {
     let p = event.location();
     Some((p.x, p.y))
 }
+
+#[cfg(target_os = "windows")]
+fn cursor_point() -> Option<(f64, f64)> {
+    windows::cursor_position()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn cursor_point() -> Option<(f64, f64)> { None }
 
 /// Expanded-panel dismissal fallback. The panel closes on window blur
 /// ("click anywhere else"); if the blur never reaches the webview — focus
@@ -2144,12 +2189,13 @@ fn expanded_outside_dismissal(app: &AppHandle, win: &WebviewWindow, step: u64) {
         .iter()
         .map(|s| s.visible.y + s.visible.h)
         .fold(0.0f64, f64::max);
-    let cy = max_bottom - cy_up;
+    let cy = if cfg!(target_os = "macos") { max_bottom - cy_up } else { cy_up };
     // Window rects are physical px; the cursor is logical points.
-    let rx = rect.x / scale;
-    let ry = rect.y / scale;
-    let rw = rect.w / scale;
-    let rh = rect.h / scale;
+    let unit_scale = if cfg!(target_os = "windows") { 1.0 } else { scale };
+    let rx = rect.x / unit_scale;
+    let ry = rect.y / unit_scale;
+    let rw = rect.w / unit_scale;
+    let rh = rect.h / unit_scale;
     let inside = cx >= rx && cx <= rx + rw && cy >= ry && cy <= ry + rh;
     if debug {
         eprintln!(
@@ -2515,6 +2561,8 @@ pub fn run() {
             update::restart_app,
         ])
         .setup(|app| {
+            #[cfg(target_os = "windows")]
+            app.handle().plugin(tauri_plugin_notification::init())?;
             // Menu-bar/tray-only app: no Dock icon, no app switcher entry.
             // The bundled Info.plist also sets LSUIElement; this covers `cargo run`.
             // Re-asserted after the window is mapped because AppKit otherwise

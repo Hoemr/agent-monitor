@@ -162,7 +162,7 @@ fn decode_project_name(encoded: &str) -> String {
         if let Some(rest) = rest.strip_prefix("--") {
             #[cfg(target_os = "windows")]
             {
-                return format!("{}:\\{}", &encoded[..1], rest.replace("--", "\\"));
+                return format!("{}:\\{}", &encoded[..1], rest.replace('-', "\\"));
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -462,7 +462,7 @@ fn parse_jsonl(path: &Path, prev: Option<&FileState>) -> Option<FileState> {
 fn to_record(session: &Session, file_mtime: u64, ctx: &ScanCtx) -> TaskRecord {
     // The supported integration is the VSCode extension (anthropic.claude-code).
     // Claude Code is a VSCode-hosted agent here; we never route it to Terminal.
-    let host = "vscode";
+    let host = if cfg!(target_os = "windows") && session.source != "vscode" { "terminal" } else { "vscode" };
     let (mut status, mut reason) = if !session.pending_questions.is_empty() {
         (TaskStatus::WaitingInput, format!("{} unanswered AskUserQuestion call(s)", session.pending_questions.len()))
     } else { match session.status.as_str() {
@@ -480,6 +480,7 @@ fn to_record(session: &Session, file_mtime: u64, ctx: &ScanCtx) -> TaskRecord {
     }};
     if status == TaskStatus::Running {
         let host_alive = ctx.processes.any("Visual Studio Code.app/Contents/")
+            || ctx.processes.has_executable("Code") || ctx.processes.has_executable("claude")
             || ctx.processes.entries.iter().any(|p| Path::new(p.command.split_whitespace().next().unwrap_or(""))
                 .file_name().is_some_and(|name| name == "claude"));
         if !host_alive {

@@ -281,7 +281,8 @@ impl Source for ZCodeSource {
             self.reload();
             self.db_fingerprint = fingerprint;
         }
-        let app_alive = ctx.processes.any(PROCESS_NEEDLE) || ctx.processes.any(APP_NAME);
+        let app_alive = ctx.processes.any(PROCESS_NEEDLE) || ctx.processes.any(APP_NAME)
+            || ctx.processes.has_executable("ZCode");
         let mut out = Vec::new();
         for row in self.rows.iter() {
             let updated = row.updated_at / 1000;

@@ -1,4 +1,8 @@
-# Agent Monitor — desktop pet for multi-agent coding sessions (macOS)
+# Agent Monitor — desktop pet for multi-agent coding sessions
+
+Version **0.8.1** adds a Windows 10/11 x64 build for native terminal and VSCode
+sessions: [Windows setup and limitations](docs/WINDOWS.md). Download the
+installer or portable ZIP from [GitHub Releases](https://github.com/Hoemr/agent-monitor/releases).
 
 Version **0.8.0**: expressive pixel pets, Antigravity monitoring, pinned and
 renamed conversations, and more reliable session status and jumps.

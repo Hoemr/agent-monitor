@@ -812,6 +812,15 @@ function effectiveLang() {
 }
 
 function i(key, vars) {
+  if (state.meta && state.meta.platform === 'windows') {
+    var windowsCopy = {
+      'attention.notify.desc': ['Show a Windows notification when an agent starts waiting for an answer.', 'Agent 开始等待回答时发送一条 Windows 系统通知。'],
+      'attention.sound.desc': ['Play the Windows alert sound with new questions, including when notifications are off.', '出现新问题时播放 Windows 提示音，关闭通知后也可以播放。'],
+      'update.localBuild': ['Manual updates', '手动更新'],
+      'update.localBuildNote': ['Download the next Windows version from GitHub Releases and install it manually. This version does not offer in-app updates.', '请从 GitHub Releases 下载后续 Windows 版本并手动安装；此版本暂不提供在线更新。']
+    };
+    if (windowsCopy[key]) return windowsCopy[key][LANG === 'zh' ? 1 : 0];
+  }
   var parts = key.split('.');
   var value = I18N[LANG] || I18N.en;
   for (var p = 0; p < parts.length; p++) value = value && value[parts[p]];
@@ -2645,9 +2654,20 @@ function buildJump() {
     })
   ])));
 
-  frag.appendChild(buildJumpSetup());
-  frag.appendChild(buildJumpGuide());
-  frag.appendChild(buildJumpAgents());
+  if (state.meta && state.meta.platform === 'windows') {
+    frag.appendChild(h('div', { class: 'card', 'data-windows-jump': '' }, [
+      h('div', { class: 'row row-stacked', text: LANG === 'zh'
+        ? 'Windows 版可以切换到正在运行的终端或 VSCode 等应用（L1），暂不验证具体会话。请保持目标应用打开；多个终端窗口之间需要手动选择。'
+        : 'Windows switches to a running Terminal, VSCode or agent app (L1). Keep the target app open. Exact conversations and individual terminal windows must be selected manually.' }),
+      h('div', { class: 'row row-stacked', text: LANG === 'zh'
+        ? 'Windows 不需要 macOS 的辅助功能或自动化授权。普通用户运行的桌宠可能无法聚焦以管理员身份运行的窗口。'
+        : 'macOS Accessibility and Automation permissions are not required on Windows. Windows may prevent focusing an app running as administrator.' })
+    ]));
+  } else {
+    frag.appendChild(buildJumpSetup());
+    frag.appendChild(buildJumpGuide());
+    frag.appendChild(buildJumpAgents());
+  }
 
   frag.appendChild(h('div', { class: 'pane-actions' }, [resetFooter('jump', 'jump.reset')]));
   return frag;
@@ -2880,6 +2900,7 @@ function mockInitialIcons() {
 function mockMeta() {
   var dir = '/Users/you/Library/Application Support/agent-monitor';
   return {
+    platform: location.search.indexOf('platform=windows') !== -1 ? 'windows' : 'macos',
     data_dir: dir,
     settings_path: dir + '/settings.json',
     pet_path: dir + '/pet.json',

@@ -1,0 +1,65 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Rust tests
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml
+      - name: Browser UI tests
+        run: python scripts/ui-test.py
+      - name: Build the Windows installer
+        run: npx --yes @tauri-apps/cli@2.11.4 build --target x86_64-pc-windows-msvc --bundles nsis
+      - name: Check native startup and package portable download
+        shell: pwsh
+        run: |
+          $binary = 'src-tauri/target/x86_64-pc-windows-msvc/release/agent-monitor.exe'
+          $env:AGENT_MONITOR_DATA_DIR = Join-Path $env:RUNNER_TEMP 'agent-monitor-smoke'
+          New-Item -ItemType Directory -Force $env:AGENT_MONITOR_DATA_DIR | Out-Null
+          $env:AGENT_MONITOR_EMPTY = '1'
+          & $binary --dump-tasks | Out-File -Encoding utf8 dump-tasks.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Native snapshot smoke test failed' }
+          if ((Get-Content -Raw dump-tasks.txt) -notmatch '"tasks"') { throw 'Snapshot output missing' }
+          $env:AGENT_MONITOR_SIMULATED = '1'
+          $app = Start-Process -FilePath $binary -PassThru
+          Start-Sleep -Seconds 10
+          $app.Refresh()
+          if ($app.HasExited) { throw 'Desktop app exited during startup smoke test' }
+          Stop-Process -Id $app.Id
+          $out = 'dist/windows'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item $binary "$out/agent-monitor.exe"
+          Copy-Item docs/WINDOWS.md "$out/README.md"
+          Compress-Archive -Path "$out/agent-monitor.exe", "$out/README.md" -DestinationPath "$out/Agent-Monitor-windows-x64.zip"
+          $installer = Get-ChildItem 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer missing' }
+          Copy-Item $installer.FullName "$out/Agent-Monitor-windows-x64-setup.exe"
+          Get-ChildItem "$out/Agent-Monitor-*" | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Out-File -Encoding ascii "$out/SHA256SUMS-windows.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Agent-Monitor-windows-x64
+          path: |
+            dist/windows/Agent-Monitor-*
+            dist/windows/SHA256SUMS-windows.txt
+          if-no-files-found: error

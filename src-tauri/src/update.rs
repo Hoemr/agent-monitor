@@ -102,8 +102,13 @@ pub fn restart_app(app: AppHandle) {
 
 /// A local certificate must never be replaced by a differently signed release.
 pub(crate) fn require_release_build() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    return Err("Windows 版暂不提供在线更新，请从 GitHub Releases 下载并安装新版本。 Download Windows updates manually from GitHub Releases.".into());
+    #[cfg(not(target_os = "windows"))]
+    {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     require_release_build_at(&executable)
+    }
 }
 
 fn require_release_build_at(executable: &std::path::Path) -> Result<(), String> {

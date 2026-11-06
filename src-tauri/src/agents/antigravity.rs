@@ -29,7 +29,7 @@ fn open_ro(path: &Path) -> rusqlite::Result<Connection> {
     // Closed agy databases can retain WAL mode without a shared-memory file.
     // Live WAL must be read normally so committed updates are included.
     let wal = PathBuf::from(format!("{}-wal", path.display()));
-    let encoded = path.to_string_lossy().replace('%', "%25").replace(' ', "%20")
+    let encoded = path.to_string_lossy().replace('\\', "/").replace('%', "%25").replace(' ', "%20")
         .replace('#', "%23").replace('?', "%3F");
     let mode = if wal.exists() { "mode=ro" } else { "mode=ro&immutable=1" };
     Connection::open_with_flags(format!("file:{encoded}?{mode}"),
@@ -319,7 +319,7 @@ impl AntigravitySource {
                 Path::new(p.command.split_whitespace().next().unwrap_or(""))
                     .file_name().is_some_and(|n| n == "agy")
             }
-        });
+        }) || ctx.processes.has_executable(if desktop { "Antigravity" } else { "agy" });
         rows.into_iter().filter_map(|(id, title, workspaces, run_status, activity, killed)| {
             let path = conversation_path(root, &id)?;
             let step = latest_step(&path);
@@ -385,10 +385,14 @@ mod tests {
         assert!(source.scan(&ctx).is_empty());
         db.execute_batch("INSERT INTO conversation_summaries VALUES('parent','Task','[\"file:///tmp/My%20Project\"]',
             'CASCADE_RUN_STATUS_IDLE',datetime('now'),datetime('now'),0,1,'')").unwrap();
+        let workspace = root.join("My Project");
+        let uri = tauri::Url::from_directory_path(&workspace).unwrap().to_string();
+        db.execute("UPDATE conversation_summaries SET workspace_uris=?1 WHERE conversation_id='parent'",
+            [serde_json::to_string(&vec![uri]).unwrap()]).unwrap();
         let tasks = source.scan(&ctx);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].status, TaskStatus::Idle);
-        assert_eq!(tasks[0].target.workspace_path.as_deref(), Some("/tmp/My Project"));
+        assert_eq!(Path::new(tasks[0].target.workspace_path.as_deref().unwrap()), workspace);
         steps.execute("INSERT INTO steps(idx,step_type,status) VALUES(2,?1,?2)", [FINISH, DONE]).unwrap();
         let completed = source.scan(&ctx);
         assert_eq!(completed[0].status, TaskStatus::Completed);

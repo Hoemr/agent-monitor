@@ -292,6 +292,7 @@ fn rollout_originator(path: &Path) -> Option<String> {
 
 fn uri_path(path: &Path) -> String {
     path.to_string_lossy()
+        .replace('\\', "/")
         .replace('%', "%25")
         .replace(' ', "%20")
         .replace('#', "%23")
@@ -547,15 +548,16 @@ impl CodexStore {
         let threads = self.threads.clone();
         for thread in &threads {
             let app_alive = if thread.terminal {
-                ctx.processes.entries.iter().any(|p| {
+                ctx.processes.has_executable("codex") || ctx.processes.entries.iter().any(|p| {
                     let executable = p.command.split_whitespace().next().unwrap_or("");
                     Path::new(executable).file_name().is_some_and(|name| name == "codex")
                         && !p.command.contains("app-server") && !p.command.contains("exec-server")
                 })
             } else if thread.vscode {
-                ctx.processes.any("Visual Studio Code.app/Contents/")
+                ctx.processes.any("Visual Studio Code.app/Contents/") || ctx.processes.has_executable("Code")
             } else {
                 ctx.processes.any(PROCESS_NEEDLE) || ctx.processes.any(APP_NAME)
+                    || ctx.processes.has_executable("Codex")
             };
             let tail = self.tail_for(&thread.id, &thread.rollout_path);
             let activity = tail
@@ -768,7 +770,16 @@ mod tests {
     fn configured_paths_are_absolute_and_deduplicated() {
         assert!(parse_homes(br#"["relative"]"#).is_err());
         assert!(parse_homes(b"broken").is_err());
-        assert_eq!(parse_homes(br#"["/one", "/two", "/one"]"#).unwrap(), vec![PathBuf::from("/one"), PathBuf::from("/two")]);
+        let one = std::env::temp_dir().join("one");
+        let two = std::env::temp_dir().join("two");
+        let json = serde_json::to_vec(&vec![&one, &two, &one]).unwrap();
+        assert_eq!(parse_homes(&json).unwrap(), vec![one, two]);
+    }
+
+    #[test]
+    fn windows_sqlite_uris_preserve_drive_and_encode_special_characters() {
+        assert_eq!(uri_path(Path::new(r"C:\Users\Me\My #Project\state_5.sqlite")),
+            "C:/Users/Me/My%20%23Project/state_5.sqlite");
     }
 
     #[test]

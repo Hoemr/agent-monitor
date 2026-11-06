@@ -148,6 +148,7 @@ var I18N = {
       activated_app: '',
       activated_app_only: 'Activated the app — the window could not be identified.',
       window_not_found: 'Activated the app — matching window not found.',
+      windows_focus_failed: 'Could not focus the target app. Open it and select the conversation manually.',
       window_ambiguous: 'Matched more than one window — session not distinguished.',
       deep_link_unverified: 'Session link not confirmed — opened the app instead.',
       focus_unconfirmed: 'Focus requested, result could not be confirmed.',
@@ -224,6 +225,7 @@ var I18N = {
       activated_app: '',
       activated_app_only: '已激活应用，无法识别对应窗口。',
       window_not_found: '已激活应用，未找到匹配窗口。',
+      windows_focus_failed: '未能聚焦目标应用，请打开它并手动选择会话。',
       window_ambiguous: '匹配到多个窗口，无法区分具体会话。',
       deep_link_unverified: '未能确认会话链接，已改为打开应用。',
       focus_unconfirmed: '已请求聚焦，结果未确认。',
@@ -1706,7 +1708,7 @@ settingsBtn.addEventListener('click', function (event) {
 
 document.addEventListener('keydown', function (event) {
   // Cmd+, (macOS Preferences) is the standard settings shortcut.
-  if (event.metaKey && event.key === ',') {
+  if ((event.metaKey || event.ctrlKey) && event.key === ',') {
     event.preventDefault();
     openSettings();
     return;

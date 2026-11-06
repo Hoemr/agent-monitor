@@ -210,6 +210,12 @@ impl Monitor {
         // Defensive normalisation: adapters must set these, but a bad adapter
         // must never make the UI advertise a jump it cannot perform.
         for t in &mut tasks {
+            #[cfg(target_os = "windows")]
+            {
+                t.capability.max_level = t.capability.max_level.min(crate::model::JumpLevel::L1);
+                t.capability.requires.clear();
+                t.capability.notes = "Windows: application focus only; conversation selection is not verified.".into();
+            }
             if t.target_validity == TargetValidity::Invalid {
                 t.capability.max_level = crate::model::JumpLevel::L0;
             }

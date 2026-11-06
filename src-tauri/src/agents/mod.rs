@@ -41,6 +41,13 @@ pub struct ProcessTable {
 
 impl ProcessTable {
     pub fn sample() -> Self {
+        #[cfg(target_os = "windows")]
+        return Self {
+            entries: crate::windows::processes(),
+            sampled_at_ms: crate::model::now_millis(),
+        };
+        #[cfg(not(target_os = "windows"))]
+        {
         let mut entries = Vec::new();
         if let Ok(out) = std::process::Command::new("ps")
             .args(["-axo", "pid=,command="])
@@ -61,6 +68,7 @@ impl ProcessTable {
             entries,
             sampled_at_ms: crate::model::now_millis(),
         }
+        }
     }
 
     pub fn find(&self, needle: &str) -> Option<&ProcInfo> {
@@ -69,6 +77,14 @@ impl ProcessTable {
 
     pub fn any(&self, needle: &str) -> bool {
         self.find(needle).is_some()
+    }
+
+    /// Windows process snapshots contain executable names, without command lines.
+    pub fn has_executable(&self, name: &str) -> bool {
+        self.entries.iter().any(|p| {
+            p.command.rsplit(['/', '\\']).next().unwrap_or("")
+                .to_ascii_lowercase().trim_end_matches(".exe").eq_ignore_ascii_case(name)
+        })
     }
 
     pub fn pids(&self, needle: &str) -> Vec<u32> {
@@ -161,7 +177,7 @@ pub fn retention_keeps(
 // ── Shared helpers ──────────────────────────────────────────────
 
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    dirs::home_dir()
 }
 
 pub fn file_mtime_secs(path: &std::path::Path) -> u64 {
@@ -199,6 +215,18 @@ pub fn sort_tasks(tasks: &mut [TaskRecord]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_executable_names_match_without_substring_collisions() {
+        let table = ProcessTable { entries: vec![
+            ProcInfo { pid: 1, command: r"C:\Program Files\Microsoft VS Code\Code.EXE".into() },
+            ProcInfo { pid: 2, command: "codex.exe".into() },
+        ], sampled_at_ms: 0 };
+        assert!(table.has_executable("Code"));
+        assert!(table.has_executable("codex"));
+        assert!(!table.has_executable("ode"));
+        assert!(!table.has_executable("claude"));
+    }
 
     #[test]
     fn question_tools_are_explicit_and_allow_namespaces() {

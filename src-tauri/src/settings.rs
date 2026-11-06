@@ -450,10 +450,9 @@ pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("AGENT_MONITOR_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("Library/Application Support/agent-monitor")
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("agent-monitor")
 }
 
 pub fn settings_path() -> PathBuf {

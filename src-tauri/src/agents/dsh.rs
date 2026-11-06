@@ -293,7 +293,8 @@ impl Source for DshSource {
 
     fn scan(&mut self, ctx: &ScanCtx) -> Vec<TaskRecord> {
         self.refresh();
-        let app_alive = ctx.processes.any(PROCESS_NEEDLE) || ctx.processes.any(APP_NAME);
+        let app_alive = ctx.processes.any(PROCESS_NEEDLE) || ctx.processes.any(APP_NAME)
+            || ctx.processes.has_executable("dsh");
         let mut out = Vec::new();
         let session_root = super::home_dir().map(|h| h.join(".dsh/sessions"));
         let mut logs = None;

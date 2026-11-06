@@ -1,0 +1,32 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Windows settings selftest</title></head>
+<body><iframe id="frame" src="../src/settings.html?mock=1&amp;platform=windows&amp;lang=en" style="width:620px;height:560px"></iframe>
+<pre id="results">PENDING</pre>
+<script>
+var results = [], failed = 0;
+function check(name, ok) { results.push((ok ? 'PASS ' : 'FAIL ') + name); if (!ok) failed++; }
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+(async function () {
+  try {
+    var frame = document.getElementById('frame'), w, t;
+    for (var n = 0; n < 100; n++) {
+      w = frame.contentWindow; t = w.__AM_SETTINGS_TEST__;
+      if (t && t.settings && t.meta) break;
+      await sleep(20);
+    }
+    var d = frame.contentDocument;
+    check('Windows metadata reaches Settings', t.meta.platform === 'windows');
+    t.selectGroup('jump'); await sleep(50);
+    check('Windows jump capabilities are explained', !!d.querySelector('[data-windows-jump]'));
+    check('macOS permission actions are absent', !d.querySelector('[data-action="request-accessibility"]') && !d.querySelector('[data-action="reset-permissions"]'));
+    check('macOS permission guide is absent', !d.querySelector('[data-guide]'));
+    t.selectGroup('attention'); await sleep(50);
+    check('Windows notification copy replaces macOS and Glass sound', d.body.textContent.indexOf('Windows notification') !== -1 && d.body.textContent.indexOf('Glass') === -1);
+    t.setLocalBuild(true); t.selectGroup('update'); await sleep(50);
+    check('Windows manual updates are explained', d.body.textContent.indexOf('Download the next Windows version') !== -1);
+    check('Windows cannot offer an unavailable online installer', !d.querySelector('[data-action="update-check"]') && !d.querySelector('[data-action="update-install"]'));
+    check('Windows Settings fits the existing window', d.documentElement.scrollWidth <= 620);
+  } catch (error) { check('runtime exception: ' + error.message, false); }
+  document.getElementById('results').textContent = (failed ? 'FAILED' : 'ALL PASS') + '\n' + results.join('\n');
+})();
+</script></body></html>
