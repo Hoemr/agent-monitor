@@ -3,6 +3,8 @@
 Version **0.8.0**: expressive pixel pets, Antigravity monitoring, pinned and
 renamed conversations, and more reliable session status and jumps.
 See the [release notes](docs/releases/v0.8.0.md).
+The v0.8.0 download uses a persistent local signature and manual installation;
+it is not Apple-notarized and does not offer in-app updates.
 
 A small, quiet **menu-bar/tray-only** desktop pet (no Dock icon) that shows every
 parallel coding-agent session in one place — pinned conversations first, then recent activity — and jumps to

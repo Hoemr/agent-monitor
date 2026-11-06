@@ -9,9 +9,14 @@
 - JavaScript (`node --check`), shell (`bash -n`) and Python syntax checks passed.
 - Pet pack JSON manifests parse; application, Cargo and lockfile versions agree
   on 0.8.0; `git diff --check` passed.
-- Public signed packaging is pending the repository's macOS distribution
-  certificate configuration. This verification does not claim a successful
-  public download or an end-to-end update from v0.7.1.
+- `cargo build --release --locked --manifest-path src-tauri/Cargo.toml`: passed.
+- Manual-download `.app` built with the existing persistent local certificate;
+  `codesign --verify --deep --strict` passed and the ZIP was assembled in an
+  isolated staging directory. The installed/running app was not replaced.
+- This release is not Apple-notarized and does not publish an in-app update
+  manifest. Automated distribution packaging still requires macOS distribution
+  certificate configuration. This verification does not claim an end-to-end
+  update from v0.7.1.
 
 ---
 

@@ -1,5 +1,20 @@
 # In-app updates (0.7.0)
 
+## v0.8.0 manual download
+
+The v0.8.0 GitHub Release uses the existing persistent local signing certificate
+and provides a manual-download ZIP. It is not Apple Developer ID signed or
+notarized. Quit the old app, extract the ZIP and replace the app in Applications;
+macOS may require explicit approval to open it. A change of signing identity
+requires granting the app's permissions again.
+
+The `local-signing` marker is retained, so this build does not install online
+updates. No `latest.json` or updater archive is published for v0.8.0. Existing
+v0.7.1 users must download this version manually. The automated workflow below
+still requires a distribution certificate for future releases with online updates.
+
+## Updater mechanism
+
 Agent Monitor updates itself from **GitHub Releases** using the official
 [`tauri-plugin-updater`](https://tauri.app/plugin/updater/) — the same approach
 as [cc-switch](https://github.com/farion1231/cc-switch): the app checks a signed
