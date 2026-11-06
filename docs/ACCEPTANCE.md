@@ -1,5 +1,31 @@
 # Acceptance results by phase
 
+## v0.8.1 Windows release verification — 2026-11-06
+
+Windows runner: GitHub Actions `windows-latest`, x64 MSVC.
+[Successful build and test run](https://github.com/Hoemr/agent-monitor/actions/runs/42158549456),
+application source commit `3fdeabdb41f0ac077d790871d88119fbdf81eee7`.
+
+- Windows Rust tests: 268 passed, 0 failed, including native process sampling.
+- Browser UI suites: 170 desktop checks, 111 Settings checks, 8 Windows-specific
+  checks and 5 reduced-motion checks passed on Windows and macOS.
+- Normal-animation tests temporarily set the ephemeral Windows runner's animation
+  preference and restore it afterward. The reduced-motion suite forces the
+  browser preference separately and verifies visible question state with no
+  JavaScript pulse or CSS breathing.
+- NSIS installer built successfully, alongside the portable ZIP and SHA-256
+  checksums.
+- Windows native startup: the release executable produced a task snapshot, then
+  the desktop app remained running for the 10-second smoke check.
+- macOS regression: 267 Rust tests passed; release build, persistent signature
+  verification and ZIP integrity checks passed.
+- Not performed: hands-on Windows installation, real Windows agent data,
+  notification delivery, mixed-DPI displays, drag/drop and focus switching.
+  The first Windows release advertises application-level L1 activation only;
+  exact conversation selection is not claimed.
+
+---
+
 ## v0.8.0 pre-release verification — 2026-11-06
 
 - `cargo test --release --manifest-path src-tauri/Cargo.toml`: 265 passed,

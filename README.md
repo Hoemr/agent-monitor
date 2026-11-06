@@ -3,6 +3,7 @@
 Version **0.8.1** adds a Windows 10/11 x64 build for native terminal and VSCode
 sessions: [Windows setup and limitations](docs/WINDOWS.md). Download the
 installer or portable ZIP from [GitHub Releases](https://github.com/Hoemr/agent-monitor/releases).
+See the [v0.8.1 release notes](docs/releases/v0.8.1.md).
 
 Version **0.8.0**: expressive pixel pets, Antigravity monitoring, pinned and
 renamed conversations, and more reliable session status and jumps.
