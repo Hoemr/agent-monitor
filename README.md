@@ -34,6 +34,13 @@ It is built to look like a native macOS popover: real **vibrancy material**
 hairline separators, and an interface that follows the system light/dark
 appearance. No webfonts, no dashboard chrome.
 
+On macOS, enable **Dynamic Island** in **Settings → Desktop Pet**, or from the
+tray menu. The translucent menu-bar panel shows the active agent and sessions
+waiting for attention. Hover to expand its compact two-line session rows,
+scroll to reach every session, and click a row to jump. It shares the pet's
+session order, status colours, language and display settings. Task summaries
+are available in the row tooltip. The desktop pet can stay visible alongside it.
+
 Built on the existing Agent Monitor project (Tauri 2 + Rust + vanilla JS) — the
 monitoring core was refactored rather than replaced, the old Claude-Code-only
 scanner was ported into a proper adapter, and the always-on widget became a
@@ -132,7 +139,7 @@ right click opens the menu (localized from the Settings language; `System` follo
 |---|---|---|---|
 | **Codex** (ChatGPT app + VSCode extension) | `~/.codex/state_5.sqlite` + rollout JSONL + `thread_history_1.sqlite` | thread id | **L3** `codex://threads/<id>` (verified) |
 | **DSH** (DeepSeek Harness) | `~/.dsh/storages/session_projcache/sessions/*.json` | session dir | **L3** — sidebar session click via macOS AX (verified, needs Accessibility) |
-| **ZCode** | `~/.zcode/v2/tasks-index.sqlite` | `task_id` | **blocked** on this host (`ZCode.app` exits immediately); data/mapping implemented |
+| **ZCode** | `~/.zcode/v2/tasks-index.sqlite` + transcript | `task_id` | **macOS L3**: unique current title from indexed ID → native task search → active conversation H1 verification |
 | **Claude Code** (`anthropic.claude-code` **VSCode extension**) | `~/.claude/projects/**/*.jsonl` parent-turn events | transcript UUID | **L3** — extension session URI with focused-chat verification; L2 if unconfirmed |
 
 Full matrix with evidence and limitations: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) ·
@@ -362,8 +369,9 @@ AGENT_MONITOR_SIMULATED=1 src-tauri/target/release/agent-monitor --dump-tasks
   `latest.json` + the signed macOS tarball; until a newer release exists the
   updater correctly reports "up to date". CI needs
   `TAURI_SIGNING_PRIVATE_KEY` — see [`docs/UPDATING.md`](docs/UPDATING.md).
-* `ZCode.app` (Electron 41) exits immediately on the test host (macOS 27 beta);
-  its data is shown, its jump is reported as unconfirmed. Details in `docs/JUMP.md`.
+* ZCode session jumps require unique nonempty titles in its live index and
+  Accessibility permission. Ambiguous or unconfirmed selections report a clear
+  result instead of navigating to an arbitrary workspace.
 * Claude Code is treated as the **VSCode extension host** only (per project scope);
   terminal-hosted Claude sessions are not routed to Terminal.
 * Physical multi-display, Space/full-screen, and first-run TCC prompts were **not

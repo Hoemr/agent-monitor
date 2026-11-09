@@ -185,7 +185,7 @@ frame.addEventListener('load', async function () {
       'enabled_agents', 'max_visible_rows', 'hover_expand_ms', 'collapse_delay_ms',
       'snap_distance', 'hidden_sliver', 'collapsed_size', 'auto_hide_after_s',
       'edge_hide_enabled', 'animations', 'icon_style', 'toast_on_degraded',
-      'auto_dismiss_invalid', 'legacy_imported'];
+      'auto_dismiss_invalid', 'island_mode', 'legacy_imported'];
     var missingTop = payload ? requiredTop.filter(function (k) {
       return !Object.prototype.hasOwnProperty.call(payload, k);
     }) : requiredTop;
@@ -583,15 +583,15 @@ frame.addEventListener('load', async function () {
       q('details.guide[data-guide]').getBoundingClientRect().height > 0,
       'guideHeight=' + Math.round(q('details.guide[data-guide]').getBoundingClientRect().height));
 
-    // 22c4. expanding shows the three steps and the re-grant notes
+    // 22c4. expanding shows the three steps and the repair hint (signing/
+    // migration lore was removed from user-facing copy on purpose)
     q('summary.guide-summary').click();
     await sleep(90);
     var guideOpenEl = q('details.guide[data-guide]');
-    check('summary click expands the guide with steps and re-grant notes',
+    check('summary click expands the guide with steps and the repair hint',
       !!guideOpenEl && guideOpenEl.open === true &&
       qa('details.guide .steps .step').length === 3 &&
-      /ad-hoc/i.test(guideOpenEl.textContent) &&
-      /another copy|older build|另一个副本|旧版本/i.test(guideOpenEl.textContent) &&
+      !/ad-hoc|persistent signing/i.test(guideOpenEl.textContent) &&
       /app bundle|App 位置|App bundle/i.test(guideOpenEl.textContent));
 
     // 22c5. the open/collapsed state survives re-renders
@@ -619,18 +619,16 @@ frame.addEventListener('load', async function () {
     var staleAlert = q('[data-stale-alert]');
     check('missing Accessibility shows the stale-grant alert with repair copy',
       !!staleAlert &&
-      /older build|another copy|旧版本|另一个副本/i.test(staleAlert.textContent) &&
-      /ad-hoc/i.test(staleAlert.textContent) &&
-      /reset this app|重新授权|重置本应用/i.test(staleAlert.textContent) &&
+      /not granted|未授权/i.test(staleAlert.textContent) &&
+      /reset this app|重置本应用/i.test(staleAlert.textContent) &&
       /reveal app|显示 App/i.test(staleAlert.textContent),
       staleAlert ? staleAlert.textContent.slice(0, 90) : 'missing');
 
-    // 22d. one-time migration guidance and persistent signing identity
-    check('first-run guide explains persistent signing and one-time migration',
-      qa('.steps .step').length === 3 &&
-      /ad-hoc/i.test(jumpText) && /Accessibility/.test(jumpText) &&
-      /Automation/.test(jumpText) && /persistent signing certificate/i.test(jumpText) &&
-      /one new grant/i.test(jumpText));
+    // 22d. the guide stays lean: three steps, no signing/migration lore
+    check('first-run guide keeps the three steps without signing lore',
+      qa('.steps .step').length === 3 && /Accessibility/.test(jumpText) &&
+      /Automation/.test(jumpText) &&
+      !/ad-hoc|persistent signing|one new grant/i.test(jumpText));
 
     // 22e. per-agent capability rows come from diagnostics.agents
     var agentRows = qa('.agent-row[data-agent]');
@@ -1032,18 +1030,21 @@ frame.addEventListener('load', async function () {
       count('check_for_update') === localChecks);
     T.setLocalBuild(false);
 
-    // 23. data paths come from get_settings_meta, read-only and focusable
+    // 23. data section: only the data folder path remains (per-file paths and
+    // internal format version are deliberately not shown to users)
     T.selectGroup('data');
     var paths = qa('.path-value');
     var pathTexts = paths.map(function (p) { return p.textContent; });
-    check('data section lists read-only paths from get_settings_meta',
-      paths.length === 4 &&
+    check('data section shows only the data folder path, read-only and focusable',
+      paths.length === 1 &&
       paths.every(function (p) {
         return p.tagName === 'CODE' && p.getAttribute('tabindex') === '0' &&
           !!p.getAttribute('aria-label');
       }) &&
-      pathTexts.some(function (t) { return /settings\.json$/.test(t); }) &&
-      !!T.meta.settings_path,
+      pathTexts.some(function (t) { return /agent-monitor$/.test(t); }) &&
+      !!T.meta.data_dir &&
+      !/settings\.json|pet\.json|dismissed\.json/.test(doc.body.textContent) &&
+      !doc.body.textContent.includes('Settings format'),
       pathTexts.join(' | '));
 
     // 24. open data folder

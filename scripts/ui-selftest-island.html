@@ -1,0 +1,164 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Island acceptance</title>
+<style>body{margin:24px;background:#25252a;color:white;font:13px system-ui}iframe{border:0;vertical-align:top}#pet{width:460px;height:650px}#island{width:320px;height:30px}pre{white-space:pre-wrap}</style>
+</head><body><iframe id="pet" src="../src/index.html?mock=1&lang=zh&appearance=dark"></iframe>
+<iframe id="island"></iframe><pre id="results">PENDING</pre>
+<script>
+var results = [], failures = 0;
+function check(name, ok) { results.push((ok ? 'PASS ' : 'FAIL ') + name); if (!ok) failures++; }
+function sleep(ms) { return new Promise(function(r){setTimeout(r,ms);}); }
+function fixture() {
+  var now = Math.floor(Date.now()/1000);
+  var agents = ['Codex','Claude Code','DSH','ZCode','Antigravity'];
+  var keys = ['codex','claude-code','dsh','zcode','antigravity'];
+  var statuses = ['completed','waiting_input','running','failed','waiting_approval','idle','unknown'];
+  return { custom_names: {'fx:0':'置顶：论文图表与理论核对'}, attention_count: 5, question_count: 3, agents: [], tasks: Array.from({length:14}, function(_,i) {
+    return { id:'fx:'+i, agent_key:keys[i%5], agent_name:agents[i%5], host:i%2?'vscode':'terminal',
+      title:i===1?'检查 appendix 中失败的 LaTeX 编译与所有引用，保留很长的会话标题以验证截断':'Session '+i+' — refine the agent monitor',
+      status:statuses[i%7], completion_id:statuses[i%7]==='completed'?'fx-c'+i:undefined, model:i===13?null:'gpt-6.1 / Opus 4.7', summary:'逐项核对状态、模型与跳转信息；当前正在检查第 '+(i+1)+' 项',
+      last_activity_secs:now-120-i*120, level:'L'+(i%4), pinned:i===0, status_reason:'fixture', origin:'index', target:{}, target_validity:'valid' };
+  })};
+}
+function mockBridge() {
+  window.handlers = {}; window.calls = [];
+  window.__TAURI__ = {
+    event:{listen:function(name,fn){ (handlers[name]=handlers[name]||[]).push(fn); return Promise.resolve(function(){}); }},
+    core:{invoke:function(cmd,args){
+      calls.push({cmd:cmd,args:args});
+      if(cmd==='get_settings') return Promise.resolve(parent.testSettings);
+      if(cmd==='get_snapshot') return Promise.resolve(parent.testSnapshot);
+      if(cmd==='island_metrics') return Promise.resolve({notch_w:0,bar_h:30,panel_w:520,screen_h:1080});
+      if(cmd==='island_expand') { frameElement.style.width='520px'; frameElement.style.height=args.hPt+'px'; }
+      if(cmd==='island_collapse') { frameElement.style.width='320px'; frameElement.style.height='30px'; }
+      return Promise.resolve(true);
+    }}
+  };
+  window.emit = function(name,payload){(handlers[name]||[]).forEach(function(fn){fn({payload:payload});});};
+}
+var testSettings = {language:'zh',appearance:'dark',animations:'off',show_summary:true,show_jump_level:true,max_visible_rows:3,hover_expand_ms:60,collapse_delay_ms:120};
+var testSnapshot = fixture();
+(async function(){
+  try {
+    var frame=document.getElementById('island'), pet=document.getElementById('pet');
+    var source=await (await fetch('../src/island.html')).text();
+    var base=new URL('../src/',location.href).href;
+    source=source.replace('<head>','<head><base href="'+base+'"><script>('+mockBridge.toString()+')();<\/script>');
+    frame.srcdoc=source;
+    await sleep(700);
+    var w=frame.contentWindow,d=w.document,pw=pet.contentWindow;
+    // Deterministic read state: reset (not just remove) so persisted
+    // acknowledgements from earlier runs of either selftest cannot leak in.
+    pw.SessionUI.reads.reset();
+    w.SessionUI.reads.reset();
+    pw.applySettings(Object.assign(pw.defaultSettings(),testSettings));
+    pw.render(JSON.parse(JSON.stringify(testSnapshot)));
+    check('shared translation table loaded in both views', JSON.stringify(w.SessionUI.I18N)===JSON.stringify(pw.SessionUI.I18N));
+    check('all 14 sessions rendered despite a 3-row viewport', d.querySelectorAll('.row').length===14);
+    check('collapsed agent names identify activity and attention', d.getElementById('activity').textContent.includes('DSH') && d.getElementById('attention').textContent.includes('Claude'));
+    check('external-display pill keeps translucent material', !w.islandEl.classList.contains('has-notch') && w.getComputedStyle(w.islandEl).backgroundColor==='rgba(22, 24, 29, 0.18)');
+    check('rows stay at two lines even with summaries enabled', testSettings.show_summary && !d.querySelector('.row-summary') && Array.from(d.querySelectorAll('.row-content')).every(function(body){return body.children.length===2;}));
+    w.emit('island-hover',true); await sleep(100);
+    check('hover expands',w.state.expanded && d.getElementById('ears').getAttribute('aria-expanded')==='true');
+    check('expanded panel interactive; collapsed control inert',!w.panelEl.inert && w.earsEl.inert);
+    check('bounded panel with internal scrolling',w.rowsEl.scrollHeight>w.rowsEl.clientHeight && parseFloat(frame.style.height)<680);
+    check('order exactly matches pet snapshot', Array.from(d.querySelectorAll('.row')).map(function(r){return r.dataset.taskId;}).join('|')===Array.from(pw.document.querySelectorAll('.task')).map(function(r){return r.dataset.taskId;}).join('|'));
+    var classes=[['.row-title','.title'],['.row-agent','.agent'],['.row-host','.host'],['.row-model','.task-model'],['.row-level','.level'],['.row-time','.time']];
+    classes.forEach(function(pair){check('field parity '+pair[0],Array.from(d.querySelectorAll('.row')).every(function(r,i){
+      var a=r.querySelector(pair[0]), b=pw.document.querySelectorAll('.task')[i].querySelector(pair[1]); return (a?a.textContent:'')===(b?b.textContent:'');
+    }));});
+    check('status parity',Array.from(d.querySelectorAll('.row')).every(function(r,i){return r.querySelector('.row-status').textContent.endsWith(pw.document.querySelectorAll('.task')[i].querySelector('.status-text').textContent);}));
+    check('pinned marker is read-only',d.querySelectorAll('.pin').length===1 && !d.querySelector('.pin').hasAttribute('tabindex'));
+    check('no management controls',!d.querySelector('.dismiss,.rename,[aria-pressed]'));
+    var unreadRows=Array.from(d.querySelectorAll('.row.new-completed')).map(function(r){return r.dataset.taskId;});
+    var petUnread=Array.from(pw.document.querySelectorAll('.task.new-completed')).map(function(r){return r.dataset.taskId;});
+    check('island unread rows are the two fixture completions',unreadRows.join('|')==='fx:0|fx:7','island=['+unreadRows.join('|')+']');
+    check('pet panel shows the same unread markers pet=[' + petUnread.join('|') + ']','fx:0|fx:7'===petUnread.join('|'));
+    check('green chip counts unread completions',!!d.querySelector('.new-count') && d.querySelector('.new-count').textContent.indexOf('2')!==-1);
+    w.emit('settings-changed',Object.assign({},testSettings,{new_badge:false}));
+    check('new_badge=false hides unread markers',!d.querySelector('.new-dot') && !d.querySelector('.new-count'));
+    w.emit('settings-changed',testSettings);
+    check('restoring new_badge brings dots back',d.querySelectorAll('.row.new-completed').length===2);
+    var beforeDotClick=w.calls.length;
+    d.querySelectorAll('.row.new-completed')[1].querySelector('.new-dot').click(); await sleep(30);
+    check('dot click acknowledges without jumping',w.calls.slice(beforeDotClick).every(function(c){return c.cmd!=='jump_to_task';}) && Array.from(d.querySelectorAll('.row.new-completed')).map(function(r){return r.dataset.taskId;}).join('|')==='fx:0');
+    var storedReads=JSON.parse((w.localStorage.getItem('am-completion-reads-v2')||'{"read":{}}'));
+    check('acknowledgement persists to shared read state',storedReads.read['fx:7']==='fx-c7');
+    check('chip reflects remaining unread',!!d.querySelector('.new-count') && d.querySelector('.new-count').textContent.indexOf('1')!==-1);
+    d.querySelector('.new-count').click(); await sleep(30);
+    check('chip click marks all read',!d.querySelector('.row.new-completed') && !d.querySelector('.new-count'));
+    check('L0 through L3 visible', ['L0','L1','L2','L3'].every(function(level){return Array.from(d.querySelectorAll('.row-level')).some(function(n){return n.textContent===level;});}));
+    w.rowsEl.scrollTop=w.rowsEl.scrollHeight;
+    var bottom=d.querySelectorAll('.row')[13].getBoundingClientRect(), list=w.rowsEl.getBoundingClientRect();
+    check('last session reachable by scroll',bottom.bottom<=list.bottom+1 && bottom.top>=list.top);
+    var oldScroll=w.rowsEl.scrollTop;
+    var updated=JSON.parse(JSON.stringify(testSnapshot)); updated.tasks[13].summary='Updated while browsing';
+    w.emit('tasks-updated',updated);
+    check('live updates preserve scroll position',Math.abs(w.rowsEl.scrollTop-oldScroll)<2);
+    var changed=Object.assign({},testSettings,{show_summary:false,show_jump_level:false,language:'en',max_visible_rows:5});
+    w.emit('settings-changed',changed); await sleep(30);
+    check('island rows stay two-line: no summary even with show_summary on',!d.querySelector('.row-summary') && pw.document.querySelectorAll('.status-summary').length>0);
+    check('jump-level setting hides levels immediately',!d.querySelector('.row-level'));
+    check('language setting updates states and hosts',d.querySelectorAll('.row')[1].querySelector('.row-status').textContent.includes('Waiting for input') && d.querySelector('.row-host').textContent==='Terminal');
+    check('missing model uses shared fallback',d.querySelectorAll('.row-model')[13].textContent==='Model unknown');
+    w.emit('settings-changed',Object.assign({},changed,{appearance:'light'}));
+    check('light appearance updates glass and text together',w.getComputedStyle(d.documentElement).colorScheme==='light' && w.getComputedStyle(d.querySelector('.row-title')).color==='rgb(34, 39, 51)');
+    w.emit('settings-changed',changed);
+    check('animations off removes transitions and loops',w.getComputedStyle(w.panelEl).transitionDuration==='0s' && w.getComputedStyle(d.querySelector('.wave i')).animationName==='none');
+    var colorNames=['running','waiting','failed','completed','idle','unknown'];
+    colorNames.forEach(function(name){
+      var a=d.createElement('span'),b=pw.document.createElement('span');
+      a.style.color=b.style.color='var(--status-'+name+')';d.body.append(a);pw.document.body.append(b);
+      check('shared status color '+name,w.getComputedStyle(a).color===pw.getComputedStyle(b).color);a.remove();b.remove();
+    });
+    w.emit('island-hover',false); await sleep(160);
+    check('leave collapses',!w.state.expanded && w.panelEl.inert);
+    w.emit('island-hover',true); await sleep(100);
+    d.querySelectorAll('.row')[13].click(); await sleep(30);
+    check('last row invokes existing graded jump',w.calls.some(function(c){return c.cmd==='jump_to_task' && c.args.taskId==='fx:13';}));
+    check('click collapses and does not reopen under cursor',!w.state.expanded);
+    var jumpInvoke=w.tauri.core.invoke;
+    w.tauri.core.invoke=function(cmd,args){return cmd==='jump_to_task'?Promise.resolve({kind:'failed',reason_key:'zcode_session_ambiguous'}):jumpInvoke(cmd,args);};
+    d.querySelector('.row').click(); await sleep(30);
+    check('failed jump is visible on collapsed island',d.getElementById('attention').textContent.includes('unique title') && d.getElementById('attention').classList.contains('ear-failed'));
+    w.emit('tasks-updated',testSnapshot);
+    check('snapshot refresh retains jump failure',d.getElementById('attention').title.includes('unique title') && d.getElementById('foot-hint').title.includes('unique title'));
+    w.emit('settings-changed',Object.assign({},changed,{language:'zh',toast_on_degraded:false}));
+    check('jump notice follows shared language',d.getElementById('attention').title===pw.SessionUI.t('zh','toast.zcode_session_ambiguous'));
+    w.showJumpOutcome({kind:'unconfirmed',reason_key:'zcode_session_unconfirmed'});
+    check('soft jump notice respects shared switch',!w.jumpNotice);
+    w.showJumpOutcome({kind:'failed',reason_key:'zcode_session_not_found'});
+    check('hard failure remains visible with soft notices disabled',!!w.jumpNotice && d.getElementById('attention').classList.contains('ear-failed'));
+    w.showJumpOutcome({kind:'success'});
+    check('successful jump clears earlier notice',!w.jumpNotice && !d.getElementById('foot-hint').title);
+    w.tauri.core.invoke=jumpInvoke;
+    w.emit('settings-changed',changed);
+    w.emit('tasks-updated',{tasks:[],custom_names:{}});check('localized empty state',d.querySelector('.empty-title').textContent==='No active sessions');
+    w.emit('settings-changed',Object.assign({},testSettings,{animations:'system'}));
+    check('system motion preference followed',w.motionEnabled()===!w.reducedMotion.matches);
+    // Pointer can leave during the opening transition and re-enter during close.
+    w.emit('tasks-updated',testSnapshot);
+    w.emit('island-hover',true); await sleep(90); w.emit('island-hover',false); await sleep(500);
+    check('leave during opening eventually collapses',!w.state.expanded);
+    w.emit('island-hover',true); await sleep(450); w.emit('island-hover',false); await sleep(140); w.emit('island-hover',true); await sleep(550);
+    check('re-enter during collapse eventually reopens',w.state.expanded && !w.state.pending);
+    w.emit('settings-changed',Object.assign({},testSettings,{animations:'always'}));
+    w.state.inside=false; w.setExpanded(false); await sleep(250);
+    w.state.inside=true; w.setExpanded(true); await sleep(120);
+    d.querySelector('.row').click(); await sleep(600);
+    check('click during opening still closes',!w.state.expanded && !w.state.pending);
+    w.emit('settings-changed',testSettings);
+    var originalInvoke=w.tauri.core.invoke;
+    w.tauri.core.invoke=function(cmd,args){return cmd==='island_expand'?Promise.resolve(false):originalInvoke(cmd,args);};
+    w.setExpanded(true); await sleep(30);
+    check('rejected native transition restores collapsed UI',!w.state.expanded && w.panelEl.inert && !w.earsEl.inert);
+    w.tauri.core.invoke=originalInvoke;
+    w.state.inside=true; w.setExpanded(true); await sleep(30);
+    var kept=d.querySelector('.row');
+    w.emit('tasks-updated',JSON.parse(JSON.stringify(w.state.snapshot)));
+    check('duplicate snapshot preserves row nodes',d.querySelector('.row')===kept);
+    // Leave a representative frame visible for visual inspection.
+    w.emit('settings-changed',testSettings);
+  } catch(e) {check('uncaught '+(e.stack||e),false);}
+  document.getElementById('results').textContent=(failures?'FAILED '+failures:'ALL PASS')+'\n'+results.join('\n');
+})();
+</script></body></html>

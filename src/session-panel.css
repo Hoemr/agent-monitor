@@ -1,0 +1,74 @@
+/* Shared visual grammar for both native session panels. */
+.session-avatar {
+  flex: none; display: inline-grid; place-items: center;
+  width: 28px; height: 28px; border-radius: 10px;
+  color: var(--session-status, var(--status-idle));
+  background: linear-gradient(145deg, rgba(255,255,255,.12), transparent 65%),
+    color-mix(in srgb, var(--session-status, var(--status-idle)) 9%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--session-status, var(--status-idle)) 18%, transparent),
+    inset 0 1px 0 rgba(255,255,255,.16);
+  font-size: 10px; font-weight: 650; letter-spacing: -.2px; line-height: 1;
+}
+.session-state {
+  flex: none; display: inline-flex; align-items: center; gap: 4px;
+  height: 16px; padding: 0 5px; border-radius: 5px;
+  color: var(--session-status);
+  background: color-mix(in srgb, var(--session-status) 8%, transparent);
+  font-size: 11px; line-height: 16px; font-weight: 500; white-space: nowrap;
+}
+.session-level {
+  flex: none; display: inline-block; padding: 0 4px; border-radius: 4px;
+  color: var(--session-muted); box-shadow: inset 0 0 0 1px var(--session-divider);
+  font-size: 9px; font-weight: 500; line-height: 15px; font-variant-numeric: tabular-nums;
+}
+.session-level.l0 { color: var(--status-failed); }
+.session-row {
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--session-card-gloss), transparent 60%), var(--session-card-fill);
+  box-shadow: inset 0 0 0 1px var(--session-card-edge), 0 1px 2px rgba(0,0,0,.045);
+  transition: background-color 140ms ease, box-shadow 180ms ease, transform 160ms var(--session-ease);
+  transform-origin: center;
+}
+.session-row:hover, .session-row:focus-visible {
+  background-color: var(--session-card-hover);
+  box-shadow: inset 0 0 0 1px var(--session-card-edge), 0 2px 4px rgba(0,0,0,.06);
+}
+.session-row:active {
+  background-color: color-mix(in srgb, var(--session-status) 8%, var(--session-card-hover));
+  transform: scale(.995); transition-duration: 60ms;
+}
+#app.mode-expanded #panel > * {
+  transform-origin: 50% 100%;
+  animation: session-panel-arrive 220ms var(--session-ease) both;
+}
+@keyframes session-panel-arrive {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-animations]:not([data-animations="always"]) #app.mode-expanded #panel > * { animation: none; }
+  html[data-animations]:not([data-animations="always"]) .session-row { transition: none; }
+  html[data-animations]:not([data-animations="always"]) .session-row:active { transform: none; }
+}
+html[data-animations="off"] #app.mode-expanded #panel > * { animation: none; }
+html[data-animations="off"] .session-row:active, html[data-motion="off"] .session-row:active { transform: none; }
+
+/* Unread completions (shared with the pet panel's marker: green dot before
+ * the task title, click to acknowledge; the header chip = mark all read). */
+.new-dot {
+  position: relative;
+  cursor: pointer;
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--status-running);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--status-running) 40%, transparent);
+}
+.new-dot::after { content: ""; position: absolute; inset: -5px; }
+.new-dot:focus-visible { outline: 2px solid var(--status-running); outline-offset: 4px; }
+.new-count { cursor: pointer; }
+.new-count .status-dot {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--status-running) 40%, transparent);
+}

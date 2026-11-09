@@ -267,6 +267,11 @@ pub struct Settings {
     /// Which mascot pack to use when `pet_kind` is `mascot` (built-in name or
     /// a directory under `pets/`).
     pub mascot_pack: String,
+    /// Notch-hugging Dynamic-Island panel, shown **alongside** the pet
+    /// (additive mode: toggling it never touches pet visibility). macOS only;
+    /// on displays without a notch it floats a virtual notch at the top
+    /// centre of the main display.
+    pub island_mode: bool,
 
     // Jump
     pub toast_on_degraded: bool,
@@ -308,6 +313,7 @@ impl Default for Settings {
             icon_style: IconStyle::Builtin,
             pet_kind: PetKind::Classic,
             mascot_pack: "nailong".into(),
+            island_mode: false,
             toast_on_degraded: true,
             auto_dismiss_invalid: false,
             auto_check_updates: true,

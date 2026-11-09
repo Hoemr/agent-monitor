@@ -1,0 +1,19 @@
+/* Shared colours and a light tint over the native macOS blur layer. */
+:root {
+  --session-ink: light-dark(#222733, #edf0f5);
+  --session-secondary: light-dark(#606978, #cbd3df);
+  --session-muted: light-dark(#737d8c, #bec9d8);
+  --session-surface: light-dark(rgba(249,250,252,.20), rgba(22,24,29,.18));
+  --session-divider: light-dark(rgba(35,45,60,.085), rgba(203,214,233,.085));
+  --session-card-fill: light-dark(rgba(255,255,255,.40), rgba(12,16,24,.10));
+  --session-card-gloss: light-dark(rgba(255,255,255,.30), rgba(255,255,255,.035));
+  --session-card-edge: light-dark(rgba(255,255,255,.62), rgba(255,255,255,.10));
+  --session-card-hover: light-dark(rgba(255,255,255,.66), rgba(255,255,255,.065));
+  --session-ease: cubic-bezier(.22,1,.36,1);
+  --status-running: light-dark(#248a3d, #30d158);
+  --status-waiting: light-dark(#b25000, #ff9f0a);
+  --status-failed: light-dark(#d70015, #ff453a);
+  --status-completed: light-dark(#0071e3, #64d2ff);
+  --status-idle: light-dark(#8e8e93, #8e8e93);
+  --status-unknown: light-dark(#8944ab, #bf5af2);
+}

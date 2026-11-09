@@ -12,6 +12,7 @@
 pub mod agents;
 pub mod ax;
 pub mod icons;
+pub mod island;
 pub mod jump;
 pub mod model;
 pub mod monitor;
@@ -33,7 +34,7 @@ use pet::{
     pick_screen, position_from_rect, restore_rect, state_view, unhide_rect, PetStore, Rect,
     ScreenRect, EXPANDED_WIDTH,
 };
-use settings::{Appearance, Language, PetKind, Settings, SettingsGroup, SettingsStore};
+use settings::{Animations, Appearance, Language, PetKind, Settings, SettingsGroup, SettingsStore};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -80,6 +81,9 @@ struct Runtime {
     /// Consecutive fallback-dismissal checks while the expanded panel is
     /// unfocused with the cursor elsewhere.
     expanded_dismiss_grace: u32,
+    /// Island mode: true while the notch panel is expanded (drives
+    /// repositioning when displays change).
+    island_expanded: bool,
 }
 
 pub struct AppState {
@@ -127,6 +131,7 @@ impl AppState {
                 mascot: pet_engine::mascot::MascotHost::new("nailong"),
                 pet_effects_off: false,
                 expanded_dismiss_grace: 0,
+                island_expanded: false,
             }),
             wake_rx: Mutex::new(Some(wake_rx)),
         }
@@ -268,12 +273,15 @@ fn animate(win: &WebviewWindow, from: Rect, to: Rect, enabled: bool) {
     }
     let win = win.clone();
     std::thread::spawn(move || {
-        const STEPS: u32 = 7;
-        for i in 1..=STEPS {
+        // The island stays anchored to the menu bar while its sheet unfolds.
+        let steps = if win.label() == "island" {
+            if to.h > from.h { 20 } else { 12 }
+        } else { 7 };
+        for i in 1..=steps {
             if ANIMATION_GENERATION.load(Ordering::SeqCst) != generation {
                 return;
             }
-            let t = i as f64 / STEPS as f64;
+            let t = i as f64 / steps as f64;
             let e = 1.0 - (1.0 - t).powi(3);
             set_rect(
                 &win,
@@ -284,7 +292,7 @@ fn animate(win: &WebviewWindow, from: Rect, to: Rect, enabled: bool) {
                     from.h + (to.h - from.h) * e,
                 ),
             );
-            std::thread::sleep(Duration::from_millis(18));
+            std::thread::sleep(Duration::from_millis(if win.label() == "island" { 16 } else { 18 }));
         }
     });
 }
@@ -402,6 +410,10 @@ fn enter_mode(app: &AppHandle, mode: PetMode, animated: bool) {
 
 /// Keep the pet inside a connected screen after display changes / unplug.
 fn reconcile_screens(app: &AppHandle) {
+    // The island follows its own display (the notched one), independent of
+    // where the pet lives.
+    #[cfg(target_os = "macos")]
+    refresh_island_rect(app);
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
@@ -595,6 +607,12 @@ fn apply_settings(app: &AppHandle, previous: &Settings) {
         }
     }
 
+    if previous.island_mode != current.island_mode {
+        #[cfg(target_os = "macos")]
+        enter_island_mode(app, current.island_mode);
+        update_tray_menu(app);
+    }
+
     if mode == PetMode::EdgeHidden && previous.edge_hide_enabled && !current.edge_hide_enabled {
         // The feature that parked the window off-screen was removed: keep the
         // window reachable (tray-hidden) instead of leaving an unreachable sliver.
@@ -722,6 +740,194 @@ fn hide_settings_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.hide();
     }
+}
+
+// ── Dynamic-Island mode ─────────────────────────────────────────
+
+/// Ear width flanking the notch hardware on each side (logical pt). The
+/// collapsed pill = notch + two ears: the island reads as if it had grown out
+/// of the hardware notch, content living only in the ears.
+const ISLAND_EAR_PT: f64 = 160.0;
+/// Expanded panel width (logical pt).
+const ISLAND_PANEL_W_PT: f64 = 520.0;
+/// Expanded panel height bounds (logical pt); the frontend owns the exact
+/// value within these.
+const ISLAND_PANEL_MIN_H_PT: f64 = 96.0;
+const ISLAND_PANEL_MAX_H_PT: f64 = 680.0;
+
+fn animations_enabled(settings: &Settings) -> bool {
+    !matches!(settings.animations, Animations::Off)
+}
+
+/// Create the island window on first use; hidden until island mode turns on.
+#[cfg(target_os = "macos")]
+fn ensure_island_window(app: &AppHandle) -> Option<WebviewWindow> {
+    if let Some(win) = app.get_webview_window("island") {
+        return Some(win);
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        app,
+        "island",
+        tauri::WebviewUrl::App("island.html".into()),
+    )
+    .title("Agent Monitor Island")
+    .inner_size(200.0, 38.0)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .accept_first_mouse(true)
+    .visible(false)
+    .visible_on_all_workspaces(true)
+    .build()
+    .ok()?;
+    island::apply_panel_style(&win).ok()?;
+    window_vibrancy::apply_vibrancy(
+        &win,
+        window_vibrancy::NSVisualEffectMaterial::Popover,
+        Some(window_vibrancy::NSVisualEffectState::Active),
+        Some(24.0),
+    )
+    .inspect_err(|error| eprintln!("island material: {error}"))
+    .ok()?;
+    Some(win)
+}
+
+/// Physical-pixel rect for the island at a logical size, centred on the notch.
+/// Matches the notched `NSScreen` (pt, top-left origin) to a tao monitor (px)
+/// so the pill lands on the right display in any arrangement.
+#[cfg(target_os = "macos")]
+fn island_rect(app: &AppHandle, m: island::IslandMetrics, w_pt: f64, h_pt: f64) -> Option<Rect> {
+    let win = app
+        .get_webview_window("island")
+        .or_else(|| app.get_webview_window("main"))?;
+    // The pill is computed in global Cocoa points (what NSScreen reports),
+    // then expressed in tao's "physical" space, which on macOS is point ×
+    // **the scale of the screen the window is on right now** — tao converts
+    // back with that same factor, so the window lands exactly on the Cocoa
+    // point regardless of which display it currently sits on. Matching the
+    // target monitor by position and scaling by *its* factor double-scales
+    // the first placement on mixed-scale multi-display setups (observed: the
+    // island parked ~5000 pt off-screen when the notched MacBook display woke
+    // up next to a 1× external display).
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let x = (m.center_x - w_pt / 2.0) * scale;
+    let y = m.origin_y * scale;
+    Some(Rect::new(x, y, w_pt * scale, h_pt * scale))
+}
+
+/// Apply the current island mode. The island is **additive**: the pet keeps
+/// its own visibility state machine (tray hide, edge hide, auto-hide and the
+/// mascot all keep working untouched), so toggling the island never touches
+/// the pet and both can be on screen at once.
+#[cfg(target_os = "macos")]
+fn enter_island_mode(app: &AppHandle, enabled: bool) {
+    if !enabled {
+        if let Some(win) = app.get_webview_window("island") {
+            let _ = win.hide();
+        }
+        return;
+    }
+    let Some(metrics) = island::island_display_geometry() else {
+        // No usable display (never reached in practice): keep the setting as
+        // the user chose; the next display event re-runs this path.
+        return;
+    };
+    let Some(win) = ensure_island_window(app) else { return };
+    let w_pt = metrics.notch_w + 2.0 * ISLAND_EAR_PT;
+    if let Some(rect) = island_rect(app, metrics, w_pt, metrics.bar_h) {
+        set_rect(&win, rect);
+    }
+    {
+        let state = app.state::<AppState>();
+        let mut rt = state.inner.lock().unwrap();
+        rt.island_expanded = false;
+    }
+    let _ = win.set_shadow(false);
+    let _ = win.show();
+    let _ = app.emit("island-geometry", serde_json::json!({ "mode": "collapsed", "metrics": metrics }));
+    start_island_hover_watcher(app);
+}
+
+/// Cursor-hover watcher for the island. The webview's `mouseenter` is not
+/// reliably delivered for a borderless status-bar-level window, so hover is
+/// detected here — same global-cursor source as the pet's edge logic — and
+/// forwarded to the island page as enter/leave edges. The thread parks itself
+/// (80 ms tick) and exits once island mode is off.
+#[cfg(target_os = "macos")]
+fn start_island_hover_watcher(app: &AppHandle) {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mut last_inside: Option<bool> = None;
+        loop {
+            std::thread::sleep(Duration::from_millis(80));
+            let enabled = {
+                let state = app.state::<AppState>();
+                let rt = state.inner.lock().unwrap();
+                rt.settings.island_mode
+            };
+            if !enabled {
+                RUNNING.store(false, Ordering::SeqCst);
+                return;
+            }
+            let Some(win) = app.get_webview_window("island") else { continue };
+            if !win.is_visible().unwrap_or(false) {
+                continue;
+            }
+            let Some((cx, cy)) = cursor_point() else { continue };
+            let scale = win.scale_factor().unwrap_or(1.0);
+            let pos = win.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
+            let size = win.outer_size().unwrap_or(PhysicalSize::new(0, 0));
+            let inside = cx * scale >= f64::from(pos.x)
+                && cx * scale <= f64::from(pos.x + size.width as i32)
+                && cy * scale >= f64::from(pos.y)
+                && cy * scale <= f64::from(pos.y + size.height as i32);
+            if last_inside != Some(inside) {
+                last_inside = Some(inside);
+                let _ = app.emit("island-hover", inside);
+            }
+        }
+    });
+}
+
+/// Re-place the island window at its current mode's rect (display changes,
+/// scale changes). Height while expanded belongs to the frontend and is kept.
+#[cfg(target_os = "macos")]
+fn refresh_island_rect(app: &AppHandle) {
+    let expanded = {
+        let state = app.state::<AppState>();
+        let rt = state.inner.lock().unwrap();
+        if !rt.settings.island_mode {
+            return;
+        }
+        rt.island_expanded
+    };
+    let Some(metrics) = island::island_display_geometry() else { return };
+    let Some(win) = app.get_webview_window("island") else { return };
+    let rect = if expanded {
+        let cur = window_rect(&win);
+        island_rect(
+            app,
+            metrics,
+            ISLAND_PANEL_W_PT,
+            (cur.h / metrics.scale).max(ISLAND_PANEL_MIN_H_PT),
+        )
+    } else {
+        island_rect(app, metrics, metrics.notch_w + 2.0 * ISLAND_EAR_PT, metrics.bar_h)
+    };
+    if let Some(rect) = rect {
+        set_rect(&win, rect);
+    }
+    let _ = app.emit("island-geometry", serde_json::json!({ "metrics": metrics }));
 }
 
 /// Tray → "Check for Updates…": open Settings on the Updates pane.
@@ -1093,6 +1299,100 @@ async fn reset_app_permissions() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(jump::reset_app_permissions)
         .await
         .unwrap_or_else(|_| Err("permission_reset_failed".to_string()))
+}
+
+// ── Island commands ─────────────────────────────────────────────
+
+#[tauri::command]
+fn island_metrics() -> Option<island::IslandMetrics> {
+    #[cfg(target_os = "macos")]
+    {
+        island::island_display_geometry()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Grow the window to the expanded panel rect (the frontend supplies its
+/// desired content height in logical pt). Returns false when absent.
+#[tauri::command]
+fn island_expand(app: AppHandle, h_pt: f64, motion: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(metrics) = island::island_display_geometry() else {
+            return false;
+        };
+        let Some(win) = app.get_webview_window("island") else {
+            return false;
+        };
+        if !h_pt.is_finite() { return false; }
+        let h = h_pt.clamp(ISLAND_PANEL_MIN_H_PT, ISLAND_PANEL_MAX_H_PT.min(metrics.screen_h - 60.0));
+        let Some(target) = island_rect(&app, metrics, ISLAND_PANEL_W_PT, h) else {
+            return false;
+        };
+        let enabled = {
+            let state = app.state::<AppState>();
+            let mut rt = state.inner.lock().unwrap();
+            rt.island_expanded = true;
+            motion && animations_enabled(&rt.settings)
+        };
+        let _ = win.set_shadow(true);
+        animate(&win, window_rect(&win), target, enabled);
+        let _ = app.emit(
+            "island-geometry",
+            serde_json::json!({ "mode": "expanded", "w_pt": ISLAND_PANEL_W_PT, "h_pt": h }),
+        );
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, h_pt, motion);
+        false
+    }
+}
+
+/// Shrink back to the notch pill.
+#[tauri::command]
+fn island_collapse(app: AppHandle, motion: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(metrics) = island::island_display_geometry() else {
+            return false;
+        };
+        let Some(win) = app.get_webview_window("island") else {
+            return false;
+        };
+        let Some(target) =
+            island_rect(&app, metrics, metrics.notch_w + 2.0 * ISLAND_EAR_PT, metrics.bar_h)
+        else {
+            return false;
+        };
+        let enabled = {
+            let state = app.state::<AppState>();
+            let mut rt = state.inner.lock().unwrap();
+            rt.island_expanded = false;
+            motion && animations_enabled(&rt.settings)
+        };
+        animate(&win, window_rect(&win), target, enabled);
+        let _ = win.set_shadow(false);
+        let _ = app.emit("island-geometry", serde_json::json!({ "mode": "collapsed" }));
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, motion);
+        false
+    }
+}
+
+#[cfg_attr(target_os = "windows", allow(unused_variables))]
+#[tauri::command]
+fn set_island_mode(app: AppHandle, enabled: bool) -> Settings {
+    let mut next = settings_snapshot(&app);
+    next.island_mode = enabled;
+    commit_settings(&app, next)
 }
 
 #[tauri::command]
@@ -1827,11 +2127,32 @@ fn tray_menu(
     )
     .build(app)?;
     let quit_item = MenuItemBuilder::with_id("quit", if zh { "退出" } else { "Quit" }).build(app)?;
-    MenuBuilder::new(app)
+    let island_item: Option<tauri::menu::CheckMenuItem<tauri::Wry>> = {
+        #[cfg(target_os = "macos")]
+        {
+            Some(
+                tauri::menu::CheckMenuItemBuilder::with_id(
+                    "island-mode",
+                    if zh { "灵动岛模式" } else { "Dynamic Island" },
+                )
+                .checked(settings.island_mode)
+                .build(app)?,
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (zh, settings);
+            None
+        }
+    };
+    let mut menu = MenuBuilder::new(app)
         .item(&settings_item)
         .separator()
-        .item(&show_item)
-        .item(&hide_item)
+        .item(&show_item);
+    if let Some(item) = &island_item {
+        menu = menu.item(item);
+    }
+    menu.item(&hide_item)
         .item(&reset_item)
         .separator()
         .item(&refresh_item)
@@ -1885,6 +2206,11 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         "settings" => show_settings_window(app),
         "check-update" => open_update_pane(app),
         "show" => show_pet(app),
+        "island-mode" => {
+            let mut next = settings_snapshot(app);
+            next.island_mode = !next.island_mode;
+            commit_settings(app, next);
+        }
         "hide" => hide_pet_now(app),
         "reset" => reset_pet_position(app),
         "refresh" => {
@@ -2441,6 +2767,8 @@ pub fn dump_ax_rows(pid: u32) {
         terminal_rollouts: Vec<PathBuf>,
         window_titles: Vec<String>,
         rows: Vec<ax::Row>,
+        tree: String,
+        sidebar: String,
     }
     let terminal_tty = jump::focused_terminal_tty();
     let terminal_rollouts = terminal_tty.as_deref().map(agents::codex::terminal_rollouts).unwrap_or_default();
@@ -2453,6 +2781,8 @@ pub fn dump_ax_rows(pid: u32) {
         focused_conversation: ax::focused_conversation(&["com.openai.codex".into(), "com.deepseek.dsh".into(), "com.microsoft.VSCode".into(), "dev.zcode.app".into()]),
         window_titles: ax::window_titles(pid),
         rows: ax::rows(pid),
+        tree: ax::tree_dump(pid, 700),
+        sidebar: ax::subtree_dump_by_id(pid, "sidebar", 700),
     };
     match serde_json::to_string_pretty(&dump) {
         Ok(json) => println!("{json}"),
@@ -2541,6 +2871,10 @@ pub fn run() {
             get_settings,
             set_settings,
             reset_settings,
+            island_metrics,
+            island_expand,
+            island_collapse,
+            set_island_mode,
             get_settings_meta,
             get_custom_icons,
             save_custom_icon,
@@ -2634,6 +2968,13 @@ pub fn run() {
             }
 
             setup_tray(&handle)?;
+
+            // Island mode resumes at launch (macOS only; silently skipped
+            // when no notched display is attached).
+            #[cfg(target_os = "macos")]
+            if initial_settings.island_mode {
+                enter_island_mode(&handle, true);
+            }
 
             // React to user drags and display changes.
             let app_for_events = handle.clone();

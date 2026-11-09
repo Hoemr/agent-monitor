@@ -85,170 +85,11 @@ function defaultSettings() {
 
 var settings = defaultSettings();
 
-function resolveLanguage(value) {
-  if (value === 'zh') return 'zh';
-  if (value === 'en') return 'en';
-  return (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
-}
+function resolveLanguage(value) { return SessionUI.resolveLanguage(value); }
 
 // ── i18n ────────────────────────────────────────────────────────
 
-var I18N = {
-  en: {
-    sessionsTitle: 'Sessions',
-    empty: 'No active sessions',
-    emptyHint: 'Start a Codex, DSH, ZCode or Claude Code session',
-    sessions: 'sessions',
-    visibleCountTitle: 'Showing {v} of {t} sessions',
-    needAttention: 'need attention',
-    clear: 'Clear',
-    collapse: 'Collapse',
-    settings: 'Settings',
-    undo: 'Undo',
-    update: 'Update',
-    updateAvailable: 'Version {v} is available',
-    dismissed: 'Removed from the list.',
-    dragHint: 'Drag to move',
-    menuJump: 'Jump', menuRun: 'Run', menuWalk: 'Walk a bit',
-    menuBounce: 'Celebrate', menuSit: 'Sit down', menuTrip: 'Stumble',
-    menuStand: 'Stand still', menuCenter: 'Go to screen center',
-    menuPet: 'Head pat', menuNap: 'Nap', menuCelebrate: 'Celebrate',
-    notice: 'Notice: ',
-    newBadge: '{n} new',
-    newRowAria: 'Newly completed',
-    markAllRead: 'Mark all as read',
-    markRead: 'Mark as read',
-    rename: 'Rename conversation',
-    nameHint: 'Leave empty to restore the original name',
-    saveName: 'Save',
-    cancelName: 'Cancel',
-    pin: 'Pin conversation',
-    unpin: 'Unpin conversation',
-    terminal: 'Terminal',
-    modelUnknown: 'Model unknown',
-    modelTitle: 'Latest recorded model: {model}',
-    questionChip: '{n} waiting',
-    questionChipAria: '{n} sessions waiting for your answer',
-    questionAria: '{n} waiting for your answer',
-    dotQuestion: '{n} waiting for an answer',
-    dotNew: '{n} newly completed',
-    dotFailed: '{n} interrupted or failed',
-    collapsedAria: 'Agent Monitor, {n} sessions, {a} need attention, click to expand',
-    emptyAria: 'Agent Monitor, no active sessions, click to expand',
-    status: {
-      running: 'Running', waiting_input: 'Waiting for input',
-      waiting_approval: 'Waiting for approval', completed: 'Completed',
-      failed: 'Failed', idle: 'Idle', unknown: 'Unknown'
-    },
-    jumpHint: 'Click to open',
-    toast: {
-      opened_window: 'Opened the window — the exact session could not be selected.',
-      opened_session: '',
-      opened_terminal_tab: '',
-      activated_app: '',
-      activated_app_only: 'Activated the app — the window could not be identified.',
-      window_not_found: 'Activated the app — matching window not found.',
-      windows_focus_failed: 'Could not focus the target app. Open it and select the conversation manually.',
-      window_ambiguous: 'Matched more than one window — session not distinguished.',
-      deep_link_unverified: 'Session link not confirmed — opened the app instead.',
-      focus_unconfirmed: 'Focus requested, result could not be confirmed.',
-      needs_accessibility: 'Accessibility permission is required to locate windows.',
-      needs_automation: 'Automation permission is required to locate windows.',
-      app_not_found: 'The application is not installed or cannot be opened.',
-      target_invalid: 'The target is no longer available.',
-      workspace_missing: 'The workspace folder no longer exists.',
-      rollout_missing: 'The session log is gone.',
-      terminal_tab_not_found: 'No matching terminal tab was found.',
-      no_target: 'This task has no jump target.',
-      no_session_route: 'No session-level route is available.',
-      no_window_hint: 'No window title is available to match.',
-      ax_unavailable: 'Could not read the DSH sidebar (Accessibility permission or an unsupported app version).',
-      session_row_not_found: 'The session is not visible in the DSH sidebar — expand its project or scroll it into view.',
-      session_ambiguous: 'Several sessions share this title; project/time evidence could not tell them apart.',
-      session_click_unverified: 'Clicked the session row, but the window did not switch.',
-      project_not_found: 'The project was not found in the DSH sidebar.',
-      task_gone: 'The task no longer exists.',
-      grant: 'Grant permission'
-    }
-  },
-  zh: {
-    sessionsTitle: '会话',
-    empty: '暂无活跃会话',
-    emptyHint: '启动 Codex、DSH、ZCode 或 Claude Code 会话',
-    sessions: '个会话',
-    visibleCountTitle: '当前窗口显示 {v} 个，共 {t} 个会话',
-    needAttention: '个待处理',
-    clear: '清除',
-    collapse: '收起',
-    settings: '设置',
-    undo: '撤销',
-    update: '更新',
-    updateAvailable: '新版本 {v} 可用',
-    dismissed: '已从列表移除。',
-    dragHint: '拖动以移动',
-    menuJump: '跳一下', menuRun: '跑步', menuWalk: '走两步',
-    menuBounce: '撒个欢', menuSit: '坐下', menuTrip: '摔一跤',
-    menuStand: '站好', menuCenter: '回到屏幕中间',
-    menuPet: '摸摸头', menuNap: '打个盹', menuCelebrate: '庆祝一下',
-    notice: '提示：',
-    newBadge: '{n} 个新完成',
-    newRowAria: '新完成',
-    markAllRead: '全部标为已读',
-    markRead: '标为已读',
-    rename: '自定义会话名称',
-    nameHint: '留空可恢复原始名称',
-    saveName: '保存',
-    cancelName: '取消',
-    pin: '置顶此会话',
-    unpin: '取消置顶',
-    terminal: '终端',
-    modelUnknown: '模型未知',
-    modelTitle: '最近记录的模型：{model}',
-    questionChip: '{n} 待回答',
-    questionChipAria: '{n} 个会话等待你的回答',
-    questionAria: '{n} 个会话等待你的回答',
-    dotQuestion: '{n} 个会话等待回答',
-    dotNew: '{n} 个新完成',
-    dotFailed: '{n} 个已中断或失败',
-    collapsedAria: 'Agent Monitor，{n} 个会话，{a} 个待处理，点击展开',
-    emptyAria: 'Agent Monitor，暂无活跃会话，点击展开',
-    status: {
-      running: '运行中', waiting_input: '等待输入',
-      waiting_approval: '等待审批', completed: '完成',
-      failed: '失败', idle: '空闲', unknown: '未知'
-    },
-    jumpHint: '点击跳转',
-    toast: {
-      opened_window: '已打开对应窗口，无法定位具体会话。',
-      opened_session: '',
-      opened_terminal_tab: '',
-      activated_app: '',
-      activated_app_only: '已激活应用，无法识别对应窗口。',
-      window_not_found: '已激活应用，未找到匹配窗口。',
-      windows_focus_failed: '未能聚焦目标应用，请打开它并手动选择会话。',
-      window_ambiguous: '匹配到多个窗口，无法区分具体会话。',
-      deep_link_unverified: '未能确认会话链接，已改为打开应用。',
-      focus_unconfirmed: '已请求聚焦，结果未确认。',
-      needs_accessibility: '需要辅助功能权限才能定位窗口。',
-      needs_automation: '需要自动化权限才能定位窗口。',
-      app_not_found: '应用未安装或无法打开。',
-      target_invalid: '目标已不可用。',
-      workspace_missing: '工作区目录已不存在。',
-      rollout_missing: '会话日志已不存在。',
-      terminal_tab_not_found: '未找到匹配的终端标签页。',
-      no_target: '该任务没有可跳转目标。',
-      no_session_route: '没有可用的会话级跳转方式。',
-      no_window_hint: '没有可用于匹配的窗口标题。',
-      ax_unavailable: '无法读取 DSH 侧栏（需要辅助功能权限，或应用版本不兼容）。',
-      session_row_not_found: 'DSH 侧栏中没有该会话——请展开所属项目或滚动到可见位置。',
-      session_ambiguous: '存在同名会话，项目/时间信息不足以区分。',
-      session_click_unverified: '已点击会话行，但窗口没有切换。',
-      project_not_found: 'DSH 侧栏中找不到该项目。',
-      task_gone: '任务已不存在。',
-      grant: '去授权'
-    }
-  }
-};
+var I18N = SessionUI.I18N;
 
 var lang = resolveLanguage(settings.language);
 
@@ -327,9 +168,9 @@ var petStatePrevMode = null;
 //
 // Read state belongs to each completed task version. Opening the panel never
 // acknowledges it; a confirmed jump acknowledges only the clicked version.
-var COMPLETION_READ_KEY = MOCK ? "am-test-completion-reads-v2" : "am-completion-reads-v2";
-var completionReads = loadCompletionReads();
-saveCompletionReads();
+// The state itself lives in the shared SessionUI module (one truth for the
+// pet panel and the island panel); this file wires the pet-side UI reactions.
+SessionUI.reads.init(MOCK ? "am-test-completion-reads-v2" : undefined);
 var lastCompletionWatch = '';
 // Rust emits `jump-feedback` for every jump *and* returns the outcome, so one
 // click can deliver the same soft result twice. `degraded` / `unconfirmed`
@@ -341,10 +182,7 @@ var softOutcomeNotified = {};
 var lastUpdateVersion = null;
 var customIcons = { collapsed: null, hidden: null };
 
-var STATUS_GLYPH = {
-  running: '●', waiting_input: '!', waiting_approval: '!',
-  completed: '✓', failed: '✕', idle: '○', unknown: '?'
-};
+var STATUS_GLYPH = SessionUI.STATUS_GLYPH;
 
 // Reason keys that mean the jump target itself is permanently gone. When
 // `auto_dismiss_invalid` is on, these outcomes remove the row and offer Undo.
@@ -356,14 +194,7 @@ var INVALID_TARGET_REASONS = [
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-function relativeTime(epochSecs) {
-  if (!epochSecs) return '';
-  var diff = Math.max(0, Math.floor(Date.now() / 1000) - epochSecs);
-  if (diff < 60) return lang === 'zh' ? '刚刚' : 'now';
-  if (diff < 3600) return Math.floor(diff / 60) + 'm';
-  if (diff < 86400) return Math.floor(diff / 3600) + 'h';
-  return Math.floor(diff / 86400) + 'd';
-}
+function relativeTime(epochSecs) { return SessionUI.relativeTime(epochSecs, lang); }
 
 function levelClass(level) {
   var l = (level || 'L0').toLowerCase();
@@ -391,23 +222,8 @@ function isPanelOpen() {
   return petState.mode === 'expanded' || petState.mode === 'dragging';
 }
 
-function loadCompletionReads() {
-  try {
-    var stored = JSON.parse(localStorage.getItem(COMPLETION_READ_KEY));
-    if (stored && typeof stored.since === 'number' && stored.read &&
-        typeof stored.read === 'object' && !Array.isArray(stored.read)) return stored;
-  } catch (e) { /* storage unavailable: keep read state for this session */ }
-  return { since: nowSecs(), read: {} };
-}
-
-function saveCompletionReads() {
-  try { localStorage.setItem(COMPLETION_READ_KEY, JSON.stringify(completionReads)); }
-  catch (e) { /* storage unavailable: keep read state for this session */ }
-}
-
 function isNewCompletedTask(task) {
-  return task.status === 'completed' && typeof task.completion_id === 'string' &&
-    completionReads.read[task.id] !== task.completion_id;
+  return SessionUI.reads.isNew(task);
 }
 
 function unreadCompletionIds() {
@@ -423,22 +239,14 @@ function acknowledgeCompletion(task) {
 }
 
 function acknowledgeCompletions(tasks) {
-  tasks.forEach(function (task) {
-    if (task.status !== 'completed' || typeof task.completion_id !== 'string') return;
-    var current = (snapshot.tasks || []).find(function (item) { return item.id === task.id; });
-    if (!current || current.status !== 'completed' || current.completion_id !== task.completion_id) return;
-    completionReads.read[task.id] = task.completion_id;
-  });
-  saveCompletionReads();
+  if (!SessionUI.reads.acknowledge(tasks, snapshot.tasks)) return;
   updateNewIndicators();
   if (isPanelOpen()) renderList(snapshot.tasks || []);
 }
 
 function acknowledgeViewedCompletion(viewed) {
-  if (!viewed || typeof viewed.task_id !== 'string' || typeof viewed.completion_id !== 'string') return;
-  var task = (snapshot.tasks || []).find(function (item) { return item.id === viewed.task_id; });
-  if (!task || task.status !== 'completed' || viewed.completion_id !== task.completion_id) return;
-  acknowledgeCompletion({ id: task.id, status: 'completed', completion_id: viewed.completion_id });
+  var task = SessionUI.reads.viewedTask(viewed, snapshot.tasks);
+  if (task) acknowledgeCompletion(task);
 }
 
 function syncCompletionWatch() {
@@ -1007,14 +815,7 @@ function render(snapshotData) {
   });
   snapshot = snapshotData;
   // Seed historical answers once; later metadata updates cannot revive them.
-  (snapshot.tasks || []).forEach(function (task) {
-    if (task.status === 'completed' && task.completion_id &&
-        completionReads.read[task.id] === undefined &&
-        task.last_activity_secs <= completionReads.since) {
-      completionReads.read[task.id] = task.completion_id;
-    }
-  });
-  saveCompletionReads();
+  SessionUI.reads.seedHistorical(snapshot.tasks || []);
   if (hash === lastRenderedHash) return;
   lastRenderedHash = hash;
 
@@ -1124,18 +925,20 @@ function openNameEditor(task) {
 }
 
 function renderTask(task) {
-  var displayName = (snapshot.custom_names || {})[task.id] || task.title;
+  var info = SessionUI.taskInfo(task, snapshot.custom_names, settings, lang);
+  var displayName = info.title;
   var row = document.createElement('button');
   row.type = 'button';
-  row.className = 'task status-' + task.status + (task.status === 'waiting_input' ||
+  row.className = 'task session-row status-' + task.status + (task.status === 'waiting_input' ||
     task.status === 'waiting_approval' || task.status === 'failed' ? ' attention' : '');
   row.classList.toggle('pinned', !!task.pinned);
+  row.classList.toggle('has-summary', !!info.summary);
   row.setAttribute('role', 'listitem');
   row.dataset.taskId = task.id;
 
   var showLevel = settings.show_jump_level !== false;
   var showSummary = settings.show_summary !== false;
-  var statusLabel = t('status.' + task.status) || task.status;
+  var statusLabel = info.status;
   var levelText = showLevel ? (task.level || 'L0') : '';
   // Rows that completed since the user last looked carry a labelled green dot,
   // so "which one is new" is visible on the row itself, not only as a count.
@@ -1150,6 +953,9 @@ function renderTask(task) {
     (isNewRow ? '\n' + t('newRowAria') : '') +
     (levelText ? ' (' + levelText + ')' : '');
 
+  var avatar = SessionUI.avatar(task);
+  avatar.classList.add('task-avatar');
+  row.appendChild(avatar);
   var top = el('div', 'task-top');
   var pin = el('span', 'pin' + (task.pinned ? ' active' : ''));
   pin.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M9 3h6l-1 6 4 3v2H6v-2l4-3-1-6ZM12 14v7"/></svg>';
@@ -1171,26 +977,13 @@ function renderTask(task) {
   });
   top.appendChild(pin);
   if (isNewRow) {
-    var newMarker = el('span', 'new-dot');
-    newMarker.setAttribute('role', 'button');
-    newMarker.tabIndex = 0;
-    newMarker.setAttribute('aria-label', t('markRead') + ': ' + displayName);
-    newMarker.title = t('markRead');
-    var markRead = function (event) {
-      event.stopPropagation();
-      event.preventDefault();
-      acknowledgeCompletion(task);
-    };
-    newMarker.addEventListener('click', markRead);
-    newMarker.addEventListener('keydown', function (event) {
-      if (event.key === 'Enter' || event.key === ' ') markRead(event);
-    });
-    top.appendChild(newMarker);
+    top.appendChild(SessionUI.reads.marker(task, displayName, lang, acknowledgeCompletion));
   }
   var title = el('span', 'title', displayName);
   title.title = task.title;
   top.appendChild(title);
-  var rename = el("span", "rename", "✎");
+  var rename = el("span", "rename");
+  rename.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1 12-12a2.8 2.8 0 0 0-4-4L4 15v5Z"/></svg>';
   rename.setAttribute("role", "button");
   rename.tabIndex = 0;
   rename.title = t("rename");
@@ -1208,23 +1001,23 @@ function renderTask(task) {
 
   var status = el('div', 'status');
   status.appendChild(el('span', 'agent', task.agent_name));
-  if (task.host === 'vscode') status.appendChild(el('span', 'host', 'VSCode'));
-  if (task.host === 'terminal') status.appendChild(el('span', 'host', t('terminal')));
+  if (info.host) status.appendChild(el('span', 'host', info.host));
   if (task.origin === 'synthetic') status.appendChild(el('span', 'sim', 'SIM'));
-  status.appendChild(el('span', 'status-glyph', STATUS_GLYPH[task.status] || '?'));
-  status.appendChild(el('span', 'status-text', statusLabel));
-  var modelName = task.model || t('modelUnknown');
+  var phase = el('span', 'session-state');
+  phase.appendChild(el('span', 'status-glyph', STATUS_GLYPH[task.status] || '?'));
+  phase.appendChild(el('span', 'status-text', statusLabel));
+  var modelName = info.model;
   var model = el('span', 'task-model', modelName);
-  model.title = t('modelTitle').replace('{model}', modelName);
+  model.title = info.modelTitle;
   model.setAttribute('aria-label', model.title);
   status.appendChild(model);
-  if (showSummary && task.summary) status.appendChild(el('span', 'status-summary', task.summary));
+  if (showLevel) status.appendChild(el('span', levelClass(task.level) + ' session-level', task.level || 'L0'));
+  status.appendChild(phase);
 
   var meta = el('div', 'meta');
   var timeEl = el('span', 'time', relativeTime(task.last_activity_secs));
   timeEl.dataset.ts = String(task.last_activity_secs || 0);
   meta.appendChild(timeEl);
-  if (showLevel) meta.appendChild(el('span', levelClass(task.level), task.level || 'L0'));
 
   var dismiss = el('span', 'dismiss', '×');
   dismiss.setAttribute('role', 'button');
@@ -1238,6 +1031,7 @@ function renderTask(task) {
 
   row.appendChild(top);
   row.appendChild(status);
+  if (showSummary && task.summary) row.appendChild(el('span', 'status-summary', task.summary));
   row.appendChild(meta);
   row.appendChild(dismiss);
 
@@ -1962,10 +1756,10 @@ if (MOCK) {
     get collapseCalls() { return collapseCalls; },
     get restoreCalls() { return restoreCalls.slice(); },
     get customIcons() { return { collapsed: customIcons.collapsed, hidden: customIcons.hidden }; },
-    get completionReads() { return JSON.parse(JSON.stringify(completionReads)); },
+    get completionReads() { return SessionUI.reads.snapshot(); },
     get unreadCompletionIds() { return unreadCompletionIds(); },
     reloadCompletionReads: function () {
-      completionReads = loadCompletionReads();
+      SessionUI.reads.reload();
       updateNewIndicators();
       if (isPanelOpen()) renderList(snapshot.tasks || []);
     },
@@ -2087,6 +1881,14 @@ function migrateLegacySettings(done) {
 
 function boot() {
   listen('completion-viewed', function (event) { acknowledgeViewedCompletion(event.payload); });
+  // The island window (same origin) wrote the read state: adopt it, refresh
+  // the collapsed badge and re-sync the backend watch list. The shared
+  // module owns the storage-event plumbing; this callback is pet-side only.
+  SessionUI.reads.bind(function () {
+    updateNewIndicators();
+    if (isPanelOpen()) renderList(snapshot.tasks || []);
+    syncCompletionWatch();
+  });
   appEl.setAttribute('data-lang', lang);
   document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
   document.documentElement.setAttribute('data-animations', settings.animations || 'system');

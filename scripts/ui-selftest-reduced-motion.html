@@ -24,6 +24,14 @@ function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve,
     check('reduced motion suppresses JavaScript pulse classes', !t.attention.pulsing && !d.getElementById('badge').classList.contains('alerting'));
     check('reduced motion disables CSS breathing', w.getComputedStyle(d.getElementById('status-dot-question')).animationName === 'none');
     check('reduced motion never expands the task panel', t.petState.mode === 'collapsed');
+    t.applyPetState({ mode: 'expanded', edge: 'none' });
+    await sleep(30);
+    check('reduced motion suppresses the session panel reveal', w.getComputedStyle(d.getElementById('dragbar')).animationName === 'none');
+    check('reduced motion suppresses session row transitions', w.getComputedStyle(d.querySelector('.task')).transitionDuration === '0s');
+    await t.setSettings({ animations: 'always' });
+    check('Always explicitly enables the session panel reveal', w.getComputedStyle(d.getElementById('dragbar')).animationName === 'session-panel-arrive');
+    await t.setSettings({ animations: 'off' });
+    check('Off disables the session panel reveal', w.getComputedStyle(d.getElementById('dragbar')).animationName === 'none');
   } catch (error) { check('runtime exception: ' + error.message, false); }
   document.getElementById('results').textContent = (failed ? 'FAILED' : 'ALL PASS') + '\n' + results.join('\n');
 })();

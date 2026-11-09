@@ -122,6 +122,7 @@ function defaultSettings() {
     icon_style: 'builtin',
     pet_kind: 'classic',
     mascot_pack: 'nailong',
+    island_mode: false,
     toast_on_degraded: true,
     auto_dismiss_invalid: false,
     legacy_imported: false
@@ -242,8 +243,7 @@ var I18N = {
     },
     loading: 'Loading…',
     error: {
-      title: 'Settings are only available inside Agent Monitor',
-      hint: 'In a browser, add ?mock=1 to the URL to preview this window.'
+      title: 'Settings are only available inside Agent Monitor'
     },
     general: {
       pane: 'General',
@@ -252,7 +252,6 @@ var I18N = {
       langSystem: 'System', langEn: 'English', langZh: '中文',
       appearance: { label: 'Appearance' },
       appSystem: 'System', appLight: 'Light', appDark: 'Dark',
-      appearanceNote: 'Language applies to the menu bar, the pet and this window. Appearance follows the system unless overridden.',
       displayHeading: 'Display',
       showSummary: { label: 'Show summaries', desc: 'Show the latest activity summary on the second line.' },
       showJump: { label: 'Show jump level', desc: 'Show the L0–L3 jump-level hint on each row.' },
@@ -282,7 +281,6 @@ var I18N = {
       collection: 'Collection',
       refresh: { label: 'Refresh interval' },
       refreshAuto: 'Auto', refresh3: '3 s', refresh5: '5 s', refresh10: '10 s',
-      refreshNote: 'File events are the main source. Auto polls every 5 s while the panel is visible and every 30 s when it is hidden or idle.',
       retention: { label: 'Keep finished sessions' },
       retention1: '1 h', retention6: '6 h', retention24: '24 h', retention72: '3 d',
       retention168: '1 week', retention720: '1 month',
@@ -297,11 +295,16 @@ var I18N = {
       window: 'Window',
       rows: { label: 'Visible rows' },
       rows3: '3', rows5: '5', rows8: '8',
-      rowsNote: 'The expanded panel is 44 + rows × 64 + 26 pt tall, limited to the visible screen area.',
       reset: { label: 'Reset Monitoring…', confirm: 'Restore the Monitoring section to defaults?' }
     },
     pet: {
       pane: 'Desktop Pet',
+      islandSection: 'Dynamic Island',
+      island: {
+        label: 'Dynamic Island mode',
+        desc: 'Show a notch panel at the top of the screen: agent status dots, hover to expand sessions, click a row to jump. The pet keeps running alongside it.'
+      },
+      islandNote: 'Hugs the notch on notched displays; elsewhere it floats at the top centre of the main display. The pet keeps its own show/hide controls.',
       gestures: 'Hover',
       hover: { label: 'Expand delay', desc: 'How long the pointer rests before the pet opens.' },
       collapse: { label: 'Collapse delay', desc: 'Grace period after the pointer leaves.' },
@@ -324,7 +327,6 @@ var I18N = {
       iconSection: 'Icon',
       iconStyle: { label: 'Icon style' },
       iconBuiltin: 'Built-in', iconCustom: 'Custom',
-      iconStyleNote: 'Custom uses your own images; empty slots fall back to the collapsed icon, then the built-in glyph. Built-in always uses the three-bar glyph.',
       iconNoCustomNote: 'No custom image yet — the built-in glyph is used until you add one.',
       iconSpec: 'Square image: 144 × 144 px for the collapsed icon, 64 × 64 px for the edge tab. Transparent background, PNG/JPEG/WebP, max 2 MB.',
       iconCollapsed: { label: 'Collapsed icon', desc: 'Shown when the pet is collapsed or snapped.' },
@@ -342,7 +344,7 @@ var I18N = {
       kindSection: 'Pet style',
       kind: { label: 'Presentation' },
       kindClassic: 'Capsule', kindMascot: 'Mascot',
-      kindNote: 'The mascot is a roaming Shimeji-style pet driven by the Rust engine: it walks, falls, can be dragged and thrown, and reacts to task state. The capsule keeps the classic status beads.',
+      kindNote: 'The mascot roams the screen: it walks, can be dragged and thrown, and reacts to task state. The capsule keeps the classic status beads.',
       pack: { label: 'Mascot pack' },
       packNote: 'Import a Shimeji-ee pack folder (conf/*.xml + img/*.png). Built-in packs: Agent Cat, Byte Slime.',
       packBuiltin: 'Built-in',
@@ -368,7 +370,7 @@ var I18N = {
       setup: 'Permissions & setup',
       appLocation: 'App location',
       appLocationDesc: 'The bundle this window is running from — the copy System Settings must contain.',
-      staleGrant: 'Checked in System Settings but still “Not granted”? The grant may belong to an old ad-hoc build or another copy. Current local builds keep a fixed signing identity. Press “Reset this app’s permissions…” to clear the old record, add this build with “Reveal App”, and quit and reopen Agent Monitor if needed.',
+      staleGrant: 'Granted in System Settings but still showing “Not granted”? Press “Reset this app’s permissions…” to clear the old record, add the current build again via “Reveal App”, then quit and reopen Agent Monitor.',
       status: {
         accessibility: 'Accessibility',
         automation: 'Automation',
@@ -427,12 +429,11 @@ var I18N = {
         step1: 'Open System Settings → Privacy & Security → Accessibility, then add Agent Monitor.app with + — or drag it in from Finder after “Reveal App”.',
         step2: 'Come back here and press “Check again” until Accessibility and Window access read “Granted”.',
         step3: 'The first jump that needs System Events triggers macOS’s Automation prompt — allow Agent Monitor to control System Events.',
-        adhoc: 'Local builds now use a persistent signing certificate. Moving from an old ad-hoc build requires one new grant; subsequent builds using the same certificate retain their identity.',
         appPath: 'App bundle: {path}'
       },
       agents: {
         heading: 'Agent capabilities',
-        desc: 'Maximum jump level, install/run state and session-route support, as measured on this Mac.',
+        desc: 'Jump level, install/run state and session-route support for each agent.',
         installed: 'Installed',
         notInstalled: 'Not installed',
         running: 'Running',
@@ -448,9 +449,9 @@ var I18N = {
       versionSection: 'Version',
       currentVersion: 'Current version',
       releases: 'Releases',
-      releasesNote: 'Release notes and downloads are published on GitHub. Opening the page is left to your browser; the URL above is shown for copying.',
+      releasesNote: 'Release notes and downloads are published on GitHub.',
       localBuild: 'Locally maintained version',
-      localBuildNote: 'This version is updated locally to preserve its saved permissions. Online replacement is disabled. Use the local build script when updating.',
+      localBuildNote: 'This copy is maintained locally; in-app updates are turned off.',
       autoChecks: 'Automatic checks',
       autoCheck: {
         label: 'Check for updates automatically',
@@ -483,11 +484,7 @@ var I18N = {
       pane: 'Data',
       storage: 'Storage',
       dataDir: 'Data folder',
-      settingsPath: 'Settings file',
-      petPath: 'Pet placement file',
-      dismissedPath: 'Dismissed tasks file',
       version: 'Version',
-      settingsVersion: 'Settings format',
       notAvailable: 'Unavailable',
       actions: 'Actions',
       openData: { label: 'Open Data Folder', desc: 'Reveal the folder in Finder.', button: 'Open' },
@@ -503,12 +500,10 @@ var I18N = {
         desc: 'Pet position and dismissed tasks are kept.',
         confirm: 'Restore every setting to its default?'
       },
-      legacy: 'Settings were imported from an older version.',
       corrupt: 'The settings file could not be read. A backup was kept at {path}.'
     }
   },
-  zh: {
-    window: { title: '设置' },
+  zh: {    window: { title: '设置' },
     nav: {
       label: '设置分区',
       general: '通用', attention: '提醒', monitor: '监控',
@@ -532,8 +527,7 @@ var I18N = {
     },
     loading: '正在载入…',
     error: {
-      title: '设置仅在 Agent Monitor 中可用',
-      hint: '在浏览器中给网址加上 ?mock=1 即可预览此窗口。'
+      title: '设置仅在 Agent Monitor 中可用'
     },
     general: {
       pane: '通用',
@@ -542,7 +536,6 @@ var I18N = {
       langSystem: '跟随系统', langEn: 'English', langZh: '中文',
       appearance: { label: '外观' },
       appSystem: '跟随系统', appLight: '浅色', appDark: '深色',
-      appearanceNote: '语言应用于菜单栏、桌宠和此窗口。默认跟随系统外观，也可以单独指定。',
       displayHeading: '显示',
       showSummary: { label: '显示摘要', desc: '在第二行显示最新的活动摘要。' },
       showJump: { label: '显示跳转等级', desc: '在每行显示 L0–L3 的跳转等级提示。' },
@@ -572,7 +565,6 @@ var I18N = {
       collection: '采集',
       refresh: { label: '刷新间隔' },
       refreshAuto: '自动', refresh3: '3 秒', refresh5: '5 秒', refresh10: '10 秒',
-      refreshNote: '文件事件是主要来源。自动模式在面板可见时每 5 秒轮询，隐藏或空闲时每 30 秒。',
       retention: { label: '保留已结束会话' },
       retention1: '1 小时', retention6: '6 小时', retention24: '24 小时', retention72: '3 天',
       retention168: '1 周', retention720: '1 个月',
@@ -587,11 +579,16 @@ var I18N = {
       window: '窗口',
       rows: { label: '可见行数' },
       rows3: '3', rows5: '5', rows8: '8',
-      rowsNote: '展开高度 = 44 + 行数 × 64 + 26 pt，并受可见屏幕区域限制。',
       reset: { label: '恢复监控默认设置…', confirm: '将“监控”恢复为默认设置？' }
     },
     pet: {
       pane: '桌宠',
+      islandSection: '灵动岛',
+      island: {
+        label: '灵动岛模式',
+        desc: '在屏幕顶部显示灵动岛：常驻各 Agent 状态点，悬停展开会话列表，点行直接跳转。桌宠照常运行，两者可同时存在。'
+      },
+      islandNote: '有刘海的屏幕贴住刘海；没有刘海时在主屏顶部中央悬浮显示。桌宠的显示与隐藏仍由托盘菜单控制。',
       gestures: '悬停',
       hover: { label: '展开延迟', desc: '指针悬停多久后展开桌宠。' },
       collapse: { label: '收起延迟', desc: '指针离开后的宽限时间。' },
@@ -614,7 +611,6 @@ var I18N = {
       iconSection: '图标',
       iconStyle: { label: '图标样式' },
       iconBuiltin: '内置', iconCustom: '自定义',
-      iconStyleNote: '自定义使用你自己的图片；槽位留空时回退为收起态图标，再回退为内置图案。内置始终使用三横线图标。',
       iconNoCustomNote: '尚未添加自定义图片，添加前仍使用内置图标。',
       iconSpec: '正方形图片：收起态 144 × 144 像素，边缘标签 64 × 64 像素；透明背景，支持 PNG/JPEG/WebP，最大 2 MB。',
       iconCollapsed: { label: '收起态图标', desc: '桌宠收起或吸附后显示。' },
@@ -632,7 +628,7 @@ var I18N = {
       kindSection: '宠物形态',
       kind: { label: '呈现方式' },
       kindClassic: '经典胶囊', kindMascot: '活动宠物',
-      kindNote: '活动宠物是 Rust 引擎驱动的 Shimeji 式宠物：会走动、掉落、可拖拽抛掷，并对任务状态做出反应。经典胶囊保留状态珠显示。',
+      kindNote: '活动宠物会在屏幕上走动、可拖拽抛掷，并对任务状态做出反应。经典胶囊保留状态珠显示。',
       pack: { label: '宠物包' },
       packNote: '导入 Shimeji-ee 格式的宠物包文件夹（conf/*.xml + img/*.png）。内置：Agent Cat、Byte Slime。',
       packBuiltin: '内置',
@@ -658,7 +654,7 @@ var I18N = {
       setup: '权限与配置',
       appLocation: 'App 位置',
       appLocationDesc: '当前窗口正在运行的 App 副本——也就是系统设置里需要包含的那一份。',
-      staleGrant: '系统设置里勾选了但仍显示未授权？可能是授权仍绑定旧 ad-hoc 版本或另一个副本。当前本机构建使用固定签名身份。点“重新授权”清除旧记录，并用“显示 App”把当前版本加进辅助功能列表；必要时退出并重开 Agent Monitor。',
+      staleGrant: '系统设置里已勾选但仍显示“未授权”？点“重置本应用授权…”清除旧记录，用“显示 App”重新添加当前版本，必要时退出并重开 Agent Monitor。',
       status: {
         accessibility: '辅助功能',
         automation: '自动化',
@@ -717,12 +713,11 @@ var I18N = {
         step1: '打开“系统设置”→“隐私与安全性”→“辅助功能”，点“+”加入 Agent Monitor.app；或先点“显示 App”再从访达拖入。',
         step2: '回到这里点“重新检查”，直到“辅助功能”和“窗口读取”都显示“已授权”。',
         step3: '第一次需要 System Events 的跳转会触发 macOS 自动化授权弹窗——允许 Agent Monitor 控制 System Events。',
-        adhoc: '本机构建现已使用固定签名证书。从旧 ad-hoc 版本切换时需授权一次；后续使用同一证书重建时，应用身份保持不变。',
         appPath: 'App 位置：{path}'
       },
       agents: {
         heading: 'Agent 能力',
-        desc: '本机实测的最高跳转等级、安装/运行状态与会话级跳转支持。',
+        desc: '各 Agent 的跳转等级、安装/运行状态与会话级跳转支持。',
         installed: '已安装',
         notInstalled: '未安装',
         running: '运行中',
@@ -738,9 +733,9 @@ var I18N = {
       versionSection: '版本',
       currentVersion: '当前版本',
       releases: '发布页面',
-      releasesNote: '发布说明与下载包都发布在 GitHub。打开网页请使用浏览器；上方地址可直接复制。',
+      releasesNote: '发布说明与下载包都发布在 GitHub。',
       localBuild: '本机维护版本',
-      localBuildNote: '这个版本通过本机更新来保留已授予的权限，不使用在线覆盖。后续更新请使用本项目的打包脚本。',
+      localBuildNote: '此版本由本机维护，应用内更新已停用。',
       autoChecks: '自动检查',
       autoCheck: {
         label: '自动检查更新',
@@ -773,11 +768,7 @@ var I18N = {
       pane: '数据',
       storage: '存储',
       dataDir: '数据文件夹',
-      settingsPath: '设置文件',
-      petPath: '桌宠位置文件',
-      dismissedPath: '已忽略任务文件',
       version: '版本',
-      settingsVersion: '设置格式版本',
       notAvailable: '不可用',
       actions: '操作',
       openData: { label: '打开数据文件夹', desc: '在访达中显示该文件夹。', button: '打开' },
@@ -793,7 +784,6 @@ var I18N = {
         desc: '桌宠位置和已忽略任务不受影响。',
         confirm: '将所有设置恢复为默认值？'
       },
-      legacy: '设置已从旧版本迁移。',
       corrupt: '设置文件无法读取，备份保存在 {path}。'
     }
   }
@@ -1651,7 +1641,7 @@ function buildIconSection() {
     })
   ]);
   var slotsCard = card([iconSlotRow('collapsed'), iconSlotRow('hidden')]);
-  var notes = [i('pet.iconStyleNote'), i('pet.iconSpec')];
+  var notes = [i('pet.iconSpec')];
   if (settings.icon_style === 'custom' && !state.icons.collapsed && !state.icons.hidden) {
     notes.push(i('pet.iconNoCustomNote'));
   }
@@ -2061,7 +2051,6 @@ function buildJumpGuide() {
   var body = h('div', { class: 'guide-body' }, [
     h('p', { class: 'guide-intro', text: i('jump.guide.intro') }),
     steps,
-    h('p', { class: 'guide-note', text: i('jump.guide.adhoc') }),
     h('p', { class: 'guide-note guide-note-warn', text: i('jump.staleGrant') }),
     path ? h('p', { class: 'guide-note guide-path', text: i('jump.guide.appPath', { path: shortPath(path) }) }) : null
   ]);
@@ -2483,7 +2472,7 @@ function buildGeneral() {
         { value: 'dark', labelKey: 'general.appDark' }
       ]
     })
-  ]), i('general.appearanceNote')));
+  ])));
 
   frag.appendChild(section('general.displayHeading', card([
     switchRow({
@@ -2566,7 +2555,7 @@ function buildMonitor() {
         { value: 720, labelKey: 'monitor.retention720' }
       ]
     })
-  ]), [i('monitor.refreshNote'), i('monitor.retentionNote')]));
+  ]), i('monitor.retentionNote')));
 
   frag.appendChild(section('monitor.agents', card([
     switchRow({ key: 'enabled_agents.codex', agent: 'codex', titleKey: 'monitor.codex.label', descKey: 'monitor.codex.desc', checked: settings.enabled_agents.codex }),
@@ -2587,7 +2576,7 @@ function buildMonitor() {
         { value: 8, labelKey: 'monitor.rows8' }
       ]
     })
-  ]), i('monitor.rowsNote')));
+  ])));
 
   frag.appendChild(h('div', { class: 'pane-actions' }, [resetFooter('monitor', 'monitor.reset')]));
   return frag;
@@ -2596,6 +2585,16 @@ function buildMonitor() {
 function buildPet() {
   var settings = state.settings;
   var frag = document.createDocumentFragment();
+  if (state.meta && state.meta.platform === 'macos') {
+    frag.appendChild(section('pet.islandSection', card([
+      switchRow({
+        key: 'island_mode',
+        titleKey: 'pet.island.label',
+        descKey: 'pet.island.desc',
+        checked: settings.island_mode
+      })
+    ]), i('pet.islandNote')));
+  }
   frag.appendChild(buildIconSection());
   frag.appendChild(buildMascotSection());
   frag.appendChild(section('pet.gestures', card([
@@ -2679,16 +2678,11 @@ function buildData() {
   var frag = document.createDocumentFragment();
 
   var notes = [];
-  if (meta.legacy_imported) notes.push(i('data.legacy'));
   if (meta.corrupt_backup) notes.push(i('data.corrupt', { path: meta.corrupt_backup }));
 
   frag.appendChild(section('data.storage', card([
     pathRow('data.dataDir', meta.data_dir),
-    pathRow('data.settingsPath', meta.settings_path),
-    pathRow('data.petPath', meta.pet_path),
-    pathRow('data.dismissedPath', meta.dismissed_path),
-    infoRow('data.version', meta.app_version || i('data.notAvailable')),
-    infoRow('data.settingsVersion', meta.version === undefined ? i('data.notAvailable') : String(meta.version))
+    infoRow('data.version', meta.app_version || i('data.notAvailable'))
   ]), notes.length ? notes : null));
 
   var actions = [];
@@ -2829,7 +2823,6 @@ function renderPane() {
   if (state.bootError) {
     paneBodyEl.appendChild(h('div', { class: 'error-state' }, [
       h('div', { class: 'error-title', text: i('error.title') }),
-      h('div', { class: 'error-hint', text: i('error.hint') }),
       h('div', { class: 'error-hint', text: state.bootError })
     ]));
     return;

@@ -5,8 +5,8 @@
 //! Degradation happens only on a known capability limit; a session id is never
 //! reused to guess another session.
 //!
-//! All OS interaction is through `open` and `osascript` (System Events), which
-//! is what Apple exposes without private APIs. No retry loops, no polling.
+//! OS navigation uses native Accessibility, bundle activation and supported
+//! links. Asynchronous changes are confirmed by bounded read-back waits.
 
 use crate::model::*;
 use serde::Serialize;
@@ -28,6 +28,11 @@ pub const DSH_SIDEBAR_HOST_REF: &str = "dsh-sidebar";
 const DSH_APP_NAME: &str = "DeepSeek Harness";
 const DSH_BUNDLE_ID: &str = "com.deepseek.dsh";
 const DSH_PROCESS_NEEDLE: &str = "DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness";
+/// ZCode's window title is static. Session evidence comes from its indexed
+/// identity and the active conversation heading, never app focus alone.
+const ZCODE_BUNDLE_ID: &str = "dev.zcode.app";
+const ZCODE_APP_NAME: &str = "ZCode";
+static ZCODE_NAVIGATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const VSCODE_BUNDLE_ID: &str = "com.microsoft.VSCode";
 const VSCODE_APP_NAME: &str = "Code";
 const VSCODE_PROCESS_NEEDLE: &str = "Visual Studio Code.app/Contents/MacOS/";
@@ -160,8 +165,8 @@ const AGENT_SPECS: [AgentSpec; 4] = [
         bundle_id: "dev.zcode.app",
         app_name: "ZCode",
         ax_process: "ZCode",
-        max_level: JumpLevel::L1,
-        notes: "the app exits immediately on this host; activation cannot be verified",
+        max_level: JumpLevel::L3,
+        notes: "native task search by uniquely named indexed session; verify the active conversation heading",
         deep_link: false,
     },
     AgentSpec {
@@ -560,6 +565,10 @@ pub fn jump(task: &TaskRecord, peers: &[TaskRecord]) -> JumpOutcome {
         return JumpOutcome::failed(&task.id, requested, "no_target");
     }
 
+    if task.target.bundle_id.as_deref() == Some(ZCODE_BUNDLE_ID) {
+        return jump_zcode_session(task);
+    }
+
     let max = task.capability.max_level;
     let mut first_error = None;
 
@@ -572,7 +581,6 @@ pub fn jump(task: &TaskRecord, peers: &[TaskRecord]) -> JumpOutcome {
             Attempt::NotPossible(reason) => first_error = Some(reason),
         }
     }
-    // L2 — specific window.
     if max >= JumpLevel::L2 {
         match try_window_level(task) {
             Attempt::Done(outcome) => return outcome,
@@ -756,6 +764,81 @@ fn try_session_level(task: &TaskRecord, unique_title: bool) -> Attempt {
         }
         Attempt::NotPossible(_) => Attempt::NotPossible("deep_link_unverified".into()),
     }
+}
+
+fn zcode_result_matches(label: &str, target: &str, titles: &[String]) -> bool {
+    let label = crate::agents::zcode::normalized_title(label);
+    let candidates: Vec<_> = titles.iter().filter(|title| {
+        label == **title || label.strip_prefix(title.as_str()).map(|tail| tail.starts_with(' ')).unwrap_or(false)
+    }).collect();
+    // A mention in a message snippet is not the result's title. Prefix
+    // collisions with another indexed title are ambiguous, not a match.
+    candidates.len() == 1 && candidates[0] == target
+}
+
+fn zcode_failure(task: &TaskRecord, reason: &str, activated: bool) -> JumpOutcome {
+    let mut outcome = JumpOutcome::failed(&task.id, task.level, reason);
+    if activated {
+        outcome.kind = JumpOutcomeKind::Unconfirmed;
+        outcome.achieved = JumpLevel::L1;
+    }
+    apply_permission_hint(outcome, Some(reason))
+}
+
+fn jump_zcode_session(task: &TaskRecord) -> JumpOutcome {
+    let _navigation = match ZCODE_NAVIGATION.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => return zcode_failure(task, "jump_in_progress", false),
+        Err(std::sync::TryLockError::Poisoned(_)) => return zcode_failure(task, "jump_unavailable", false),
+    };
+    if !crate::ax::is_trusted() { return zcode_failure(task, "needs_accessibility", false); }
+    let Some(id) = task.session_id.as_deref().filter(|id| !id.is_empty()) else {
+        return zcode_failure(task, "no_target", false);
+    };
+    let target = match crate::agents::zcode::session_jump_target(id) {
+        Ok(target) => target,
+        Err(reason) => return zcode_failure(task, &reason, false),
+    };
+    if crate::ax::running_pid(ZCODE_BUNDLE_ID).is_none()
+        && !Command::new("open").args(["-b", ZCODE_BUNDLE_ID]).status().map(|status| status.success()).unwrap_or(false)
+    {
+        return zcode_failure(task, "app_not_found", false);
+    }
+    let Some(pid) = poll_until(VERIFY_TIMEOUT_MS, || crate::ax::running_pid(ZCODE_BUNDLE_ID)) else {
+        return zcode_failure(task, "focus_unconfirmed", false);
+    };
+    if poll_until(VERIFY_TIMEOUT_MS, || crate::ax::zcode_ready(pid).then_some(())).is_none() {
+        return zcode_failure(task, "zcode_search_unavailable", true);
+    }
+    if !crate::ax::zcode_activate(pid)
+        || poll_until(VERIFY_TIMEOUT_MS, || (crate::ax::foreground_pid(ZCODE_BUNDLE_ID) == Some(pid)).then_some(())).is_none()
+    {
+        return zcode_failure(task, "focus_unconfirmed", false);
+    }
+    if !crate::ax::zcode_open_search(pid) {
+        return zcode_failure(task, "zcode_search_unavailable", true);
+    }
+    // Use the existing bounded UI verification wait. There is one result
+    // selection, no coordinate guessing and no workspace-link fallback.
+    let ready = poll_until(VERIFY_TIMEOUT_MS, || crate::ax::zcode_search_ready(pid).then_some(()));
+    if ready.is_none() || !crate::ax::zcode_search_tasks(pid, &target.title) {
+        return zcode_failure(task, "zcode_search_unavailable", true);
+    }
+    let result = poll_until(VERIFY_TIMEOUT_MS, || {
+        crate::ax::zcode_search_results(pid, &target.title)?.into_iter()
+            .find(|result| zcode_result_matches(&result.label, &target.title, &target.indexed_titles))
+    });
+    let Some(result) = result else { return zcode_failure(task, "zcode_session_not_found", true); };
+    if !crate::ax::zcode_select_result(pid, &target.title, &result) {
+        return zcode_failure(task, "zcode_session_unconfirmed", true);
+    }
+    let confirmed = poll_until(VERIFY_TIMEOUT_MS, || {
+        (crate::ax::foreground_pid(ZCODE_BUNDLE_ID) == Some(pid)
+            && crate::ax::zcode_active_title(pid).map(|title| crate::agents::zcode::normalized_title(&title) == target.title).unwrap_or(false))
+            .then_some(())
+    });
+    if confirmed.is_some() { session_jump_outcome(task, ZCODE_APP_NAME.into()) }
+    else { zcode_failure(task, "zcode_session_unconfirmed", true) }
 }
 
 fn try_window_level(task: &TaskRecord) -> Attempt {
@@ -2150,6 +2233,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn zcode_overlapping_navigation_stops_before_ui_actions() {
+        let _navigation = ZCODE_NAVIGATION.lock().unwrap();
+        let task = task(JumpLevel::L3, JumpLevel::L3);
+        let outcome = jump_zcode_session(&task);
+        assert_eq!(outcome.reason_key, "jump_in_progress");
+        assert_eq!(outcome.achieved, JumpLevel::L0);
+    }
+
+    #[test]
+    fn zcode_search_result_needs_an_unambiguous_title_anchor() {
+        let titles = vec!["Plan A".into(), "Plan B".into()];
+        assert!(zcode_result_matches("Plan A summary CodePath 5m", "Plan A", &titles));
+        assert!(!zcode_result_matches("Plan B mentions Plan A CodePath 5m", "Plan A", &titles));
+        assert!(!zcode_result_matches("Plan A... CodePath 5m", "Plan A", &titles));
+        let prefixes = vec!["Plan A".into(), "Plan A extended".into()];
+        assert!(!zcode_result_matches("Plan A extended CodePath 5m", "Plan A", &prefixes));
+        assert!(!zcode_result_matches("Plan A extended CodePath 5m", "Plan A extended", &prefixes));
+    }
+
+    #[test]
+    fn zcode_failure_never_claims_a_session_jump() {
+        let task = task(JumpLevel::L3, JumpLevel::L3);
+        let outcome = zcode_failure(&task, "zcode_session_unconfirmed", true);
+        assert_eq!(outcome.kind, JumpOutcomeKind::Unconfirmed);
+        assert_eq!(outcome.achieved, JumpLevel::L1);
+    }
+
+    #[test]
     fn session_reference_requires_the_exact_id() {
         assert!(reference_has_session("vscode-webview://chat/index.html?session=abc-123&view=1", "abc-123"));
         assert!(reference_has_session("/local/abc-123", "abc-123"));
@@ -3220,4 +3331,6 @@ mod tests {
         );
         assert_eq!(pid_for_app_path(ps, "ZCode.app/Contents/MacOS/"), None);
     }
+
+
 }

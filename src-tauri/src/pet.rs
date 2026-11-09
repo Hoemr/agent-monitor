@@ -12,7 +12,7 @@ use std::path::PathBuf;
 // Logical (point) design constants. The caller multiplies by the target
 // screen's scale factor before touching the window.
 pub const COLLAPSED_SIZE: f64 = 72.0;
-pub const EXPANDED_WIDTH: f64 = 360.0;
+pub const EXPANDED_WIDTH: f64 = 460.0;
 pub const HEADER_HEIGHT: f64 = 44.0;
 pub const ROW_HEIGHT: f64 = 64.0;
 pub const FOOTER_HEIGHT: f64 = 26.0;

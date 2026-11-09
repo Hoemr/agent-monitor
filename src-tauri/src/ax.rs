@@ -14,6 +14,8 @@
 //!   document order, with the text runs and their global screen frames. Later
 //!   outlines in the window (e.g. Chromium chat content) are ignored;
 //! * [`click`] — synthetic left click at a rectangle's centre, cursor restored.
+//! * ZCode task search — owned-renderer controls, exact result identifiers and
+//!   active conversation H1 read-back; no screen-coordinate session matching.
 //!
 //! Everything is best effort: a missing grant, an app that is not running or a
 //! window without an outline simply yields an empty result, never a panic.
@@ -85,6 +87,89 @@ pub struct Row {
     pub frame: Option<Rect>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct TaskSearchResult {
+    pub reference: String,
+    pub label: String,
+}
+
+pub fn foreground_pid(bundle: &str) -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    { platform::foreground_application().filter(|(_, _, id)| id == bundle).map(|(pid, _, _)| pid as u32) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = bundle; None }
+}
+
+pub fn running_pid(bundle: &str) -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        objc2::rc::autoreleasepool(|_| {
+            let apps = objc2_app_kit::NSRunningApplication::runningApplicationsWithBundleIdentifier(&objc2_foundation::NSString::from_str(bundle));
+            if apps.len() != 1 { return None; }
+            let pid = apps.firstObject()?.processIdentifier();
+            (pid > 0).then_some(pid as u32)
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = bundle; None }
+}
+
+pub fn zcode_activate(pid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    { platform::zcode_activate(pid) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = pid; false }
+}
+
+pub fn zcode_active_title(pid: u32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    { platform::zcode_active_title(pid) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = pid; None }
+}
+
+pub fn zcode_open_search(pid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    { platform::zcode_open_search(pid) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = pid; false }
+}
+
+pub fn zcode_ready(pid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    { platform::zcode_ready(pid) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = pid; false }
+}
+
+pub fn zcode_search_tasks(pid: u32, query: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    { platform::zcode_search_tasks(pid, query) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (pid, query); false }
+}
+
+pub fn zcode_search_ready(pid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    { platform::zcode_search_ready(pid) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = pid; false }
+}
+
+pub fn zcode_search_results(pid: u32, query: &str) -> Option<Vec<TaskSearchResult>> {
+    #[cfg(target_os = "macos")]
+    { platform::zcode_search_results(pid, query) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (pid, query); None }
+}
+
+pub fn zcode_select_result(pid: u32, query: &str, result: &TaskSearchResult) -> bool {
+    #[cfg(target_os = "macos")]
+    { platform::zcode_select_result(pid, query, result) }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (pid, query, result); false }
+}
+
 impl Row {
     /// Trimmed, non-empty text runs in document order.
     pub fn text_strings(&self) -> Vec<String> {
@@ -143,6 +228,21 @@ pub fn rows(pid: u32) -> Vec<Row> {
     platform::rows(pid)
 }
 
+/// Bounded AX tree dump (role, identifier refs, short title, frame per node).
+/// Backs `agent-monitor --ax-rows <pid>`: jump work can be verified without
+/// clicking anything.
+#[cfg(target_os = "macos")]
+pub fn tree_dump(pid: u32, max_nodes: usize) -> String {
+    platform::tree_dump(pid, max_nodes)
+}
+
+/// Dump the subtree of the first element whose DOM identifier equals
+/// `dom_id` (e.g. "sidebar"). Backs `agent-monitor --ax-rows <pid>`.
+#[cfg(target_os = "macos")]
+pub fn subtree_dump_by_id(pid: u32, dom_id: &str, max_nodes: usize) -> String {
+    platform::subtree_dump_by_id(pid, dom_id, max_nodes)
+}
+
 /// Synthetic left click at the centre of `rect`. Returns whether the events
 /// could be posted (the caller must verify the result via AX read-back).
 #[cfg(target_os = "macos")]
@@ -181,7 +281,8 @@ pub fn click(_rect: Rect) -> bool {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{FocusedConversation, Rect, Row, TextRun};
+    use super::{FocusedConversation, Rect, Row, TaskSearchResult, TextRun};
+    use std::collections::VecDeque;
     use std::ffi::{c_char, c_void, CStr, CString};
     use std::time::Duration;
 
@@ -233,6 +334,12 @@ mod platform {
             attribute: CfString,
             value: *mut CfType,
         ) -> i32;
+        fn AXUIElementSetAttributeValue(
+            element: AxElement,
+            attribute: CfString,
+            value: CfType,
+        ) -> i32;
+        fn AXUIElementPerformAction(element: AxElement, action: CfString) -> i32;
         fn AXValueGetValue(value: CfType, the_type: u32, value_ptr: *mut c_void) -> u8;
         fn AXValueGetTypeID() -> usize;
     }
@@ -244,6 +351,8 @@ mod platform {
         fn CFGetTypeID(cf: CfType) -> usize;
         fn CFStringGetTypeID() -> usize;
         fn CFArrayGetTypeID() -> usize;
+        fn CFNumberGetTypeID() -> usize;
+        fn CFNumberGetValue(number: CfType, kind: isize, value: *mut c_void) -> u8;
         fn CFURLGetTypeID() -> usize;
         fn CFURLGetString(url: CfType) -> CfString;
         fn CFStringCreateWithCString(
@@ -266,6 +375,7 @@ mod platform {
         static kCFTypeDictionaryKeyCallBacks: CFDictionaryCallBacks;
         static kCFTypeDictionaryValueCallBacks: CFDictionaryCallBacks;
         static kCFBooleanTrue: *const c_void;
+        static kCFBooleanFalse: *const c_void;
         fn CFDictionaryCreate(
             alloc: CfAllocator,
             keys: *const CfType,
@@ -393,6 +503,37 @@ mod platform {
     fn app_element(pid: u32) -> Option<Cf> {
         // Safety: AXUIElementCreateApplication returns +1 for a live pid.
         Cf::new(unsafe { AXUIElementCreateApplication(pid as i32) })
+    }
+
+    /// Ask an Electron/Chromium host to build its accessibility tree. These
+    /// apps render AX lazily: without a client setting `AXManualAccessibility`
+    /// (Chromium ≥ 2021; `AXEnhancedUserInterface` is the legacy spelling) the
+    /// outline/table containers never appear and `rows()` returns empty.
+    /// Verified needed for ZCode; harmless for hosts that already expose AX
+    /// (DSH ignores the attribute).
+    fn set_manual_accessibility(pid: u32) -> bool {
+        let Some(app) = app_element(pid) else {
+            return false;
+        };
+        let mut ok = true;
+        for name in ["AXManualAccessibility", "AXEnhancedUserInterface"] {
+            let Some(attribute) = cf_string(name) else {
+                ok = false;
+                continue;
+            };
+            // Safety: app is a valid AXUIElement; kCFBooleanTrue is a global.
+            let error = unsafe {
+                AXUIElementSetAttributeValue(
+                    app.as_ptr(),
+                    attribute.as_ptr(),
+                    kCFBooleanTrue,
+                )
+            };
+            if error != 0 {
+                ok = false;
+            }
+        }
+        ok
     }
 
     fn copy_attribute(element: AxElement, name: &str) -> Option<Cf> {
@@ -559,6 +700,193 @@ mod platform {
         copy_attribute(app, "AXWindows")
             .map(|value| array_items(&value))
             .unwrap_or_default()
+    }
+
+    // ZCode selectors stay inside its own renderer. Embedded browser pages
+    // are separate AXWebAreas and must never supply search controls or titles.
+    fn find_node(root: AxElement, max_depth: usize, test: impl Fn(AxElement) -> bool) -> Option<Cf> {
+        let mut queue = VecDeque::from([(retain(root)?, 0)]);
+        let mut budget = MAX_NODES;
+        while let Some((node, depth)) = queue.pop_front() {
+            if budget == 0 { break; }
+            budget -= 1;
+            if test(node.as_ptr()) { return Some(node); }
+            if depth >= max_depth || (depth > 0 && attribute_string(node.as_ptr(), "AXRole").as_deref() == Some("AXWebArea")) { continue; }
+            queue.extend(children(node.as_ptr()).into_iter().map(|child| (child, depth + 1)));
+        }
+        None
+    }
+
+    fn has_id(node: AxElement, id: &str) -> bool {
+        attribute_string(node, "AXIdentifier").as_deref() == Some(id)
+            || attribute_string(node, "AXDOMIdentifier").as_deref() == Some(id)
+    }
+
+    fn zcode_renderer(pid: u32) -> Option<Cf> {
+        if !is_trusted() { return None; }
+        let app = app_element(pid)?;
+        set_manual_accessibility(pid);
+        let window = copy_attribute(app.as_ptr(), "AXMainWindow")?;
+        find_node(window.as_ptr(), 20, |node| {
+            if attribute_string(node, "AXRole").as_deref() != Some("AXWebArea") { return false; }
+            let mut refs = Vec::new(); references(node, &mut refs);
+            refs.iter().any(|value| value.starts_with("file://") && value.contains("/ZCode.app/Contents/Resources/app.asar/out/renderer/index.html"))
+        })
+    }
+
+    fn command_center(renderer: AxElement) -> Option<Cf> {
+        find_node(renderer, 5, |node| {
+            attribute_string(node, "AXRole").as_deref() == Some("AXGroup")
+                && matches!(attribute_string(node, "AXDescription").as_deref(), Some("命令面板" | "Command palette"))
+        })
+    }
+
+    fn perform_action(node: AxElement, action: &str) -> bool {
+        let Some(action) = cf_string(action) else { return false; };
+        let error = unsafe { AXUIElementPerformAction(node, action.as_ptr()) };
+        if error != 0 { eprintln!("zcode AXPress failed: {error}"); }
+        error == 0
+    }
+
+    fn press(node: AxElement) -> bool { perform_action(node, "AXPress") }
+
+    fn set_value(node: AxElement, name: &str, value: CfType) -> bool {
+        let Some(name) = cf_string(name) else { return false; };
+        let error = unsafe { AXUIElementSetAttributeValue(node, name.as_ptr(), value) };
+        if error != 0 { eprintln!("zcode AX attribute set failed: {error}"); }
+        error == 0
+    }
+
+    fn zcode_is_frontmost(pid: u32) -> bool {
+        foreground_application().map(|(actual, _, bundle)| actual as u32 == pid && bundle == "dev.zcode.app").unwrap_or(false)
+    }
+
+    fn task_scope(center: AxElement) -> Option<Cf> {
+        find_node(center, 6, |node| {
+            attribute_string(node, "AXRole").as_deref() == Some("AXRadioButton")
+                && matches!(attribute_string(node, "AXTitle").as_deref(), Some("任务" | "Tasks"))
+        })
+    }
+
+    fn selected(node: AxElement) -> bool {
+        copy_attribute(node, "AXSelected").map(|value| value.as_ptr() == unsafe { kCFBooleanTrue }).unwrap_or(false)
+    }
+
+    fn search_input(center: AxElement) -> Option<Cf> {
+        find_node(center, 6, |node| attribute_string(node, "AXRole").as_deref() == Some("AXComboBox"))
+    }
+
+    fn task_results_list(center: AxElement, query: &str) -> Option<Cf> {
+        if !selected(task_scope(center)?.as_ptr()) { return None; }
+        if attribute_string(search_input(center)?.as_ptr(), "AXValue").as_deref() != Some(query) { return None; }
+        find_node(center, 6, |node| {
+            attribute_string(node, "AXRole").as_deref() == Some("AXList")
+        })
+    }
+
+    pub fn zcode_active_title(pid: u32) -> Option<String> {
+        let renderer = zcode_renderer(pid)?;
+        // A modal search is not an active-conversation read-back.
+        if command_center(renderer.as_ptr()).is_some() { return None; }
+        let column = find_node(renderer.as_ptr(), 16, |node| has_id(node, "conversation-column"))?;
+        let heading = find_node(column.as_ptr(), 8, |node| {
+            if attribute_string(node, "AXRole").as_deref() != Some("AXHeading") { return false; }
+            let Some(value) = copy_attribute(node, "AXValue") else { return false; };
+            if !type_id_matches(&value, unsafe { CFNumberGetTypeID() }) { return false; }
+            let mut level: i64 = 0;
+            unsafe { CFNumberGetValue(value.as_ptr(), 4, (&mut level as *mut i64).cast()) != 0 && level == 1 }
+        })?;
+        element_text(heading.as_ptr())
+    }
+
+    pub fn zcode_activate(pid: u32) -> bool {
+        if zcode_renderer(pid).is_none() { return false; }
+        let Some(app) = app_element(pid) else { return false; };
+        let Some(window) = copy_attribute(app.as_ptr(), "AXMainWindow") else { return false; };
+        let minimized = copy_attribute(window.as_ptr(), "AXMinimized")
+            .map(|value| value.as_ptr() == unsafe { kCFBooleanTrue }).unwrap_or(false);
+        if minimized && !set_value(window.as_ptr(), "AXMinimized", unsafe { kCFBooleanFalse }) { return false; }
+        set_value(app.as_ptr(), "AXFrontmost", unsafe { kCFBooleanTrue })
+            && perform_action(window.as_ptr(), "AXRaise")
+    }
+
+    pub fn zcode_ready(pid: u32) -> bool {
+        let Some(renderer) = zcode_renderer(pid) else { return false; };
+        command_center(renderer.as_ptr()).is_some() || find_node(renderer.as_ptr(), 16, |node| {
+            attribute_string(node, "AXRole").as_deref() == Some("AXButton")
+                && matches!(attribute_string(node, "AXDescription").as_deref(), Some("搜索" | "Search" | "切换侧边栏" | "Toggle sidebar"))
+        }).is_some()
+    }
+
+    pub fn zcode_open_search(pid: u32) -> bool {
+        if !zcode_is_frontmost(pid) { return false; }
+        let Some(renderer) = zcode_renderer(pid) else { return false; };
+        if command_center(renderer.as_ptr()).is_some() { return true; }
+        let sidebar = find_node(renderer.as_ptr(), 16, |node| has_id(node, "sidebar"));
+        let visible = sidebar.as_ref().and_then(|node| element_rect(node.as_ptr())).map(|rect| rect.w > 1.0).unwrap_or(false);
+        if !visible {
+            let toggle = find_node(renderer.as_ptr(), 16, |node| {
+                attribute_string(node, "AXRole").as_deref() == Some("AXButton")
+                    && matches!(attribute_string(node, "AXDescription").as_deref(), Some("切换侧边栏" | "Toggle sidebar"))
+            });
+            if !toggle.map(|node| press(node.as_ptr())).unwrap_or(false) { return false; }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let Some(renderer) = zcode_renderer(pid) else { return false; };
+        let Some(sidebar) = find_node(renderer.as_ptr(), 16, |node| has_id(node, "sidebar")) else { return false; };
+        find_node(sidebar.as_ptr(), 12, |node| {
+            attribute_string(node, "AXRole").as_deref() == Some("AXButton")
+                && matches!(attribute_string(node, "AXDescription").as_deref(), Some("搜索" | "Search"))
+        }).map(|node| press(node.as_ptr())).unwrap_or(false)
+    }
+
+    pub fn zcode_search_ready(pid: u32) -> bool {
+        let Some(renderer) = zcode_renderer(pid) else { return false; };
+        let Some(center) = command_center(renderer.as_ptr()) else { return false; };
+        task_scope(center.as_ptr()).is_some() && search_input(center.as_ptr()).is_some()
+    }
+
+    pub fn zcode_search_tasks(pid: u32, query: &str) -> bool {
+        if !zcode_is_frontmost(pid) { return false; }
+        let Some(renderer) = zcode_renderer(pid) else { return false; };
+        let Some(center) = command_center(renderer.as_ptr()) else { return false; };
+        let Some(scope) = task_scope(center.as_ptr()) else { return false; };
+        if !selected(scope.as_ptr()) && !press(scope.as_ptr()) { return false; }
+        let Some(input) = search_input(center.as_ptr()) else { return false; };
+        let Some(value) = cf_string(query) else { return false; };
+        set_value(input.as_ptr(), "AXFocused", unsafe { kCFBooleanTrue })
+            && set_value(input.as_ptr(), "AXValue", value.as_ptr())
+    }
+
+    pub fn zcode_search_results(pid: u32, query: &str) -> Option<Vec<TaskSearchResult>> {
+        let renderer = zcode_renderer(pid)?;
+        let center = command_center(renderer.as_ptr())?;
+        let list = task_results_list(center.as_ptr(), query)?;
+        let mut queue = VecDeque::from([list]);
+        let mut results = Vec::new();
+        let mut budget = 2_000;
+        while let Some(node) = queue.pop_front() {
+            if budget == 0 { break; } budget -= 1;
+            let reference = attribute_string(node.as_ptr(), "AXDOMIdentifier")
+                .filter(|id| !id.is_empty())
+                .or_else(|| attribute_string(node.as_ptr(), "AXIdentifier"))
+                .unwrap_or_default();
+            if attribute_string(node.as_ptr(), "AXRole").as_deref() == Some("AXStaticText") && !reference.is_empty() {
+                if let Some(label) = element_text(node.as_ptr()) { results.push(TaskSearchResult { reference, label }); }
+            } else { queue.extend(children(node.as_ptr())); }
+        }
+        Some(results)
+    }
+
+    pub fn zcode_select_result(pid: u32, query: &str, result: &TaskSearchResult) -> bool {
+        if !zcode_is_frontmost(pid) { return false; }
+        let Some(renderer) = zcode_renderer(pid) else { return false; };
+        let Some(center) = command_center(renderer.as_ptr()) else { return false; };
+        let Some(list) = task_results_list(center.as_ptr(), query) else { return false; };
+        // React keys preserve this exact result's AX identifier across layout
+        // and relative-time changes. Never click a remembered screen position.
+        find_node(list.as_ptr(), 6, |node| has_id(node, &result.reference))
+            .map(|node| press(node.as_ptr())).unwrap_or(false)
     }
 
     fn references(element: AxElement, out: &mut Vec<String>) {
@@ -728,6 +1056,9 @@ mod platform {
         let Some(app) = app_element(pid) else {
             return Vec::new();
         };
+        // Electron/Chromium hosts build their AX tree lazily; the nudge is
+        // idempotent and ignored by hosts that already expose AX.
+        set_manual_accessibility(pid);
         for window in windows(app.as_ptr()) {
             let mut out = Vec::new();
             let mut budget = MAX_NODES;
@@ -736,6 +1067,108 @@ mod platform {
             }
         }
         Vec::new()
+    }
+
+    /// Bounded AX tree dump (role, identifier refs, short title, frame per
+    /// node). Backs `agent-monitor --ax-rows <pid>`.
+    pub fn tree_dump(pid: u32, max_nodes: usize) -> String {
+        let Some(app) = app_element(pid) else {
+            return String::new();
+        };
+        set_manual_accessibility(pid);
+        let mut out = String::new();
+        let mut budget = max_nodes;
+        for window in windows(app.as_ptr()) {
+            dump_tree_node(window.as_ptr(), 0, &mut budget, &mut out);
+        }
+        out
+    }
+
+    /// Dump the subtree of the first element whose DOM identifier equals
+    /// `dom_id` (e.g. "sidebar"). Backs `agent-monitor --ax-rows <pid>`.
+    pub fn subtree_dump_by_id(pid: u32, dom_id: &str, max_nodes: usize) -> String {
+        let Some(app) = app_element(pid) else {
+            return String::new();
+        };
+        set_manual_accessibility(pid);
+        let mut out = String::new();
+        let mut budget = max_nodes;
+        for window in windows(app.as_ptr()) {
+            let mut marker = String::new();
+            if dump_subtree_by_id(window.as_ptr(), dom_id, &mut budget, &mut marker) {
+                out.push_str(&marker);
+                return out;
+            }
+        }
+        out
+    }
+
+    fn dump_subtree_by_id(
+        element: AxElement,
+        dom_id: &str,
+        budget: &mut usize,
+        out: &mut String,
+    ) -> bool {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let mut refs = Vec::new();
+        references(element, &mut refs);
+        if refs.iter().any(|r| r == dom_id) {
+            dump_tree_node(element, 0, budget, out);
+            return true;
+        }
+        for child in children(element) {
+            if dump_subtree_by_id(child.as_ptr(), dom_id, budget, out) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn dump_tree_node(element: AxElement, depth: usize, budget: &mut usize, out: &mut String) {
+        if *budget == 0 || depth > 32 {
+            out.push_str(&"  ".repeat(depth.min(32)));
+            out.push_str("… (budget/depth exhausted)\n");
+            return;
+        }
+        *budget -= 1;
+        let role = attribute_string(element, "AXRole").unwrap_or_default();
+        let title = element_text(element)
+            .map(|t| truncate_for_dump(&t, 60))
+            .unwrap_or_default();
+        let description = attribute_string(element, "AXDescription")
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| attribute_string(element, "AXHelp"))
+            .map(|t| truncate_for_dump(&t, 80))
+            .unwrap_or_default();
+        let frame = element_rect(element)
+            .map(|r| format!("{:.0},{:.0} {:.0}x{:.0}", r.x, r.y, r.w, r.h))
+            .unwrap_or_default();
+        let mut refs = Vec::new();
+        references(element, &mut refs);
+        let selected = copy_attribute(element, "AXSelected")
+            .map(|value| value.as_ptr() == unsafe { kCFBooleanTrue });
+        out.push_str(&format!(
+            "{}{} id={:?} title={:?} desc={:?} selected={selected:?} frame={frame}\n",
+            "  ".repeat(depth),
+            role,
+            refs.join(","),
+            title,
+            description
+        ));
+        for child in children(element) {
+            dump_tree_node(child.as_ptr(), depth + 1, budget, out);
+        }
+    }
+
+    fn truncate_for_dump(text: &str, max: usize) -> String {
+        let one_line: String = text
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .collect();
+        one_line.chars().take(max).collect()
     }
 
     pub fn click(rect: Rect) -> bool {

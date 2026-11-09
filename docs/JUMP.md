@@ -59,7 +59,7 @@ never opens System Settings by itself and never resets TCC.
 | 3 | DSH / DeepSeek Harness | `dsh://open/<session-id>` attempt | Window title unchanged (`Training-free DRE literature positioning audit`); main-process source shows only `dsh://open` / `dsh://open/` → `focusPrimaryWindow()` | **degraded / L1** (`activated_app_only`) — no session route exists |
 | 4 | DSH / DeepSeek Harness | `open -b com.deepseek.dsh` | Frontmost = DeepSeek Harness | **L1 works**, declared max = L1 |
 | 5 | Claude Code / VSCode | L2 raise window for `~/Paper/DropDPO-Confidence` | Window 1 `arr_submission.tex — DropDPO-Confidence` → `results.md — DropDPO-Confidence`; frontmost = Code | **success / L2** (`opened_window`) |
-| 6 | ZCode | `open -b dev.zcode.app`, `open -a ZCode`, direct binary | `open` exits 0, no process, no window, no crash report; Electron 41 | **blocked** — cannot verify any level on this host |
+| 6 | ZCode / macOS (2026-11-08) | Session ID → current unique indexed title → native command-center task search → exact AX result action | Independently checked active H1 after A → B in the same CodePath workspace, then EEG in another workspace; 1.8–2.4 s | **success / L3**. Duplicate/unnamed sessions fail clearly; no workspace-link fallback |
 | 7 | Claude Code CLI / Terminal | L3 tab selection by tty | No `claude` CLI installed; project scope now treats Claude Code as VSCode-hosted, so this path is retained but unused | **未执行 / not routed** |
 
 ## Notes that changed the design
@@ -76,9 +76,7 @@ never opens System Settings by itself and never resets TCC.
   records are modelled as VSCode-hosted sessions (`host = "vscode"`, target =
   VSCode window by workspace). The terminal tab resolver remains in `jump.rs` but
   no Claude task is routed to Terminal.
-* **ZCode cannot be verified on this host** because the app exits immediately.
-  Its index data is still displayed with real statuses; jump degrades/reports
-  unconfirmed instead of pretending.
+* **ZCode needs session evidence, not just foreground focus.** Its workspace URL does not carry a task ID. The macOS route now looks up the requested ID in the live index, requires a unique title, selects a matching native task-search control, and confirms the active conversation H1. The search stays inside ZCode’s own renderer, excluding embedded browser pages. Rapid overlapping switches are rejected rather than interleaved.
 * Terminal tab selection is implemented (`resolve_terminal_tty` + AppleScript by
   tty) but cannot be verified until a CLI agent is installed and running in
   Terminal.
@@ -105,8 +103,10 @@ $BIN --jump 'dsh:<session-id>'
 $BIN --jump 'claude-code:<session-uuid>'
 osascript -e 'tell application "System Events" to tell process "Code" to get title of window 1'
 
-# ZCode launch probe (documents the blocker)
-open -b dev.zcode.app; sleep 3; pgrep -fl 'ZCode.app/Contents/MacOS/ZCode' || echo "no ZCode process"
+# ZCode exact-session probe (signed bundled CLI; leaves the resident app running)
+$BIN --jump 'zcode:<session-id>'
+# Independently check the actual conversation header. Avoid manual switching
+# during the probe; foreground app focus alone is not session evidence.
 ```
 
 ## Setup, permissions and self-check (Settings → Jump)
@@ -119,10 +119,7 @@ the app can still show sessions, but it cannot locate/raise the right window:
 | **Accessibility** | Privacy & Security → Accessibility | reading window titles / raising a window (`AXRaise`) |
 | **Automation** (→ System Events) | Privacy & Security → Automation | the `osascript` calls that drive System Events |
 
-The packaged app is **ad-hoc signed** (`codesign -dv` shows `Signature=adhoc`).
-macOS keys TCC grants to the code signature, so after rebuilding/replacing
-`Agent Monitor.app` the grants may be forgotten — re-add the new copy once. This
-is the most common reason "jump suddenly stopped working".
+Local builds use the saved persistent signing identity. Rebuild with `scripts/sign-mac.py`; preserve the bundle identifier and designated requirement so existing TCC grants remain valid. ZCode’s native task-search route requires Accessibility; it does not use System Events or a workspace URL.
 
 ### Settings → Jump now contains a guided setup
 
@@ -133,7 +130,7 @@ is the most common reason "jump suddenly stopped working".
   dragged into the Accessibility list;
 * a three-step first-run guide and a note about ad-hoc re-authorisation;
 * the per-agent capability table (max level, installed/running, deep-link
-  support — Codex/DSH session routes, VSCode project windows, ZCode blocked)
+  support — Codex/DSH/ZCode session routes and VSCode project windows)
   so declared limitations are visible in the app instead of only in this document.
 
 ### Command `get_jump_diagnostics`

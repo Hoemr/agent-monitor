@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Monitor Island</title>
+  <link rel="stylesheet" href="session-tokens.css">
+  <link rel="stylesheet" href="session-panel.css">
+  <link rel="stylesheet" href="island.css">
+</head>
+<body>
+  <div id="island" class="mode-collapsed">
+    <button id="ears" type="button" aria-expanded="false" aria-controls="panel">
+      <span class="ear ear-left" id="activity"></span>
+      <span class="ear ear-right" id="attention"></span>
+    </button>
+    <section id="panel" inert aria-labelledby="panel-title">
+      <header class="panel-head">
+        <div class="heading-line"><h1 id="panel-title"></h1><span id="panel-meta"></span></div>
+        <div id="panel-status" role="status"></div>
+      </header>
+      <div id="rows" role="list" tabindex="-1"></div>
+      <footer id="panel-foot"><span id="foot-count"></span><span id="foot-hint"></span></footer>
+    </section>
+  </div>
+  <script src="session-ui.js"></script>
+  <script src="island.js"></script>
+</body>
+</html>
