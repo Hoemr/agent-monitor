@@ -2767,7 +2767,9 @@ pub fn dump_ax_rows(pid: u32) {
         terminal_rollouts: Vec<PathBuf>,
         window_titles: Vec<String>,
         rows: Vec<ax::Row>,
+        #[cfg(target_os = "macos")]
         tree: String,
+        #[cfg(target_os = "macos")]
         sidebar: String,
     }
     let terminal_tty = jump::focused_terminal_tty();
@@ -2781,7 +2783,9 @@ pub fn dump_ax_rows(pid: u32) {
         focused_conversation: ax::focused_conversation(&["com.openai.codex".into(), "com.deepseek.dsh".into(), "com.microsoft.VSCode".into(), "dev.zcode.app".into()]),
         window_titles: ax::window_titles(pid),
         rows: ax::rows(pid),
+        #[cfg(target_os = "macos")]
         tree: ax::tree_dump(pid, 700),
+        #[cfg(target_os = "macos")]
         sidebar: ax::subtree_dump_by_id(pid, "sidebar", 700),
     };
     match serde_json::to_string_pretty(&dump) {
