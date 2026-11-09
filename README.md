@@ -69,21 +69,23 @@ unknown-publisher/SmartScreen prompt. [Installation details](docs/releases/v0.9.
 
 ## Related projects and workflows
 
-The projects below overlap in agent monitoring and session management. This
-table summarizes the workflows described in their own documentation, reviewed
-on 2026-11-09.
+✅ Documented feature · ❌ Not listed in the linked documentation · Checked 2026-11-09
 
-| Project | Documented focus | Workflow to consider |
-|---|---|---|
-| **Agent Monitor** | Existing local sessions across Codex, Claude Code, DSH, ZCode and Antigravity, with a desktop pet, macOS island and graded navigation | Mixed desktop and VSCode workflows, including DSH and ZCode, with visible session state and verified macOS jumps |
-| [Agent Island](https://agent-island.dev/) | Session status, usage quotas and report cards on macOS and Windows | Keeping agent activity and usage information together |
-| [AgentBar](https://github.com/michalstrnadel/AgentBar) | Hook-driven agent status and permission actions through a macOS menu bar or notch interface | Answering agent permission requests from a persistent desktop surface |
-| [Vibe Notch, formerly Claude Island](https://github.com/farouqaldori/vibe-notch) | Notch notifications, approvals and conversation history for Claude Code CLI sessions | A Claude Code CLI workflow centred on the MacBook notch |
-| [Agent Deck](https://github.com/asheshgoplani/agent-deck) | Organizing and operating coding-agent sessions through a terminal UI and tmux | Launching, grouping and resuming agents from the terminal |
+| Feature | **Agent Monitor** | [Agent Island](https://agent-island.dev/) | [AgentBar](https://github.com/michalstrnadel/AgentBar) | [Vibe Notch](https://github.com/farouqaldori/vibe-notch) | [Agent Deck](https://github.com/asheshgoplani/agent-deck) |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Codex sessions | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Claude Code sessions | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Built-in DeepSeek Harness / DSH | ✅ | ❌ | ❌ | ❌ | ✅¹ |
+| Built-in ZCode | ✅ | ❌ | ❌ | ❌ | ❌ |
+| macOS Dynamic Island / notch UI | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Standalone animated desktop pet | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Native Windows GUI | ✅ | ✅ | ✅² | ❌ | ❌ |
+| Usage quotas / cost dashboard | ❌ | ✅ | ✅ | ❌ | ✅ |
+| Terminal workspace / tmux TUI | ❌ | ❌ | ❌ | ❌ | ✅ |
 
-Agent Monitor's focus is **existing local sessions, DSH/ZCode integration,
-verified navigation and a choice of desktop pet or island**. The integration
-table below specifies the hosts and jump levels available in this release.
+¹ Agent Deck integrates the DSH CLI. Agent Monitor reads DSH desktop sessions.
+² AgentBar's separate [Windows edition](https://github.com/michalstrnadel/AgentBar-Windows)
+is documented as an unverified pre-release.
 
 ## Supported agents and session navigation
 
