@@ -1,7 +1,7 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><title>Island acceptance</title>
 <style>body{margin:24px;background:#25252a;color:white;font:13px system-ui}iframe{border:0;vertical-align:top}#pet{width:460px;height:650px}#island{width:320px;height:30px}pre{white-space:pre-wrap}</style>
-</head><body><iframe id="pet" src="../src/index.html?mock=1&lang=zh&appearance=dark"></iframe>
+</head><body><iframe id="pet"></iframe>
 <iframe id="island"></iframe><pre id="results">PENDING</pre>
 <script>
 var results = [], failures = 0;
@@ -21,6 +21,8 @@ function fixture() {
 }
 function mockBridge() {
   window.handlers = {}; window.calls = [];
+  window.testErrors = [];
+  window.addEventListener('error',function(event){testErrors.push(event.message+' ('+event.filename+':'+event.lineno+')');});
   window.__TAURI__ = {
     event:{listen:function(name,fn){ (handlers[name]=handlers[name]||[]).push(fn); return Promise.resolve(function(){}); }},
     core:{invoke:function(cmd,args){
@@ -40,12 +42,14 @@ var testSnapshot = fixture();
 (async function(){
   try {
     var frame=document.getElementById('island'), pet=document.getElementById('pet');
+    var petLoaded=new Promise(function(resolve){pet.addEventListener('load',resolve,{once:true});pet.src='../src/index.html?mock=1&lang=zh&appearance=dark';});
     var source=await (await fetch('../src/island.html')).text();
     var base=new URL('../src/',location.href).href;
     source=source.replace('<head>','<head><base href="'+base+'"><script>('+mockBridge.toString()+')();<\/script>');
-    frame.srcdoc=source;
-    await sleep(700);
+    var islandLoaded=new Promise(function(resolve){frame.addEventListener('load',resolve,{once:true});frame.srcdoc=source;});
+    await Promise.all([petLoaded,islandLoaded]);
     var w=frame.contentWindow,d=w.document,pw=pet.contentWindow;
+    if (!w.islandEl) throw new Error('Island script did not initialize: '+w.testErrors.join(' | '));
     // Deterministic read state: reset (not just remove) so persisted
     // acknowledgements from earlier runs of either selftest cannot leak in.
     pw.SessionUI.reads.reset();
