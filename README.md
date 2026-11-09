@@ -1,5 +1,11 @@
 # Agent Monitor — desktop pet for multi-agent coding sessions
 
+Version **0.9.0** adds a compact, translucent **Dynamic Island** on macOS,
+shared pet-panel styling and verified ZCode session navigation.
+Download the macOS app or Windows installer/portable ZIP from
+[GitHub Releases](https://github.com/Hoemr/agent-monitor/releases/latest).
+See the [v0.9.0 release notes](docs/releases/v0.9.0.md).
+
 Version **0.8.1** adds a Windows 10/11 x64 build for native terminal and VSCode
 sessions: [Windows setup and limitations](docs/WINDOWS.md). Download the
 installer or portable ZIP from [GitHub Releases](https://github.com/Hoemr/agent-monitor/releases).
