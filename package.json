@@ -10,5 +10,5 @@
     "jump-probe": "bash scripts/jump-probe.sh",
     "bundle:mac": "bash scripts/bundle-mac.sh"
   },
-  "description": "Lightweight macOS and Windows desktop pet that monitors Codex, DSH, ZCode, Claude Code and Antigravity sessions."
+  "description": "Local AI coding agent monitor for Codex, Claude Code, DeepSeek Harness, ZCode and Antigravity. Desktop pets on macOS/Windows, a macOS Dynamic Island, and verified macOS session jumps."
 }
